@@ -1,0 +1,52 @@
+# proxyd 配置示例
+# 订阅列表：可同时配置多个机场，type 默认 auto（自动嗅探内容格式）
+subscriptions:
+  - name: airport-a
+    url: https://example.com/api/v1/client/subscribe?token=xxx
+    # type: auto | clash | share
+  - name: airport-b
+    url: https://example2.com/link/base64
+
+listen: 127.0.0.1              # 映射端口监听地址
+port-range: [42000, 42100]     # 每个可用节点占一个端口（闭区间）
+mixed-port: 41999              # 主端口：走全局规则模式（rule/global/direct），默认区间前一位
+# auto-port: 41998             # 自动选优端口：固定走全部可用节点中延迟最低者（url-test）；0/不填=关闭
+# system-proxy: false          # true 时 serve 启动后把系统代理指向主端口，退出时自动恢复
+
+refresh-interval: 24h          # 订阅刷新周期（默认一天一次；可随时在 Web 控制台手动刷新）
+health-interval: 5m            # 节点可用性检测周期
+health-url: http://www.gstatic.com/generate_204
+health-timeout: 5s
+exclude: "到期|剩余流量|套餐|官网|订阅"   # 按节点名过滤机场信息节点
+
+# ---- 以下为 Clash 语义的全局配置，作用于主端口 ----
+mode: rule                     # rule | global | direct
+log-level: info
+external-controller: 127.0.0.1:19090   # mihomo REST API（兼容 metacubexd/yacd 面板）
+api-listen: 127.0.0.1:19091            # proxyd 自有 API：GET /ports 查看端口映射表
+# secret: change-me
+# external-ui: ui              # 可放 metacubexd 静态文件目录
+
+# custom-rules:                # 追加式自定义规则：生成时前置到 rules 之前，先生效
+#   - DOMAIN-SUFFIX,example.com,DIRECT        # 策略可填 DIRECT/REJECT/节点名/分组名
+#   - IP-CIDR,10.0.0.0/8,REJECT,no-resolve
+
+# rule-urls:                   # 远程规则源：跟随订阅刷新拉取，内容缓存在 state-dir（不写回此文件）
+#   - name: gfwlist            # 支持 mihomo 规则文本（每行 类型,内容,策略）
+#     url: https://example.com/gfwlist.txt   # 和 gfwlist/AutoProxy（base64）两种格式，自动识别
+
+# groups:                      # 节点分组端口：组内节点 url-test 自动选优，占用独立端口
+#   - name: hk                 # 组名（不能与节点名/AUTO/PROXY 等保留名冲突）
+#     port: 43000              # 不能与主端口、api 端口、port-range 区间、auto-port 冲突
+#     nodes: ["香港 01", "香港 02"]   # 节点名列表，与当前可用节点取交集
+
+# dns:                         # 可选，透传 mihomo dns 配置
+#   enable: true
+#   enhanced-mode: fake-ip
+
+rules:
+  - GEOSITE,cn,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - MATCH,PROXY
+
+# state-dir: ~/.local/state/proxyd   # 端口映射快照与订阅缓存目录
