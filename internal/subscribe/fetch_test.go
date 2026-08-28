@@ -117,6 +117,50 @@ func TestFetchAll(t *testing.T) {
 	}
 }
 
+func TestFetchRetryOn5xx(t *testing.T) {
+	stateDir := t.TempDir()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write([]byte(clashFixture))
+	}))
+	defer srv.Close()
+
+	sub := config.Subscription{Name: "flaky", URL: srv.URL, Type: "clash"}
+	nodes, err := Fetch(context.Background(), sub, stateDir)
+	if err != nil {
+		t.Fatalf("前两次 502 后应重试成功: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("期望 3 个节点，得到 %d", len(nodes))
+	}
+	if calls != 3 {
+		t.Fatalf("期望重试到第 3 次成功，实际请求 %d 次", calls)
+	}
+}
+
+func TestFetchNoRetryOn4xx(t *testing.T) {
+	stateDir := t.TempDir()
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	sub := config.Subscription{Name: "404", URL: srv.URL, Type: "clash"}
+	if _, err := Fetch(context.Background(), sub, stateDir); err == nil {
+		t.Fatal("404 应返回错误")
+	}
+	if calls != 1 {
+		t.Fatalf("4xx 不应重试，实际请求 %d 次", calls)
+	}
+}
+
 func TestSanitizeFileName(t *testing.T) {
 	cases := map[string]string{
 		"普通名字":       "普通名字",

@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	urlpkg "net/url"
@@ -882,7 +883,13 @@ func (a *App) Refresh(ctx context.Context, fetch bool) error {
 	}
 
 	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32)
+	return a.applyNodes(nodes)
+}
 
+// applyNodes 执行节点就绪（健康状态已检测）后的流水线尾部：
+// 筛选可用节点 → 端口分配（稳定映射）→ 生成配置 → 热更新核心 → 保存快照。
+// 调用方须持有 a.refreshing 锁。
+func (a *App) applyNodes(nodes []*node.Node) error {
 	alive := make([]*node.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if n.Alive {
@@ -921,6 +928,79 @@ func (a *App) Refresh(ctx context.Context, fetch bool) error {
 	}
 	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
 	return nil
+}
+
+// RefreshSubscription 只刷新单个订阅：重新拉取该订阅，与其它来源的现有节点
+// 重新合并后只检测该订阅的节点，再执行端口分配与热更新。
+func (a *App) RefreshSubscription(ctx context.Context, name string) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
+	a.mu.RLock()
+	var target *config.Subscription
+	for i := range a.cfg.Subscriptions {
+		if a.cfg.Subscriptions[i].Name == name {
+			sub := a.cfg.Subscriptions[i]
+			target = &sub
+			break
+		}
+	}
+	a.mu.RUnlock()
+	if target == nil {
+		return fmt.Errorf("subscription %q not found", name)
+	}
+
+	fresh, err := subscribe.Fetch(ctx, *target, a.cfg.StateDir)
+	if err != nil {
+		var w *subscribe.FetchWarning
+		if !errors.As(err, &w) {
+			return err
+		}
+		log.Printf("[subscribe] %v", err) // 拉取失败，降级使用缓存节点
+	}
+
+	// 其它来源沿用现有节点，与该订阅的新节点重新合并（Merge 按稳定身份去重、
+	// 保证名称唯一；名称变化不影响端口稳定映射，后者按节点 Key 对齐快照）
+	groups := map[string][]*node.Node{name: fresh}
+	for _, n := range a.Nodes() {
+		if n.Subscription != name {
+			groups[n.Subscription] = append(groups[n.Subscription], n)
+		}
+	}
+	nodes := subscribe.Merge(groups, a.excludeRe)
+	if len(nodes) == 0 {
+		return fmt.Errorf("no nodes available from any subscription")
+	}
+
+	// 只检测该订阅的节点，其它节点沿用上次检测结果
+	var checkList []*node.Node
+	for _, n := range nodes {
+		if n.Subscription == name {
+			checkList = append(checkList, n)
+		}
+	}
+	pool.Check(ctx, checkList, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32)
+	return a.applyNodes(nodes)
+}
+
+// TestSubscription 只对单个订阅的现有节点做健康检测/延迟测试，
+// 不重新拉取订阅；完成后重新分配端口并热更新。
+func (a *App) TestSubscription(ctx context.Context, name string) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
+	nodes := a.Nodes()
+	var checkList []*node.Node
+	for _, n := range nodes {
+		if n.Subscription == name {
+			checkList = append(checkList, n)
+		}
+	}
+	if len(checkList) == 0 {
+		return fmt.Errorf("订阅 %s 当前没有节点", name)
+	}
+	pool.Check(ctx, checkList, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32)
+	return a.applyNodes(nodes)
 }
 
 // Run 启动调度器：先加载节点快照立即提供服务，再执行一轮完整刷新，

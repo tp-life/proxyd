@@ -947,13 +947,13 @@
         // 操作列：设为主端口。节点失效/未分配端口时不可用；已是主端口时仅标识
         const isMain = data.main_node && data.main_node === n.key;
         const opBtn = isMain
-          ? `<button class="btn" style="padding:0 8px;font-size:12px" disabled>当前主端口</button>`
-          : `<button class="btn" style="padding:0 8px;font-size:12px" data-main-node="${esc(n.key)}"${n.alive && n.port ? "" : ' disabled title="节点失效或未分配端口"'}>设为主端口</button>`;
+          ? `<button class="btn" style="padding:4px 8px;font-size:12px" disabled>当前主端口</button>`
+          : `<button class="btn" style="padding:4px 8px;font-size:12px" data-main-node="${esc(n.key)}"${n.alive && n.port ? "" : ' disabled title="节点失效或未分配端口"'}>设为主端口</button>`;
         return `
     <tr class="${n.alive ? "" : "dead"}"><td><div class="nm" title="${esc(n.name)}">${esc(n.name)}</div></td><td class="muted">${esc(n.type)}</td>
     <td class="delay">${n.port || "—"}</td>
     <td>${delaySpan(n)}</td>
-    <td>${nodeStatus(n)}${!n.alive && n.fail_reason ? ` <span class="muted">${esc(n.fail_reason)}</span>` : ""}</td>
+    <td>${nodeStatus(n)}</td>
     <td>${opBtn}</td></tr>`;
       }
 
@@ -1059,7 +1059,7 @@
             (m) => `
     <li><b>${esc(m.name || "(无法解析)")}</b>
     <span class="muted mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(m.url)}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-mn="${m.index}">删除</button></li>`,
+    <button class="btn" style="padding:4px 8px;font-size:12px" data-del-mn="${m.index}">删除</button></li>`,
           )
           .join("");
         $("#manualNodeList").innerHTML =
@@ -1101,7 +1101,10 @@
                   .join("") ||
                 '<tr><td colspan="6" class="muted">该订阅暂无节点</td></tr>';
               return `<details open id="sub-idx-${i}"><summary>${esc(s.name)}　<span class="muted">节点 ${s.alive}/${s.total} 可用</span>
-      <button class="btn" style="float:right;padding:0 8px;font-size:12px" data-del-sub="${esc(s.name)}">删除</button></summary>
+      <span style="float:right">
+      <button class="btn" style="padding:4px 8px;font-size:12px" data-test-sub="${esc(s.name)}">测速</button>
+      <button class="btn" style="padding:4px 8px;font-size:12px" data-refresh-sub="${esc(s.name)}">刷新</button>
+      <button class="btn" style="padding:4px 8px;font-size:12px" data-del-sub="${esc(s.name)}">删除</button></span></summary>
       <div class="body"><div class="row" style="margin:0 0 8px">${subSortSel(s.name)}</div><div class="tw" style="border:none"><table>
       <thead><tr><th>节点</th><th>类型</th><th>端口</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
       <tbody>${rows}</tbody></table></div></div></details>`;
@@ -1134,7 +1137,7 @@
             .map(
               (r, i) => `
     <li><span class="mono" style="flex:1">${esc(r)}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-rule="${i}">删除</button></li>`,
+    <button class="btn" style="padding:4px 8px;font-size:12px" data-del-rule="${i}">删除</button></li>`,
             )
             .join("") || '<li class="muted">暂无自定义规则</li>';
 
@@ -1146,8 +1149,8 @@
               return `
     <li class="ruli"><b>${esc(ru.name)}</b><span class="muted mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(ru.url)}</span>
     <span class="muted">${ru.error ? "拉取失败" : ru.count + " 条" + (ru.warn ? "（缓存）" : "")}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-view-ru="${esc(ru.name)}">${st && st.open ? "收起" : "查看内容"}</button>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-ru="${esc(ru.name)}">删除</button>
+    <button class="btn" style="padding:4px 8px;font-size:12px" data-view-ru="${esc(ru.name)}">${st && st.open ? "收起" : "查看内容"}</button>
+    <button class="btn" style="padding:4px 8px;font-size:12px" data-del-ru="${esc(ru.name)}">删除</button>
 ${st && st.open ? `<pre class="rucontent">${esc(st.text == null ? "加载中…" : st.text)}</pre>` : ""}</li>`;
             })
             .join("") || '<li class="muted">暂无规则 URL</li>';
@@ -1164,7 +1167,7 @@ ${st && st.open ? `<pre class="rucontent">${esc(st.text == null ? "加载中…"
             )
             .join("") || '<li class="muted">暂无分组，勾选下方节点后添加</li>';
 
-        // 分组编辑器：全量节点（含失效，置灰但可选），纵向列表 + 垂直滚动，保留已勾选状态
+        // 分组编辑器：全量节点（含失n效，置灰但可选），纵向列表 + 垂直滚动，保留已勾选状态
         grpSel.forEach((n) => {
           if (!data.nodes.some((x) => x.name === n)) grpSel.delete(n);
         });
@@ -1502,6 +1505,29 @@ ${st && st.open ? `<pre class="rucontent">${esc(st.text == null ? "加载中…"
         const d = e.target.dataset || {};
         if (d.chip !== undefined) {
           jumpToChip(d.chip);
+          return;
+        }
+        // 单个订阅操作：刷新（重新拉取该订阅）/ 测速（只检测该订阅节点）。
+        // 接口同步返回（可能耗时较长），成功/失败直接 toast；阻止 details 折叠
+        if (d.refreshSub || d.testSub) {
+          e.preventDefault();
+          const name = d.refreshSub || d.testSub,
+            isRefresh = !!d.refreshSub,
+            label = isRefresh ? "刷新" : "测速",
+            btn = e.target;
+          btn.disabled = true;
+          toast(`${name} ${label}中…`);
+          const resp = await fetch(
+            "/api/subscriptions/" +
+              encodeURIComponent(name) +
+              (isRefresh ? "/refresh" : "/test"),
+            { method: "POST" },
+          );
+          btn.disabled = false;
+          if (resp.ok) {
+            toast(`${name} ${label}完成`);
+            load();
+          } else toast(`${name} ${label}失败：` + (await resp.text()), true);
           return;
         }
         if (d.delSub && confirm(`删除订阅 ${d.delSub}？`)) {

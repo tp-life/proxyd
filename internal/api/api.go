@@ -95,6 +95,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /api/test", s.handleTest)
 	mux.HandleFunc("POST /api/subscriptions", s.handleAddSub)
 	mux.HandleFunc("DELETE /api/subscriptions/{name}", s.handleDelSub)
+	mux.HandleFunc("POST /api/subscriptions/{name}/refresh", s.handleRefreshSub)
+	mux.HandleFunc("POST /api/subscriptions/{name}/test", s.handleTestSub)
 	mux.HandleFunc("POST /api/port-range", s.handleSetPortRange)
 	mux.HandleFunc("GET /api/rules", s.handleListRules)
 	mux.HandleFunc("POST /api/rules", s.handleAddRule)
@@ -275,6 +277,29 @@ func (s *Server) handleTest(w http.ResponseWriter, _ *http.Request) {
 	s.trigger(false)
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"status":"testing"}`))
+}
+
+// handleRefreshSub 只刷新单个订阅（拉取该订阅 + 检测其节点 + 热更新）。
+// 与全局刷新不同，这里同步执行（最长 3 分钟）以便把拉取失败等原因直接返回给前端。
+func (s *Server) handleRefreshSub(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	if err := s.app.RefreshSubscription(ctx, r.PathValue("name")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleTestSub 只对单个订阅的现有节点做健康检测/延迟测试，同步返回结果。
+func (s *Server) handleTestSub(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	if err := s.app.TestSubscription(ctx, r.PathValue("name")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // trigger 异步执行一轮流水线；fetch=true 拉订阅+测速，false 仅测速。

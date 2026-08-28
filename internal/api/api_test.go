@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,31 @@ func TestRuleURLContent(t *testing.T) {
 	srv.handleRuleURLContent(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("不存在的规则源 status=%d, want 404", rec.Code)
+	}
+}
+
+// TestSubOpsBadRequest 验证按订阅的刷新/测速接口的错误路径：
+// 订阅不存在（刷新）或无节点可测（测速）时同步返回 400，而不是异步吞掉错误。
+// 成功路径依赖运行中的核心，由 e2e 覆盖。
+func TestSubOpsBadRequest(t *testing.T) {
+	a, err := app.New(&config.Config{StateDir: t.TempDir()}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:0", a)
+
+	for _, path := range []string{"/refresh", "/test"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/subscriptions/nope"+path, nil)
+		req.SetPathValue("name", "nope")
+		if strings.HasSuffix(path, "/refresh") {
+			srv.handleRefreshSub(rec, req)
+		} else {
+			srv.handleTestSub(rec, req)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("POST ...%s status=%d, want 400 (body=%s)", path, rec.Code, rec.Body.String())
+		}
 	}
 }
 

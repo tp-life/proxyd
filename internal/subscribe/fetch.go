@@ -75,22 +75,53 @@ func parse(sub config.Subscription, body []byte) ([]*node.Node, error) {
 	}
 }
 
-// httpGet 发起 GET 请求并读取响应体。
+// maxAttempts 拉取订阅的最大尝试次数。部分机场订阅后端不稳定
+// （间歇性 502/503/超时），单次失败直接报错体验差，做有限重试。
+const maxAttempts = 3
+
+// retryBackoff 第 i 次失败后的等待时间。
+var retryBackoff = []time.Duration{1 * time.Second, 3 * time.Second}
+
+// httpGet 发起 GET 请求并读取响应体；网络错误或 5xx 时按 retryBackoff 重试。
 func httpGet(ctx context.Context, url string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, lastErr
+			case <-time.After(retryBackoff[attempt-1]):
+			}
+		}
+		body, retryable, err := httpGetOnce(ctx, url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if !retryable {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+// httpGetOnce 执行单次请求；retryable 表示该错误值得重试（网络错误、超时或 5xx）。
+func httpGetOnce(ctx context.Context, url string) (body []byte, retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, true, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
+		return nil, resp.StatusCode >= 500, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	return body, err != nil, err
 }
 
 // cachePath 返回订阅的缓存文件路径，文件名做安全清洗。
