@@ -91,8 +91,8 @@ func TestGenerate(t *testing.T) {
 		port  int
 		proxy string
 	}{
-		{"节点A:42001", 42001, "节点A"},
-		{"节点B:42002", 42002, "节点B"},
+		{"L42001", 42001, "节点A"},
+		{"L42002", 42002, "节点B"},
 	}
 	for i, w := range wantListener {
 		l, ok := listeners[i].(map[string]any)
@@ -128,6 +128,253 @@ func TestGenerate(t *testing.T) {
 	rules, ok := m["rules"].([]any)
 	if !ok || len(rules) != 2 || rules[0] != "DOMAIN-SUFFIX,example.com,DIRECT" || rules[1] != "MATCH,PROXY" {
 		t.Errorf("rules = %v, 未原样透传", m["rules"])
+	}
+}
+
+func TestGenerateMainAuto(t *testing.T) {
+	// main-auto 开启：主端口从顶层 mixed-port 变为固定走 AUTO 的 listener（跳过规则），
+	// AUTO 组在 auto-port 未开启时也会生成。
+	cfg := fakeConfig()
+	cfg.MainAuto = true
+	cfg.HealthURL = "http://www.gstatic.com/generate_204"
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)},
+		{Port: 42002, Node: fakeSocks5("节点B", "5.6.7.8", 10002)},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-auto) 失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo ParseWithBytes 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+
+	if _, exists := m["mixed-port"]; exists {
+		t.Errorf("main-auto 开启时不应有顶层 mixed-port: %v", m["mixed-port"])
+	}
+
+	// AUTO 组存在（尽管 AutoPort == 0）
+	var auto map[string]any
+	for _, g := range m["proxy-groups"].([]any) {
+		if g.(map[string]any)["name"] == "AUTO" {
+			auto = g.(map[string]any)
+		}
+	}
+	if auto == nil {
+		t.Fatalf("main-auto 开启但缺少 AUTO 组: %v", m["proxy-groups"])
+	}
+	if auto["type"] != "url-test" || len(auto["proxies"].([]any)) != 2 {
+		t.Errorf("AUTO 组异常: %v", auto)
+	}
+
+	// 主端口 listener：纯端口命名 + 固定走 AUTO；无 auto-port listener（AutoPort==0）
+	var mainLn map[string]any
+	for _, l := range m["listeners"].([]any) {
+		lm := l.(map[string]any)
+		if lm["port"] == 41999 {
+			mainLn = lm
+		}
+		if lm["proxy"] == "AUTO" && lm["port"] != 41999 {
+			t.Errorf("不应存在主端口以外的 AUTO listener: %v", lm)
+		}
+	}
+	if mainLn == nil {
+		t.Fatalf("缺少主端口 listener: %v", m["listeners"])
+	}
+	if mainLn["name"] != "L41999" || mainLn["type"] != "mixed" || mainLn["proxy"] != "AUTO" {
+		t.Errorf("主端口 listener 异常: %v", mainLn)
+	}
+
+	// 规则仍照常生成（供关闭 main-auto 后回退使用，对主端口不再生效）
+	if rules, ok := m["rules"].([]any); !ok || len(rules) != 2 {
+		t.Errorf("rules 应照常生成: %v", m["rules"])
+	}
+}
+
+func TestGenerateMainAutoEmptyAssigns(t *testing.T) {
+	// 无可用节点：main-auto 被跳过，主端口回退规则模式，不生成 AUTO 组。
+	cfg := fakeConfig()
+	cfg.MainAuto = true
+	buf, err := Generate(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-auto, 空 assigns) 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	if m["mixed-port"] != 41999 {
+		t.Errorf("无节点时主端口应回退 mixed-port: %v", m["mixed-port"])
+	}
+	for _, g := range m["proxy-groups"].([]any) {
+		if g.(map[string]any)["name"] == "AUTO" {
+			t.Error("空节点时不应生成 AUTO 组")
+		}
+	}
+}
+
+func TestGenerateMainAutoWithAutoPort(t *testing.T) {
+	// main-auto 与 auto-port 并存：共用一个 AUTO 组，两个 listener 各自独立。
+	cfg := fakeConfig()
+	cfg.MainAuto = true
+	cfg.AutoPort = 41998
+	cfg.HealthURL = "http://www.gstatic.com/generate_204"
+	assigns := []Assignment{{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)}}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-auto + auto-port) 失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo ParseWithBytes 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	if _, exists := m["mixed-port"]; exists {
+		t.Errorf("不应有顶层 mixed-port: %v", m["mixed-port"])
+	}
+	autoGroups := 0
+	for _, g := range m["proxy-groups"].([]any) {
+		if g.(map[string]any)["name"] == "AUTO" {
+			autoGroups++
+		}
+	}
+	if autoGroups != 1 {
+		t.Errorf("AUTO 组应只有一个, got %d", autoGroups)
+	}
+	autoListeners := map[int]bool{}
+	for _, l := range m["listeners"].([]any) {
+		lm := l.(map[string]any)
+		if lm["proxy"] == "AUTO" {
+			autoListeners[lm["port"].(int)] = true
+		}
+	}
+	if !autoListeners[41999] || !autoListeners[41998] || len(autoListeners) != 2 {
+		t.Errorf("AUTO listeners = %v, want {41999, 41998}", autoListeners)
+	}
+}
+
+func TestGenerateMainNode(t *testing.T) {
+	// main-node：主端口从顶层 mixed-port 变为固定直达指定节点的 listener（跳过规则），
+	// 不生成 AUTO 组（AutoPort==0 且 main-auto 未开）。
+	cfg := fakeConfig()
+	nb := fakeSocks5("节点B", "5.6.7.8", 10002)
+	cfg.MainNode = nb.Key()
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)},
+		{Port: 42002, Node: nb},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-node) 失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo ParseWithBytes 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+
+	if _, exists := m["mixed-port"]; exists {
+		t.Errorf("main-node 生效时不应有顶层 mixed-port: %v", m["mixed-port"])
+	}
+	var mainLn map[string]any
+	for _, l := range m["listeners"].([]any) {
+		lm := l.(map[string]any)
+		if lm["port"] == 41999 {
+			mainLn = lm
+		}
+	}
+	if mainLn == nil {
+		t.Fatalf("缺少主端口 listener: %v", m["listeners"])
+	}
+	if mainLn["name"] != "L41999" || mainLn["type"] != "mixed" || mainLn["proxy"] != "节点B" {
+		t.Errorf("主端口 listener 应固定走节点B: %v", mainLn)
+	}
+	for _, g := range m["proxy-groups"].([]any) {
+		if g.(map[string]any)["name"] == "AUTO" {
+			t.Error("main-node（无 main-auto/auto-port）不应生成 AUTO 组")
+		}
+	}
+	if rules, ok := m["rules"].([]any); !ok || len(rules) != 2 {
+		t.Errorf("rules 应照常生成: %v", m["rules"])
+	}
+}
+
+func TestGenerateMainNodeUnavailable(t *testing.T) {
+	// main-node 指定的节点当前不可用（不在 assigns 里）：回退规则模式，配置保留。
+	cfg := fakeConfig()
+	cfg.MainNode = fakeSocks5("已消失", "9.9.9.9", 10009).Key()
+	assigns := []Assignment{{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)}}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-node 不可用) 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	if m["mixed-port"] != 41999 {
+		t.Errorf("节点不可用时主端口应回退 mixed-port: %v", m["mixed-port"])
+	}
+	for _, l := range m["listeners"].([]any) {
+		if l.(map[string]any)["port"] == 41999 {
+			t.Errorf("回退规则模式时不应有主端口 listener: %v", l)
+		}
+	}
+}
+
+func TestGenerateMainNodeAutoWins(t *testing.T) {
+	// main-auto 开启时 main-node 被忽略：主端口 listener 固定走 AUTO。
+	cfg := fakeConfig()
+	cfg.MainAuto = true
+	cfg.MainNode = fakeSocks5("节点B", "5.6.7.8", 10002).Key()
+	cfg.HealthURL = "http://www.gstatic.com/generate_204"
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)},
+		{Port: 42002, Node: fakeSocks5("节点B", "5.6.7.8", 10002)},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate(main-auto + main-node) 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	if _, exists := m["mixed-port"]; exists {
+		t.Errorf("不应有顶层 mixed-port: %v", m["mixed-port"])
+	}
+	var mainLn map[string]any
+	for _, l := range m["listeners"].([]any) {
+		lm := l.(map[string]any)
+		if lm["port"] == 41999 {
+			mainLn = lm
+		}
+	}
+	if mainLn == nil || mainLn["proxy"] != "AUTO" {
+		t.Errorf("main-auto 开启时主端口应走 AUTO（忽略 main-node）: %v", mainLn)
+	}
+}
+
+func TestMainInboundIsListener(t *testing.T) {
+	cfg := fakeConfig()
+	assigns := []Assignment{{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)}}
+
+	if MainInboundIsListener(cfg, assigns) {
+		t.Error("默认（无 main-auto/main-node）应为规则模式")
+	}
+	cfg.MainNode = assigns[0].Node.Key()
+	if !MainInboundIsListener(cfg, assigns) {
+		t.Error("main-node 命中可用节点应为 listener 形态")
+	}
+	if MainInboundIsListener(cfg, nil) {
+		t.Error("main-node 节点不可用时应回退规则模式")
+	}
+	cfg.MainAuto = true // auto 优先：即使有 main-node 也按 auto 判定
+	if !MainInboundIsListener(cfg, assigns) {
+		t.Error("main-auto 开启且有节点应为 listener 形态")
+	}
+	if MainInboundIsListener(cfg, nil) {
+		t.Error("main-auto 无可用节点时应回退规则模式")
+	}
+	cfg.MainAuto = false
+	cfg.MainNode = ""
+	if MainInboundIsListener(cfg, assigns) {
+		t.Error("main-node 清空后应为规则模式")
 	}
 }
 
@@ -259,7 +506,7 @@ func TestGenerateAutoPort(t *testing.T) {
 	if autoLn == nil {
 		t.Fatalf("缺少 AUTO listener: %v", listeners)
 	}
-	if autoLn["port"] != 41998 || autoLn["type"] != "mixed" || autoLn["name"] != "AUTO:41998" {
+	if autoLn["port"] != 41998 || autoLn["type"] != "mixed" || autoLn["name"] != "L41998" {
 		t.Errorf("AUTO listener 异常: %v", autoLn)
 	}
 }
@@ -366,7 +613,7 @@ func TestGenerateGroups(t *testing.T) {
 	if gl == nil {
 		t.Fatalf("缺少 g1 listener: %v", m["listeners"])
 	}
-	if gl["name"] != "g1:43000" || gl["type"] != "mixed" || gl["proxy"] != "g1" {
+	if gl["name"] != "L43000" || gl["type"] != "mixed" || gl["proxy"] != "g1" {
 		t.Errorf("g1 listener 异常: %v", gl)
 	}
 }

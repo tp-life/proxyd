@@ -88,6 +88,10 @@ type RuleURL struct {
 type Config struct {
 	Subscriptions []Subscription `yaml:"subscriptions"`
 
+	// ManualNodes 手动添加的自有代理节点（http(s)/socks5 URL 或分享链接），
+	// 来源标记为 manual，与订阅节点一起参与去重/测速/端口分配。
+	ManualNodes []string `yaml:"manual-nodes,omitempty"`
+
 	Listen    string `yaml:"listen"`     // listen address for mapped ports, default 127.0.0.1
 	PortRange [2]int `yaml:"port-range"` // inclusive [start, end] for per-node ports
 
@@ -100,6 +104,17 @@ type Config struct {
 
 	// Main mixed port (rule-mode entry). Default: PortRange[0]-1.
 	MixedPort int `yaml:"mixed-port"`
+
+	// MainAuto 为 true 时主端口跳过规则匹配，固定走 AUTO url-test 组
+	// （全部可用节点中延迟最低者）；与独立的 auto-port 并存、互不影响。
+	// 无可用节点时本轮跳过该设置（主端口回退规则模式），日志有提示。
+	MainAuto bool `yaml:"main-auto,omitempty"`
+
+	// MainNode 主端口固定节点：不开优选时让主端口跳过规则、直达指定节点。
+	// 存节点 Key（协议+地址+凭据，重命名/重名时稳定），空串 = 不固定（现有行为）。
+	// MainAuto 开启时本字段被忽略（auto 优先）；节点当前不可用（失效/订阅刷新后
+	// 消失）时本轮回退规则模式并打日志，配置保留不删，节点恢复后自动再生效。
+	MainNode string `yaml:"main-node,omitempty"`
 
 	// AutoPort 自动选优端口（type mixed，固定走全部可用节点中延迟最低者）。0=关闭。
 	AutoPort int `yaml:"auto-port,omitempty"`
@@ -285,8 +300,13 @@ func (c *Config) applyDefaults() {
 
 // Validate checks the config for structural errors.
 func (c *Config) Validate() error {
-	if len(c.Subscriptions) == 0 {
-		return fmt.Errorf("at least one subscription is required")
+	if len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
+		return fmt.Errorf("at least one subscription or manual node is required")
+	}
+	for i, m := range c.ManualNodes {
+		if strings.TrimSpace(m) == "" {
+			return fmt.Errorf("manual-nodes[%d]: 空条目", i)
+		}
 	}
 	seen := map[string]bool{}
 	for i, s := range c.Subscriptions {
@@ -312,6 +332,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MixedPort < 0 || c.MixedPort > 65535 || (c.MixedPort >= lo && c.MixedPort <= hi) {
 		return fmt.Errorf("mixed-port %d must be outside port-range", c.MixedPort)
+	}
+	if p := addrPort(c.APIListen); p == c.MixedPort {
+		return fmt.Errorf("mixed-port %d 与 api-listen 冲突", c.MixedPort)
 	}
 	if net.ParseIP(c.Listen) == nil {
 		if _, err := net.ResolveIPAddr("ip", c.Listen); err != nil {
@@ -431,6 +454,32 @@ func (c *Config) checkGroup(g NodeGroup) error {
 	}
 	if c.AutoPort != 0 && g.Port == c.AutoPort {
 		return fmt.Errorf("分组端口 %d 与 auto-port 冲突", g.Port)
+	}
+	return nil
+}
+
+// CheckMixedPort 校验主端口：1-65535，且不得与节点映射区间、api-listen、
+// external-controller、auto-port 或任一分组端口冲突。
+func (c *Config) CheckMixedPort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("主端口 %d 超出 1-65535", port)
+	}
+	if port >= c.PortRange[0] && port <= c.PortRange[1] {
+		return fmt.Errorf("主端口 %d 与节点映射区间 [%d, %d] 冲突", port, c.PortRange[0], c.PortRange[1])
+	}
+	if p := addrPort(c.APIListen); p == port {
+		return fmt.Errorf("主端口 %d 与 api-listen 冲突", port)
+	}
+	if p := addrPort(c.ExternalController); p == port {
+		return fmt.Errorf("主端口 %d 与 external-controller 冲突", port)
+	}
+	if c.AutoPort != 0 && port == c.AutoPort {
+		return fmt.Errorf("主端口 %d 与 auto-port 冲突", port)
+	}
+	for _, g := range c.Groups {
+		if g.Port == port {
+			return fmt.Errorf("主端口 %d 与分组 %q 端口冲突", port, g.Name)
+		}
 	}
 	return nil
 }

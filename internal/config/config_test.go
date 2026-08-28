@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,6 +183,46 @@ rules:
 	}
 }
 
+func TestMainNodePersist(t *testing.T) {
+	// main-node（节点 Key）落盘并原样读回；空值默认不写出（omitempty）。
+	body := `
+subscriptions:
+  - name: a
+    url: https://example.com/sub
+port-range: [42000, 42010]
+main-node: "socks5|1.2.3.4|10001|p"
+rules:
+  - MATCH,PROXY
+`
+	path := writeTemp(t, body)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MainNode != "socks5|1.2.3.4|10001|p" {
+		t.Fatalf("MainNode = %q", cfg.MainNode)
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	cfg2, err := Load(path)
+	if err != nil {
+		t.Fatalf("re-Load: %v", err)
+	}
+	if cfg2.MainNode != cfg.MainNode {
+		t.Errorf("main-node 持久化往返不一致: %q vs %q", cfg2.MainNode, cfg.MainNode)
+	}
+
+	cfg.MainNode = ""
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "main-node") {
+		t.Errorf("main-node 为空时不应写出: %s", raw)
+	}
+}
+
 func TestMigrateModeAuto(t *testing.T) {
 	// 旧配置 mode: auto 迁移为 rule + auto-port
 	body := `
@@ -226,6 +267,29 @@ func TestCheckAutoPort(t *testing.T) {
 	} {
 		if err := cfg.CheckAutoPort(port); err == nil {
 			t.Errorf("CheckAutoPort(%s=%d): expected error", name, port)
+		}
+	}
+}
+
+func TestCheckMixedPort(t *testing.T) {
+	cfg := &Config{
+		Listen:             "127.0.0.1",
+		PortRange:          [2]int{42000, 42100},
+		MixedPort:          41999,
+		AutoPort:           41998,
+		APIListen:          "127.0.0.1:19091",
+		ExternalController: "127.0.0.1:19090",
+		Groups:             []NodeGroup{{Name: "hk", Port: 43000}},
+	}
+	if err := cfg.CheckMixedPort(42999); err != nil {
+		t.Errorf("CheckMixedPort(42999): %v", err)
+	}
+	for name, port := range map[string]int{
+		"零": 0, "负端口": -1, "超界": 70000, "区间起": 42000, "区间内": 42050, "区间止": 42100,
+		"api": 19091, "external": 19090, "auto-port": 41998, "分组端口": 43000,
+	} {
+		if err := cfg.CheckMixedPort(port); err == nil {
+			t.Errorf("CheckMixedPort(%s=%d): expected error", name, port)
 		}
 	}
 }

@@ -18,15 +18,24 @@ import (
 // Assignment 是端口到节点的映射（internal/pool 定义的别名）。
 type Assignment = pool.Assignment
 
-// Generate 生成完整的 mihomo YAML 配置字节：
-// 主端口 mixed-port 走常规 Clash 规则模式（rule/global/direct）；
+// Generate 生成完整的 mihomo YAML 配置：
+// 主端口 mixed-port 默认走常规 Clash 规则模式（rule/global/direct）；
+// main-auto 开启时主端口改为 listener 固定走 AUTO url-test 组（跳过规则匹配），
+// 无可用节点时回退规则模式（打日志）；
+// main-node 非空（且 main-auto 未开启）时主端口 listener 固定直达该节点（跳过规则），
+// 节点当前不可用时回退规则模式（打日志，配置保留，恢复后自动再生效）；
 // 每个节点分配一个 listener（type mixed，proxy 固定出口到该节点）；
 // auto-port 开启时额外生成一个固定走 AUTO url-test 组（全部可用节点选优）的 listener；
 // 每个节点分组额外生成一个 url-test proxy-group + 固定走该组的 mixed listener。
 // imported 是 rule-urls 远程导入的规则（排在 custom-rules 之后、内置 rules 之前）。
+//
+// 注意：listener 名称统一用端口号（"L<port>"），不带节点/分组名。
+// mihomo 热更新（PatchInboundListeners）先 Listen 新 listener、后关闭旧 listener，
+// 同端口改名会 bind 冲突把端口打挂；同名但配置不同才会按 关闭→监听 的正确顺序处理。
+// main-auto/main-node 切换时主端口在 mixed-port 与 listener 之间转换，同属 inbound 热更新范畴，
+// 名称同样保持 L<port> 规范。
 func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]byte, error) {
 	m := map[string]any{
-		"mixed-port":          cfg.MixedPort,
 		"mode":                cfg.Mode,
 		"log-level":           cfg.LogLevel,
 		"allow-lan":           !isLoopback(cfg.Listen),
@@ -60,7 +69,7 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 		nodeNames = append(nodeNames, a.Node.Name)
 		nodeSet[a.Node.Name] = true
 		listeners = append(listeners, map[string]any{
-			"name":   fmt.Sprintf("%s:%d", a.Node.Name, a.Port), // 节点名:端口，日志/面板里一眼可辨
+			"name":   fmt.Sprintf("L%d", a.Port), // 纯端口名：热更新端口换人时避免 bind 冲突（见函数注释）
 			"type":   "mixed",
 			"listen": cfg.Listen,
 			"port":   a.Port,
@@ -69,33 +78,62 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 	}
 	m["proxies"] = proxies
 
+	// 主端口入口形态：main-auto（AUTO 组）优先于 main-node（固定节点），
+	// 两者都未生效时回退顶层 mixed-port 规则模式。
+	mainTarget := resolveMainInbound(cfg, assigns)
+	if cfg.MainAuto && cfg.MainNode != "" {
+		log.Printf("[core] main-auto 已开启，main-node 本轮被忽略（auto 优先）")
+	}
+	if cfg.MainAuto && mainTarget == "" {
+		log.Printf("[core] main-auto 已开启但当前无可用节点，本轮主端口回退规则模式")
+	}
+	if !cfg.MainAuto && cfg.MainNode != "" && mainTarget == "" {
+		log.Printf("[core] main-node 指定的节点当前不可用（失效或已消失），本轮主端口回退规则模式")
+	}
+	if mainTarget == "" {
+		m["mixed-port"] = cfg.MixedPort
+	}
+
 	// 主端口规则模式下使用的选择组：所有节点 + 内置 DIRECT（空 assigns 时仅 DIRECT）。
 	names := append(slices.Clone(nodeNames), "DIRECT")
 	groups := []map[string]any{
 		{"name": "PROXY", "type": "select", "proxies": names},
 	}
 
-	if cfg.AutoPort > 0 {
-		// 自动选优端口：固定走 AUTO url-test 组（全部可用节点中延迟最低）。
-		if len(nodeNames) == 0 {
-			log.Printf("[core] auto-port %d 已开启但当前无可用节点，本轮跳过该 listener", cfg.AutoPort)
-		} else {
-			groups = append(groups, map[string]any{
-				"name":      "AUTO",
-				"type":      "url-test",
-				"proxies":   nodeNames,
-				"url":       cfg.HealthURL,
-				"interval":  300,
-				"tolerance": 50,
-			})
+	// AUTO url-test 组（全部可用节点中延迟最低）：auto-port 与 main-auto 共用。
+	autoWanted := cfg.AutoPort > 0 || mainTarget == "AUTO"
+	switch {
+	case autoWanted && len(nodeNames) == 0:
+		log.Printf("[core] auto-port %d 已开启但当前无可用节点，本轮跳过该 listener", cfg.AutoPort)
+	case autoWanted:
+		groups = append(groups, map[string]any{
+			"name":      "AUTO",
+			"type":      "url-test",
+			"proxies":   nodeNames,
+			"url":       cfg.HealthURL,
+			"interval":  300,
+			"tolerance": 50,
+		})
+		if cfg.AutoPort > 0 {
 			listeners = append(listeners, map[string]any{
-				"name":   fmt.Sprintf("AUTO:%d", cfg.AutoPort),
+				"name":   fmt.Sprintf("L%d", cfg.AutoPort),
 				"type":   "mixed",
 				"listen": cfg.Listen,
 				"port":   cfg.AutoPort,
 				"proxy":  "AUTO",
 			})
 		}
+	}
+	if mainTarget != "" {
+		// 主端口以 listener 形式固定走 mainTarget（AUTO 组或指定节点）：
+		// 规则匹配（自定义/内置规则）对其不再生效；节点映射端口、分组端口、auto-port 不受影响。
+		listeners = append(listeners, map[string]any{
+			"name":   fmt.Sprintf("L%d", cfg.MixedPort),
+			"type":   "mixed",
+			"listen": cfg.Listen,
+			"port":   cfg.MixedPort,
+			"proxy":  mainTarget,
+		})
 	}
 
 	// 节点分组：组名与节点名/保留名冲突或成员交集为空时跳过（打日志）。
@@ -123,7 +161,7 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 			"tolerance": 50,
 		})
 		listeners = append(listeners, map[string]any{
-			"name":   fmt.Sprintf("%s:%d", g.Name, g.Port),
+			"name":   fmt.Sprintf("L%d", g.Port),
 			"type":   "mixed",
 			"listen": cfg.Listen,
 			"port":   g.Port,
@@ -173,6 +211,33 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 		}
 	}
 	return buf, nil
+}
+
+// resolveMainInbound 计算主端口固定 listener 的 proxy 目标：
+// main-auto 开启且有可用节点时为 "AUTO"（auto 优先，main-node 被忽略）；
+// 否则 main-node 非空且该节点（按 Key 匹配）当前可用时为节点名；
+// 其余情况返回空串 = 主端口回退顶层 mixed-port 规则模式。
+func resolveMainInbound(cfg *config.Config, assigns []Assignment) string {
+	if cfg.MainAuto {
+		if len(assigns) > 0 {
+			return "AUTO"
+		}
+		return ""
+	}
+	if cfg.MainNode != "" {
+		for _, a := range assigns {
+			if a.Node != nil && a.Node.Key() == cfg.MainNode {
+				return a.Node.Name
+			}
+		}
+	}
+	return ""
+}
+
+// MainInboundIsListener 报告给定配置与节点下主端口是否为固定 listener 形态
+// （供 App 判断 mixed-port ↔ listener 转换，决定是否需要先释放主端口再热更新）。
+func MainInboundIsListener(cfg *config.Config, assigns []Assignment) bool {
+	return resolveMainInbound(cfg, assigns) != ""
 }
 
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。

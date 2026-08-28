@@ -72,8 +72,14 @@ func uniqueName(name, subName string, used map[string]bool) string {
 // FetchAll 并发拉取所有订阅并合并节点。
 // 单个订阅失败不影响其他订阅；返回与 subs 一一对应的错误切片（nil 表示成功，
 // *FetchWarning 表示拉取失败但降级用了缓存）。
-func FetchAll(ctx context.Context, subs []config.Subscription, stateDir string, excludeRe *regexp.Regexp) ([]*node.Node, []error) {
-	nodesBySub := make(map[string][]*node.Node, len(subs))
+// static 是可选的静态节点集（如手动节点，键为来源名），与订阅节点一起参与去重合并。
+func FetchAll(ctx context.Context, subs []config.Subscription, stateDir string, excludeRe *regexp.Regexp, static ...map[string][]*node.Node) ([]*node.Node, []error) {
+	nodesBySub := make(map[string][]*node.Node, len(subs)+len(static))
+	for _, m := range static {
+		for src, nodes := range m {
+			nodesBySub[src] = append(nodesBySub[src], nodes...)
+		}
+	}
 	errs := make([]error, len(subs))
 	var mu sync.Mutex
 	var wg sync.WaitGroup

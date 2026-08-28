@@ -7,9 +7,19 @@ subscriptions:
   - name: airport-b
     url: https://example2.com/link/base64
 
+# manual-nodes:                # 手动添加的自有代理节点（持久化在此文件，来源标记为 manual）
+#   - http://user:pass@1.2.3.4:8080#我的HTTP节点    # http(s)://[user:pass@]host:port[#名称]
+#   - socks5://user:pass@1.2.3.4:1080               # socks5://[user:pass@]host:port[#名称]
+#   - ss://YWVzLTEyOC1nY206cHc=@1.2.3.4:8388#ss节点  # 以及 ss/ssr/vmess/vless/trojan/hy2/tuic 分享链接
+
 listen: 127.0.0.1              # 映射端口监听地址
 port-range: [42000, 42100]     # 每个可用节点占一个端口（闭区间）
 mixed-port: 41999              # 主端口：走全局规则模式（rule/global/direct），默认区间前一位
+# main-auto: false             # true 时主端口跳过规则、固定走最优节点（AUTO url-test 组）；
+                               # 与 auto-port 并存互不影响；无可用节点时回退规则模式
+# main-node: ""                # 主端口固定节点（存节点 Key：协议|地址|端口|凭据，Web/CLI 设置时自动填）；
+                               # 空=跟随规则；main-auto 开启时被忽略（auto 优先）；
+                               # 节点失效/消失时回退规则模式，配置保留，恢复后自动再生效
 # auto-port: 41998             # 自动选优端口：固定走全部可用节点中延迟最低者（url-test）；0/不填=关闭
 # system-proxy: false          # true 时 serve 启动后把系统代理指向主端口，退出时自动恢复
 
@@ -49,4 +59,5 @@ rules:
   - GEOIP,CN,DIRECT,no-resolve
   - MATCH,PROXY
 
-# state-dir: ~/.local/state/proxyd   # 端口映射快照与订阅缓存目录
+# state-dir: ~/.local/state/proxyd   # 状态目录：端口映射快照 mapping.json、节点快照 nodes.json、
+                                     # 订阅/规则缓存 cache/、geo 数据、proxyd.pid、proxyd.log

@@ -33,6 +33,7 @@ type PortEntry struct {
 // NodeEntry 是节点列表中的单条记录。
 type NodeEntry struct {
 	Name         string `json:"name"`
+	Key          string `json:"key"`  // 稳定身份（协议+地址+凭据），main-node 等按它引用节点
 	Type         string `json:"type"` // 出站协议（ss/vmess/...）
 	Subscription string `json:"subscription"`
 	Delay        uint16 `json:"delay"`
@@ -51,17 +52,23 @@ type SubEntry struct {
 
 // Overview 是 /api/overview 的响应。
 type Overview struct {
-	Mode        string             `json:"mode"`
-	Listen      string             `json:"listen"`
-	MixedPort   int                `json:"mixed_port"`
-	AutoPort    int                `json:"auto_port"`    // 0 表示关闭
-	SystemProxy bool               `json:"system_proxy"` // 配置状态（是否启用系统代理）
-	PortRange   [2]int             `json:"port_range"`
-	Subs        []SubEntry         `json:"subscriptions"`
-	Ports       []PortEntry        `json:"ports"`
-	Nodes       []NodeEntry        `json:"nodes"`
-	CustomRules []string           `json:"custom_rules"`
-	Groups      []config.NodeGroup `json:"groups"`
+	Mode        string                `json:"mode"`
+	Listen      string                `json:"listen"`
+	MixedPort   int                   `json:"mixed_port"`
+	MainAuto    bool                  `json:"main_auto"`    // 主端口是否固定走最优节点（跳过规则）
+	MainNode    string                `json:"main_node"`    // 主端口固定节点（node key；空串=跟随规则）
+	MainNodeUp  bool                  `json:"main_node_up"` // main-node 当前是否生效（节点可用且 main-auto 未开）
+	AutoPort    int                   `json:"auto_port"`    // 0 表示关闭
+	SystemProxy bool                  `json:"system_proxy"` // 配置状态（是否启用系统代理）
+	Autostart   bool                  `json:"autostart"`    // OS 级开机自启项是否存在（实时查询）
+	ServerTime  string                `json:"server_time"`  // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
+	PortRange   [2]int                `json:"port_range"`
+	Subs        []SubEntry            `json:"subscriptions"`
+	ManualNodes []app.ManualNodeEntry `json:"manual_nodes"`
+	Ports       []PortEntry           `json:"ports"`
+	Nodes       []NodeEntry           `json:"nodes"`
+	CustomRules []string              `json:"custom_rules"`
+	Groups      []config.NodeGroup    `json:"groups"`
 }
 
 // Server 包装自有 API 与 Web 控制台的 HTTP 服务。
@@ -96,10 +103,18 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /api/groups", s.handleAddGroup)
 	mux.HandleFunc("DELETE /api/groups/{name}", s.handleDelGroup)
 	mux.HandleFunc("POST /api/auto-port", s.handleSetAutoPort)
+	mux.HandleFunc("POST /api/main-auto", s.handleSetMainAuto)
+	mux.HandleFunc("POST /api/main-node", s.handleSetMainNode)
+	mux.HandleFunc("POST /api/main-port", s.handleSetMainPort)
 	mux.HandleFunc("POST /api/system-proxy", s.handleSetSystemProxy)
+	mux.HandleFunc("POST /api/autostart", s.handleSetAutostart)
 	mux.HandleFunc("GET /api/rule-urls", s.handleListRuleURLs)
 	mux.HandleFunc("POST /api/rule-urls", s.handleAddRuleURL)
 	mux.HandleFunc("DELETE /api/rule-urls/{name}", s.handleDelRuleURL)
+	mux.HandleFunc("GET /api/rule-urls/{name}/content", s.handleRuleURLContent)
+	mux.HandleFunc("GET /api/manual-nodes", s.handleListManualNodes)
+	mux.HandleFunc("POST /api/manual-nodes", s.handleAddManualNode)
+	mux.HandleFunc("DELETE /api/manual-nodes/{index}", s.handleDelManualNode)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -164,10 +179,15 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		Mode:        s.app.Mode(),
 		Listen:      cfg.Listen,
 		MixedPort:   cfg.MixedPort,
+		MainAuto:    cfg.MainAuto,
+		MainNode:    cfg.MainNode,
 		AutoPort:    cfg.AutoPort,
 		SystemProxy: cfg.SystemProxy,
+		Autostart:   s.app.AutostartStatus(),
+		ServerTime:  time.Now().Format(time.RFC3339), // 服务器本地时间（含时区偏移）
 		PortRange:   cfg.PortRange,
 		Subs:        []SubEntry{},
+		ManualNodes: s.app.ManualNodes(),
 		Nodes:       []NodeEntry{},
 		CustomRules: s.app.CustomRules(),
 		Groups:      s.app.Groups(),
@@ -179,6 +199,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	for _, n := range s.app.Nodes() {
 		ov.Nodes = append(ov.Nodes, NodeEntry{
 			Name:         n.Name,
+			Key:          n.Key(),
 			Type:         nodeType(n),
 			Subscription: n.Subscription,
 			Delay:        n.Delay,
@@ -191,6 +212,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 			if n.Alive {
 				ov.Subs[i].Alive++
 			}
+		}
+		if cfg.MainNode != "" && !cfg.MainAuto && n.Alive && n.Key() == cfg.MainNode && portOf[n.Name] != 0 {
+			ov.MainNodeUp = true
 		}
 	}
 	ov.Ports = s.portEntries()
@@ -363,6 +387,56 @@ func (s *Server) handleSetAutoPort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]int{"auto_port": req.Port})
 }
 
+// handleSetMainAuto 开关「主端口使用最优节点」（跳过规则匹配），持久化 + 热更新。
+func (s *Server) handleSetMainAuto(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetMainAuto(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]bool{"main_auto": req.Enabled})
+}
+
+// handleSetMainNode 设置主端口固定节点（node key；空串=恢复规则模式），持久化 + 热更新。
+// main-auto 开启时该设置被忽略（auto 优先）。
+func (s *Server) handleSetMainNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Node string `json:"node"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetMainNode(req.Node); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"main_node": req.Node})
+}
+
+// handleSetMainPort 修改主端口：校验冲突 + 持久化 + 热更新；
+// 系统代理已开启时自动重新绑定到新端口。
+func (s *Server) handleSetMainPort(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Port int `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetMainPort(req.Port); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]int{"mixed_port": req.Port})
+}
+
 // handleSetSystemProxy 开关系统代理（指向主端口）。
 func (s *Server) handleSetSystemProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -377,6 +451,22 @@ func (s *Server) handleSetSystemProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"system_proxy": req.Enabled})
+}
+
+// handleSetAutostart 注册/移除开机自启项。
+func (s *Server) handleSetAutostart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetAutostart(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]bool{"autostart": req.Enabled})
 }
 
 func (s *Server) handleListRuleURLs(w http.ResponseWriter, _ *http.Request) {
@@ -403,6 +493,55 @@ func (s *Server) handleDelRuleURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRuleURLContent 返回规则源的原始文本（未解析）：优先本地缓存，无缓存时现场拉取一次。
+func (s *Server) handleRuleURLContent(w http.ResponseWriter, r *http.Request) {
+	body, err := s.app.RuleURLContent(r.PathValue("name"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(body)
+}
+
+func (s *Server) handleListManualNodes(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, s.app.ManualNodes())
+}
+
+// handleAddManualNode 添加手动节点：校验 + 持久化，随后后台刷新纳入节点池。
+func (s *Server) handleAddManualNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL  string `json:"url"`
+		Name string `json:"name,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.URL) == "" {
+		http.Error(w, "bad request: url required", http.StatusBadRequest)
+		return
+	}
+	entry, err := s.app.AddManualNode(req.URL, req.Name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.trigger(true)
+	w.WriteHeader(http.StatusCreated)
+	writeJSON(w, entry)
+}
+
+func (s *Server) handleDelManualNode(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil {
+		http.Error(w, "bad request: index must be an integer", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.RemoveManualNode(index); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.trigger(true)
 	w.WriteHeader(http.StatusNoContent)
 }
 

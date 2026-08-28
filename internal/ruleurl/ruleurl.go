@@ -76,6 +76,20 @@ func Fetch(ctx context.Context, ru config.RuleURL, stateDir string) Result {
 	return res
 }
 
+// Content 返回规则源的原始文本（未解析）：优先读本地缓存；
+// 缓存不存在时现场拉取一次（成功则写缓存）。供 API 展示原始内容用。
+func Content(ctx context.Context, ru config.RuleURL, stateDir string) ([]byte, error) {
+	if body, err := os.ReadFile(cachePath(stateDir, ru.Name)); err == nil {
+		return body, nil
+	}
+	body, err := httpGet(ctx, ru.URL)
+	if err != nil {
+		return nil, fmt.Errorf("尚未拉取过规则源 %s，现场拉取也失败: %w", ru.Name, err)
+	}
+	_ = writeCache(stateDir, ru.Name, body)
+	return body, nil
+}
+
 // Parse 按内容自动识别格式并解析为 mihomo 规则行（去重、保序）。
 func Parse(body []byte) []string {
 	text := strings.TrimSpace(string(body))

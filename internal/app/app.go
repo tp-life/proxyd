@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	urlpkg "net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/metacubex/mihomo/tunnel"
 
+	"proxyd/internal/autostart"
 	"proxyd/internal/config"
 	"proxyd/internal/core"
 	"proxyd/internal/node"
@@ -46,6 +49,11 @@ type App struct {
 
 	excludeRe  *regexp.Regexp
 	refreshing sync.Mutex // 保证刷新流水线串行执行
+
+	// mainListenerOn 记录最近一次成功应用的配置里主端口是否为固定 listener 形态
+	// （main-auto/main-node 生效）；用于 regenerateWithLocked 判断是否需要
+	// 先释放主端口（mixed-port → 同端口 listener 直接热更新会 bind 冲突）。
+	mainListenerOn bool
 }
 
 // New 创建 App。cfgPath 为配置变更时持久化用的配置文件路径（可为空）。
@@ -145,6 +153,82 @@ func (a *App) SetAutoPort(port int) error {
 	return err
 }
 
+// SetMainAuto 开关「主端口使用最优节点」：开启后主端口跳过规则匹配、
+// 固定走 AUTO url-test 组；关闭恢复规则模式。持久化并热更新。
+// 主端口 mixed-port ↔ listener 形态转换的两阶段释放由 regenerateWithLocked 统一处理。
+func (a *App) SetMainAuto(enabled bool) error {
+	a.mu.Lock()
+	old := a.cfg.MainAuto
+	a.cfg.MainAuto = enabled
+	a.mu.Unlock()
+	if err := a.Regenerate(); err != nil {
+		a.mu.Lock()
+		a.cfg.MainAuto = old
+		a.mu.Unlock()
+		_ = a.Regenerate()
+		return err
+	}
+	a.mu.Lock()
+	err := a.persistLocked()
+	a.mu.Unlock()
+	return err
+}
+
+// SetMainNode 设置主端口固定节点（node Key；空串 = 恢复规则模式），持久化并热更新。
+// main-auto 开启时该设置被忽略（auto 优先），仍可保存。
+// main-auto ↔ main-node（listener 同名 L<port>、仅 proxy 目标变化）
+// 与 listener → mixed-port 方向由 mihomo 按 关闭→监听 顺序处理；
+// mixed-port → listener 方向的过渡释放由 regenerateWithLocked 统一处理。
+func (a *App) SetMainNode(key string) error {
+	a.mu.Lock()
+	old := a.cfg.MainNode
+	a.cfg.MainNode = key
+	a.mu.Unlock()
+	if err := a.Regenerate(); err != nil {
+		a.mu.Lock()
+		a.cfg.MainNode = old
+		a.mu.Unlock()
+		_ = a.Regenerate()
+		return err
+	}
+	a.mu.Lock()
+	err := a.persistLocked()
+	a.mu.Unlock()
+	return err
+}
+
+// SetMainPort 修改主端口（mixed-port），校验冲突后持久化并热更新；
+// 系统代理当前已开启时自动重新绑定到新端口。
+func (a *App) SetMainPort(port int) error {
+	a.mu.Lock()
+	if err := a.cfg.CheckMixedPort(port); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	old := a.cfg.MixedPort
+	a.cfg.MixedPort = port
+	sysOn := a.cfg.SystemProxy
+	a.mu.Unlock()
+	if err := a.Regenerate(); err != nil {
+		a.mu.Lock()
+		a.cfg.MixedPort = old
+		a.mu.Unlock()
+		_ = a.Regenerate()
+		return err
+	}
+	if sysOn {
+		if err := sysproxy.On("127.0.0.1", port); err != nil {
+			log.Printf("[sysproxy] 主端口已改为 %d，但系统代理重绑失败: %v（可 proxyd sysproxy off 后重开）", port, err)
+		} else {
+			log.Printf("[sysproxy] 系统代理已跟随主端口重新指向 127.0.0.1:%d", port)
+		}
+	}
+	a.mu.Lock()
+	err := a.persistLocked()
+	a.mu.Unlock()
+	return err
+}
+
 // SetSystemProxy 开关系统代理（指向主端口），立即应用并持久化配置。
 func (a *App) SetSystemProxy(enabled bool) error {
 	var err error
@@ -161,6 +245,43 @@ func (a *App) SetSystemProxy(enabled bool) error {
 	err = a.persistLocked()
 	a.mu.Unlock()
 	return err
+}
+
+// SetAutostart 注册/移除开机自启项（OS 级状态，不写入配置文件）。
+func (a *App) SetAutostart(enabled bool) error {
+	if !enabled {
+		return autostart.Off()
+	}
+	opt, err := a.autostartOptions()
+	if err != nil {
+		return err
+	}
+	return autostart.On(opt)
+}
+
+// AutostartStatus 报告自启项是否存在（查询失败按 false 处理）。
+func (a *App) AutostartStatus() bool {
+	on, err := autostart.Status()
+	return err == nil && on
+}
+
+// autostartOptions 构建注册自启项的参数：二进制与配置文件均取绝对路径。
+func (a *App) autostartOptions() (autostart.Options, error) {
+	if a.cfgPath == "" {
+		return autostart.Options{}, fmt.Errorf("无配置文件路径，无法注册自启（请先以配置文件方式运行）")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return autostart.Options{}, err
+	}
+	if exe, err = filepath.Abs(exe); err != nil {
+		return autostart.Options{}, err
+	}
+	cfgPath, err := filepath.Abs(a.cfgPath)
+	if err != nil {
+		return autostart.Options{}, err
+	}
+	return autostart.Options{Exe: exe, ConfigPath: cfgPath, StateDir: a.cfg.StateDir}, nil
 }
 
 // SetPortRange 修改节点映射端口区间并持久化，随后用当前节点
@@ -258,9 +379,48 @@ func (a *App) regenerateCurrentLocked() error {
 // regenerateLocked 是重新生成热更新的核心；调用方须已持有 refreshing 锁。
 func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 	a.mu.RLock()
+	cfg := a.cfg
 	imported := a.mergedImportedLocked()
-	cfgYAML, err := core.Generate(a.cfg, assigns, imported)
 	a.mu.RUnlock()
+	return a.regenerateWithLocked(cfg, assigns, imported)
+}
+
+// regenerateWithLocked 用指定配置生成并热应用；调用方须已持有 refreshing 锁。
+// cfg 为运行时副本（不与 a.cfg 同步修改），供两阶段热更新等场景使用。
+//
+// 主端口形态转换保护：mihomo 热更新先 PatchInboundListeners（监听新 listener）
+// 后 ReCreateMixed（关闭旧 mixed-port），主端口从顶层 mixed-port 直接换成同端口
+// listener 会 bind 冲突把端口打挂。因此当目标配置的主端口是 listener 形态
+// （main-auto/main-node 生效）而上次应用的不是时，先应用一版"主端口入口完全关闭"
+// 的配置释放端口，再应用目标配置。反向（listener → mixed-port）以及
+// listener 同名仅换 proxy 目标（main-auto ↔ main-node）由 mihomo 安全处理。
+func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
+	willListener := core.MainInboundIsListener(cfg, assigns)
+	a.mu.RLock()
+	wasListener := a.mainListenerOn
+	a.mu.RUnlock()
+	if willListener && !wasListener {
+		phase := *cfg // 浅拷贝：Generate 只读
+		phase.MainAuto = false
+		phase.MainNode = ""
+		phase.MixedPort = 0 // 生成 mixed-port: 0（mihomo 视为关闭该入口）
+		if err := a.applyConfigLocked(&phase, assigns, imported); err != nil {
+			// 释放失败不致命：继续尝试直接应用目标配置
+			log.Printf("[app] 主端口形态切换：释放旧入口失败（继续应用目标配置）: %v", err)
+		}
+	}
+	if err := a.applyConfigLocked(cfg, assigns, imported); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.mainListenerOn = willListener
+	a.mu.Unlock()
+	return nil
+}
+
+// applyConfigLocked 生成并热应用一版 mihomo 配置；调用方须已持有 refreshing 锁。
+func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
+	cfgYAML, err := core.Generate(cfg, assigns, imported)
 	if err != nil {
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
@@ -420,6 +580,27 @@ func (a *App) RemoveRuleURL(name string) error {
 	return err
 }
 
+// RuleURLContent 返回规则源的原始文本（未解析）：优先读本地缓存，
+// 缓存不存在时现场拉取一次（成功则写缓存）。供 API/CLI 查看原始内容。
+func (a *App) RuleURLContent(name string) ([]byte, error) {
+	a.mu.RLock()
+	var ru config.RuleURL
+	found := false
+	for _, r := range a.cfg.RuleURLs {
+		if r.Name == name {
+			ru = r
+			found = true
+			break
+		}
+	}
+	stateDir := a.cfg.StateDir
+	a.mu.RUnlock()
+	if !found {
+		return nil, fmt.Errorf("规则源 %q 不存在", name)
+	}
+	return ruleurl.Content(context.Background(), ru, stateDir)
+}
+
 // applyRuleResults 记录规则源拉取结果（导入规则 + 状态），并打日志。
 func (a *App) applyRuleResults(results []ruleurl.Result) {
 	a.mu.Lock()
@@ -552,7 +733,7 @@ func (a *App) RemoveSubscription(name string) error {
 	defer a.mu.Unlock()
 	for i, s := range a.cfg.Subscriptions {
 		if s.Name == name {
-			if len(a.cfg.Subscriptions) == 1 {
+			if len(a.cfg.Subscriptions) == 1 && len(a.cfg.ManualNodes) == 0 {
 				return fmt.Errorf("不能删除最后一个订阅")
 			}
 			a.cfg.Subscriptions = append(a.cfg.Subscriptions[:i], a.cfg.Subscriptions[i+1:]...)
@@ -560,6 +741,66 @@ func (a *App) RemoveSubscription(name string) error {
 		}
 	}
 	return fmt.Errorf("订阅 %q 不存在", name)
+}
+
+// ManualNodeEntry 是手动节点列表的展示项（供 API 返回）。
+type ManualNodeEntry struct {
+	Index int    `json:"index"`
+	URL   string `json:"url"`
+	Name  string `json:"name"` // 解析出的节点名（fragment/兜底），解析失败为空
+}
+
+// ManualNodes 返回配置中的手动节点列表（供 API 展示）。
+func (a *App) ManualNodes() []ManualNodeEntry {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]ManualNodeEntry, 0, len(a.cfg.ManualNodes))
+	for i, u := range a.cfg.ManualNodes {
+		out = append(out, ManualNodeEntry{Index: i, URL: u, Name: subscribe.ManualNodeName(u)})
+	}
+	return out
+}
+
+// AddManualNode 添加手动节点并持久化；name 非空且 URL 无 fragment 时附加为节点名。
+// 重复 URL 被拒绝。调用方负责随后触发 Refresh。
+func (a *App) AddManualNode(rawURL, name string) (ManualNodeEntry, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	name = strings.TrimSpace(name)
+	if rawURL == "" {
+		return ManualNodeEntry{}, fmt.Errorf("节点 URL 不能为空")
+	}
+	if _, err := subscribe.ParseManualNode(rawURL); err != nil {
+		return ManualNodeEntry{}, fmt.Errorf("节点 URL 解析失败: %w", err)
+	}
+	if name != "" && !strings.Contains(rawURL, "#") {
+		rawURL += "#" + urlpkg.PathEscape(name)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.cfg.ManualNodes {
+		if e == rawURL {
+			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", rawURL)
+		}
+	}
+	a.cfg.ManualNodes = append(a.cfg.ManualNodes, rawURL)
+	if err := a.persistLocked(); err != nil {
+		return ManualNodeEntry{}, err
+	}
+	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, URL: rawURL, Name: subscribe.ManualNodeName(rawURL)}, nil
+}
+
+// RemoveManualNode 按下标删除手动节点并持久化。调用方负责随后触发 Refresh。
+func (a *App) RemoveManualNode(index int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if index < 0 || index >= len(a.cfg.ManualNodes) {
+		return fmt.Errorf("手动节点下标 %d 不存在", index)
+	}
+	if len(a.cfg.ManualNodes) == 1 && len(a.cfg.Subscriptions) == 0 {
+		return fmt.Errorf("不能删除最后一个节点来源（已无订阅）")
+	}
+	a.cfg.ManualNodes = append(a.cfg.ManualNodes[:index], a.cfg.ManualNodes[index+1:]...)
+	return a.persistLocked()
 }
 
 // persistLocked 把当前配置写回文件；调用方须已持有 a.mu。
@@ -606,14 +847,24 @@ func (a *App) Refresh(ctx context.Context, fetch bool) error {
 		copy(subs, a.cfg.Subscriptions)
 		ruleURLs := make([]config.RuleURL, len(a.cfg.RuleURLs))
 		copy(ruleURLs, a.cfg.RuleURLs)
+		manualEntries := make([]string, len(a.cfg.ManualNodes))
+		copy(manualEntries, a.cfg.ManualNodes)
 		a.mu.RUnlock()
 
 		// 订阅与规则源并发拉取
 		ruleCh := make(chan []ruleurl.Result, 1)
 		go func() { ruleCh <- ruleurl.FetchAll(ctx, ruleURLs, a.cfg.StateDir) }()
 
+		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
+		for _, err := range manualErrs {
+			if err != nil {
+				log.Printf("[manual] %v", err)
+			}
+		}
+
 		var errs []error
-		nodes, errs = subscribe.FetchAll(ctx, subs, a.cfg.StateDir, a.excludeRe)
+		nodes, errs = subscribe.FetchAll(ctx, subs, a.cfg.StateDir, a.excludeRe,
+			map[string][]*node.Node{subscribe.ManualSubscription: manual})
 		for _, err := range errs {
 			if err != nil {
 				log.Printf("[subscribe] %v", err)
@@ -665,13 +916,17 @@ func (a *App) Refresh(ctx context.Context, fetch bool) error {
 	a.mu.Lock()
 	a.assigns = assigns
 	a.mu.Unlock()
+	if err := node.SaveSnapshot(a.nodesSnapshotPath(), nodes); err != nil {
+		log.Printf("[snapshot] 保存节点快照失败: %v", err)
+	}
 	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
 	return nil
 }
 
-// Run 启动调度器：立即执行一轮完整刷新，之后按配置周期刷新订阅与检测健康。
-// 阻塞直到 ctx 取消。
+// Run 启动调度器：先加载节点快照立即提供服务，再执行一轮完整刷新，
+// 之后按配置周期刷新订阅与检测健康。阻塞直到 ctx 取消。
 func (a *App) Run(ctx context.Context) error {
+	a.restoreSnapshot()
 	if err := a.Refresh(ctx, true); err != nil {
 		log.Printf("[refresh] initial refresh failed: %v", err)
 	}
@@ -703,4 +958,51 @@ func (a *App) Shutdown() { a.runner.Shutdown() }
 
 func (a *App) snapshotPath() string {
 	return a.cfg.StateDir + "/mapping.json"
+}
+
+func (a *App) nodesSnapshotPath() string {
+	return a.cfg.StateDir + "/nodes.json"
+}
+
+// restoreSnapshot 启动时加载 nodes.json 节点快照并立即生成 mihomo 配置提供服务，
+// 不必等首次订阅刷新完成。快照缺失/损坏仅打日志丢弃，不致命。
+// 之后 Run 里的首次 Refresh 成功会覆盖；失败则快照保持可用。
+func (a *App) restoreSnapshot() {
+	snap, err := node.LoadSnapshot(a.nodesSnapshotPath())
+	if err != nil {
+		log.Printf("[snapshot] %v", err)
+		return
+	}
+	if snap == nil || len(snap.Nodes) == 0 {
+		return
+	}
+	var alive []*node.Node
+	for _, n := range snap.Nodes {
+		if n.Alive {
+			alive = append(alive, n)
+		}
+	}
+	if len(alive) == 0 {
+		log.Printf("[snapshot] 快照 %d 个节点均标记失效，等待首次刷新", len(snap.Nodes))
+		return
+	}
+
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
+	prev, err := pool.LoadSnapshot(a.snapshotPath())
+	if err != nil {
+		log.Printf("[alloc] load snapshot: %v (ignored)", err)
+	}
+	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
+	if err := a.regenerateLocked(assigns); err != nil {
+		log.Printf("[snapshot] 快照节点生成配置失败（等待首次刷新）: %v", err)
+		return
+	}
+	a.mu.Lock()
+	a.nodes = snap.Nodes
+	a.assigns = assigns
+	a.mu.Unlock()
+	log.Printf("[snapshot] 已从快照恢复 %d 个节点（%d 个可用，%d 个端口，保存于 %s）",
+		len(snap.Nodes), len(alive), len(assigns), snap.SavedAt.Format("2006-01-02 15:04:05"))
 }

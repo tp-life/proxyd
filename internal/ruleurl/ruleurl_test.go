@@ -138,3 +138,36 @@ func TestCachePathSanitize(t *testing.T) {
 		t.Errorf("cachePath = %q, want %q", p, want)
 	}
 }
+
+func TestContent(t *testing.T) {
+	stateDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "DOMAIN-SUFFIX,example.com,PROXY")
+	}))
+	ru := config.RuleURL{Name: "test-src", URL: srv.URL}
+
+	// 无缓存时现场拉取（原文，未解析），并写入缓存
+	body, err := Content(context.Background(), ru, stateDir)
+	if err != nil {
+		t.Fatalf("Content(现场拉取): %v", err)
+	}
+	if string(body) != "DOMAIN-SUFFIX,example.com,PROXY\n" {
+		t.Errorf("Content = %q", body)
+	}
+	if _, err := os.Stat(cachePath(stateDir, ru.Name)); err != nil {
+		t.Fatalf("现场拉取后应写缓存: %v", err)
+	}
+
+	// 源挂掉后走缓存
+	srv.Close()
+	body, err = Content(context.Background(), ru, stateDir)
+	if err != nil || string(body) != "DOMAIN-SUFFIX,example.com,PROXY\n" {
+		t.Errorf("Content(缓存命中) = %q, %v", body, err)
+	}
+
+	// 无缓存且拉取失败时报错
+	if _, err := Content(context.Background(),
+		config.RuleURL{Name: "no-such", URL: "http://127.0.0.1:1/x"}, stateDir); err == nil {
+		t.Error("无缓存且拉取失败时应返回错误")
+	}
+}

@@ -9,14 +9,21 @@
 ## 功能
 
 - 多个订阅源（Clash YAML 和 base64 分享链接两种格式，自动嗅探）
+- 手动节点（`manual-nodes`）：自有 http(s)/socks5 代理或 ss/vmess 等分享链接，与订阅节点同等参与测速/映射/分组
 - 可用节点自动映射到指定端口区间，映射关系稳定（重启/刷新后同一节点尽量保持原端口）
+- 节点快照持久化（`state-dir/nodes.json`）：启动即恢复最近一次的可用节点提供服务，断网/订阅挂掉也不丢节点
 - 定时刷新订阅（`refresh-interval`）+ 定时健康检测（`health-interval`），死节点自动下端口、新节点自动补位
-- 主端口完整支持 Clash 规则与三种代理模式（rule / global / direct），可热切换
+- 主端口完整支持 Clash 规则与三种代理模式（rule / global / direct），可热切换；可在线修改端口号（`POST /api/main-port` / `proxyd main-port`）
+- 可选「主端口使用最优节点」（`main-auto`）：主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
+- 可选「主端口固定节点」（`main-node`）：不开优选时主端口跳过规则、直达指定节点；节点失效自动回退规则模式，恢复后自动再生效
 - 可选「自动选优端口」（`auto-port`）：独立端口固定走全部可用节点中延迟最低者（url-test 组）
 - 自定义规则（追加式，前置到内置规则之前）+ 规则 URL 导入（mihomo 规则文本 / gfwlist）+ 节点分组端口（一组节点 → 指定端口，组内自动选优）
+- 后台守护模式：`proxyd start|stop|restart|status`（日志落 `state-dir/proxyd.log`）；`proxyd` 无参数等价于 `serve`
+- 开机自启：`proxyd autostart on|off|status`（macOS launchd / Linux systemd user / Windows 注册表）或 Web 设置页开关
 - 系统代理开关：CLI `proxyd sysproxy on|off|status` 或 Web 设置页，把系统代理指向主端口（macOS networksetup / Linux gsettings / Windows 注册表）
+- 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/port-range/auto-port/refresh/test`），作为本地 API 客户端操作运行中的实例
 - REST API 与 Web 控制台：
-  - `http://127.0.0.1:19091/` 内嵌 Web 控制台（概览、按订阅查看节点、端口映射、规则/分组/端口区间/系统代理管理）
+  - `http://127.0.0.1:19091/` 内嵌 Web 控制台（概览、按订阅查看节点、端口映射、规则/分组/端口区间/系统代理/开机自启管理）
   - `http://127.0.0.1:19090` mihomo external-controller（兼容 metacubexd / yacd 面板）
 - 订阅拉取失败时自动降级到本地缓存
 - 单二进制，跨平台（macOS / Linux / Windows，amd64 / arm64）
@@ -41,11 +48,36 @@ proxyd serve https://example.com/api/v1/client/subscribe?token=xxx
 # 自定义区间：proxyd serve -range 43000-43100 <url>
 ```
 
-**订阅地址会自动保存到默认配置文件 `~/.config/proxyd/config.yaml`**，之后直接 `proxyd serve`（不带任何参数）即可。也可以在 Web 控制台里随时增删订阅（同样自动落盘）。
+**订阅地址会自动保存到默认配置文件 `~/.config/proxyd/config.yaml`**，之后直接 `proxyd`（不带任何参数，等价于 `proxyd serve`）即可。也可以在 Web 控制台里随时增删订阅（同样自动落盘）。
 
 不给端口区间时默认用 `42000-42100`（主端口 `41999`，规则模式入口），内置默认规则（私网/国内直连，其余走代理）。
 
-启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：左侧菜单切换 概览 / 订阅与节点 / 端口映射 / 自定义规则 / 节点分组 / 设置，可增删订阅、按订阅展开查看节点（含失败原因）、一键切换 规则/全局/直连 模式、管理自定义规则与规则 URL、配置节点分组、调整端口区间与自动选优端口、开关系统代理。
+后台守护与开机自启：
+
+```sh
+proxyd start        # 后台运行（日志 state-dir/proxyd.log），自动等待就绪并打印 Web 地址
+proxyd status       # 查看 pid / 端口 / Web 地址
+proxyd restart      # 重启
+proxyd stop         # 停止（SIGTERM 优雅退出）
+proxyd autostart on   # 注册开机自启（macOS launchd / Linux systemd user / Windows 注册表）
+```
+
+日常管理也有全套 CLI（操作运行中实例，需先 start/serve）：
+
+```sh
+proxyd mode [rule|global|direct]      # 查看/切换模式
+proxyd nodes                          # 按订阅分组列出节点/端口/延迟/失败原因
+proxyd nodes add socks5://u:p@1.2.3.4:1080 我的节点   # 添加手动节点
+proxyd subs list | proxyd subs add <名> <url> | proxyd subs del <名>
+proxyd rules list | proxyd rules add "DOMAIN-SUFFIX,example.com,DIRECT" | proxyd rules del 0
+proxyd rule-urls list|add|del|show <名>   proxyd groups list|add|del
+proxyd port-range 43000-43100    proxyd auto-port 41998|off
+proxyd main-auto [on|off]        proxyd main-port 42999   # 主端口最优节点开关 / 改主端口
+proxyd main-node <节点key|off>                            # 主端口固定节点 / 清除
+proxyd refresh                   proxyd test
+```
+
+启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：顶部导航切换 概览 / 订阅与节点 / 端口映射 / 自定义规则 / 节点分组（设置已并入概览页），可增删订阅、订阅标签快捷定位节点、按订阅展开查看节点（含失败原因）、一键切换 规则/全局/直连 模式、管理自定义规则与规则 URL、配置节点分组、调整主端口/端口区间/自动选优端口、开关主端口最优节点、系统代理与开机自启（布尔项均为开关样式）。
 
 也可以命令行开关系统代理（指向主端口）：
 
@@ -79,7 +111,10 @@ PORT   NODE              SUBSCRIPTION   DELAY
 见 `configs/config.example.yaml` 注释。核心项：
 
 - `subscriptions`：多个订阅，`type` 默认 auto 自动嗅探
-- `port-range`：节点映射端口区间；`mixed-port`：主端口（默认区间前一位）
+- `manual-nodes`：手动节点（http(s)/socks5 URL 或分享链接），落盘在配置文件，与订阅节点同等待遇
+- `port-range`：节点映射端口区间；`mixed-port`：主端口（默认区间前一位，Web/CLI 可在线修改）
+- `main-auto`：主端口使用最优节点（默认 false）——主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
+- `main-node`：主端口固定节点（默认空）——不开优选时主端口跳过规则、直达指定节点（存节点 Key）；`main-auto` 开启时被忽略；节点失效自动回退规则模式、配置保留
 - `auto-port`：自动选优端口（0=关闭），固定走全部可用节点中延迟最低者，与主端口模式互不影响
 - `system-proxy`：true 时 serve 启动即把系统代理指向主端口，退出自动恢复
 - `mode`：`rule | global | direct`
@@ -88,7 +123,7 @@ PORT   NODE              SUBSCRIPTION   DELAY
 - `groups`：节点分组端口——`name`/`port`/`nodes`，组内 url-test 自动选优，端口独占一个 mixed listener
 - `exclude`：按节点名正则过滤机场信息节点（"到期""剩余流量"之类）
 - `rules` / `rule-providers` / `dns`：Clash 语义原样透传 mihomo
-- `state-dir`：端口映射快照与订阅缓存，默认 `~/.local/state/proxyd`
+- `state-dir`：状态目录（快照/缓存/pid/日志/geo 数据），默认 `~/.local/state/proxyd`——见手册「存储布局」
 
 注意：GEOIP/GEOSITE 规则需要 geo 数据文件。proxyd 默认从 jsDelivr 镜像（Loyalsoldier 主流规则仓库）下载，开箱即用；下载失败时会在日志提示并**自动降级为不含 GEO 规则运行**（其余规则照常），下一轮刷新自动重试恢复。也可以在配置里用 `geox-url` 换成自己的镜像：
 
@@ -101,21 +136,11 @@ geox-url:
 
 ## 常驻运行
 
-- macOS (launchd)：把 `proxyd serve -c /path/proxyd.yaml` 写入 `~/Library/LaunchAgents/com.proxyd.plist` 的 `ProgramArguments`，`RunAtLoad` + `KeepAlive`。
-- Linux (systemd)：
+一条命令注册开机自启（推荐）：`proxyd autostart on`（`status`/`off` 查看与移除）。
 
-  ```ini
-  [Unit]
-  Description=proxyd
-  After=network-online.target
-
-  [Service]
-  ExecStart=/usr/local/bin/proxyd serve -c /etc/proxyd.yaml
-  Restart=always
-
-  [Install]
-  WantedBy=multi-user.target
-  ```
+- **macOS**：写 `~/Library/LaunchAgents/com.proxyd.plist`（RunAtLoad + KeepAlive，日志指向 state-dir/proxyd.log）并 `launchctl bootstrap` 立即启动
+- **Linux**：写 `~/.config/systemd/user/proxyd.service` 并 `systemctl --user enable --now`（日志看 `journalctl --user -u proxyd`）
+- **Windows**：写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，登录时执行 `proxyd start`（派生后台进程，不弹控制台窗口）
 
 ## 开发
 
@@ -123,4 +148,4 @@ geox-url:
 go test ./...     # 单元测试 + 端到端测试（e2e/，本地假节点全流程验证）
 ```
 
-项目结构：`cmd/proxyd`（CLI）、`internal/config`（配置）、`internal/subscribe`（订阅拉取与解析）、`internal/ruleurl`（规则 URL 拉取与解析）、`internal/pool`（健康检测与端口分配）、`internal/core`（mihomo 配置生成与内嵌运行）、`internal/app`（调度编排）、`internal/api`（自有 REST API 与 Web 控制台）、`internal/sysproxy`（系统代理开关）。
+项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端）、`internal/config`（配置）、`internal/subscribe`（订阅拉取与解析、手动节点解析）、`internal/ruleurl`（规则 URL 拉取与解析）、`internal/node`（节点模型与 nodes.json 快照）、`internal/pool`（健康检测与端口分配）、`internal/core`（mihomo 配置生成与内嵌运行）、`internal/app`（调度编排）、`internal/api`（自有 REST API 与 Web 控制台）、`internal/sysproxy`（系统代理开关）、`internal/autostart`（开机自启）。

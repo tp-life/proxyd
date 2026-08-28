@@ -29,27 +29,67 @@ var version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
 	var err error
-	switch os.Args[1] {
-	case "serve":
-		err = cmdServe(os.Args[2:])
-	case "check":
-		err = cmdCheck(os.Args[2:])
-	case "sysproxy":
-		err = cmdSysproxy(os.Args[2:])
-	case "version", "-v", "--version":
-		fmt.Printf("proxyd %s\n", version)
+	switch {
+	case len(os.Args) < 2:
+		// 无参数默认 serve（沿用默认配置路径）
+		err = cmdServe(nil)
 	default:
-		// 快捷形式：proxyd <订阅地址> 等价于 proxyd serve <订阅地址>
-		if looksLikeURL(os.Args[1]) {
-			err = cmdServe(os.Args[1:])
-		} else {
+		switch os.Args[1] {
+		case "serve":
+			err = cmdServe(os.Args[2:])
+		case "start":
+			err = cmdStart(os.Args[2:])
+		case "stop":
+			err = cmdStop(os.Args[2:])
+		case "restart":
+			err = cmdRestart(os.Args[2:])
+		case "status":
+			err = cmdStatus(os.Args[2:])
+		case "check":
+			err = cmdCheck(os.Args[2:])
+		case "sysproxy":
+			err = cmdSysproxy(os.Args[2:])
+		case "autostart":
+			err = cmdAutostart(os.Args[2:])
+		case "mode":
+			err = cmdMode(os.Args[2:])
+		case "refresh":
+			err = cmdRefresh(os.Args[2:])
+		case "test":
+			err = cmdTest(os.Args[2:])
+		case "subs":
+			err = cmdSubs(os.Args[2:])
+		case "nodes":
+			err = cmdNodes(os.Args[2:])
+		case "rules":
+			err = cmdRules(os.Args[2:])
+		case "rule-urls":
+			err = cmdRuleURLs(os.Args[2:])
+		case "groups":
+			err = cmdGroups(os.Args[2:])
+		case "port-range":
+			err = cmdPortRange(os.Args[2:])
+		case "auto-port":
+			err = cmdAutoPort(os.Args[2:])
+		case "main-auto":
+			err = cmdMainAuto(os.Args[2:])
+		case "main-node":
+			err = cmdMainNode(os.Args[2:])
+		case "main-port":
+			err = cmdMainPort(os.Args[2:])
+		case "version", "-v", "--version":
+			fmt.Printf("proxyd %s\n", version)
+		case "-h", "--help", "help":
 			usage()
-			os.Exit(2)
+		default:
+			// 快捷形式：proxyd <订阅地址> 等价于 proxyd serve <订阅地址>
+			if looksLikeURL(os.Args[1]) {
+				err = cmdServe(os.Args[1:])
+			} else {
+				usage()
+				os.Exit(2)
+			}
 		}
 	}
 	if err != nil {
@@ -65,20 +105,42 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `proxyd %s — 多节点端口映射代理工具
 
 usage:
-  proxyd serve [flags] [订阅地址...]   常驻运行（映射端口 + 定时刷新/检测 + Web 控制台）
-  proxyd check [flags] [订阅地址...]   一次性拉取订阅、测速并打印端口映射表
-  proxyd sysproxy on|off|status [-c 配置文件]   开关/查看系统代理（指向主端口）
-  proxyd <订阅地址>                    serve 的快捷形式
-  proxyd version                       打印版本
+  proxyd                                等价于 proxyd serve（无参数直接运行）
+  proxyd serve [flags] [订阅地址...]    前台常驻运行（日志输出到终端）
+  proxyd start|stop|restart|status [flags]   后台守护模式（日志落 state-dir/proxyd.log）
+  proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
+  proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
+  proxyd autostart [-c 配置] on|off|status   开关/查看开机自启
+  proxyd <订阅地址>                     serve 的快捷形式
+  proxyd version                        打印版本
+
+本地管理命令（操作运行中实例的 API，需先 proxyd start/serve）:
+  proxyd mode [rule|global|direct]      查看/切换主端口代理模式
+  proxyd refresh                        刷新订阅与规则源
+  proxyd test                           手动测速
+  proxyd subs list|add <名> <url>|del <名>          订阅管理
+  proxyd nodes                          按订阅分组列出节点/端口/延迟
+  proxyd nodes add <url> [名称]         添加手动节点（http/socks5/分享链接）
+  proxyd nodes del <名称|下标>          删除手动节点
+  proxyd rules list|add "<规则>"|del <下标>        自定义规则
+  proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
+  proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
+  proxyd port-range <起-止>             修改节点映射端口区间
+  proxyd auto-port <端口|off>           设置自动选优端口
+  proxyd main-auto [on|off]             主端口固定走最优节点（跳过规则）；无参查看
+  proxyd main-node [节点key|off]        主端口固定走指定节点（跳过规则）；无参查看
+  proxyd main-port <端口>               修改主端口；无参查看
 
 flags:
   -c <文件>      配置文件路径（默认 ~/.config/proxyd/config.yaml；命令行给的订阅地址会自动保存进去）
   -range <区间>  节点映射端口区间，如 42000-42100（默认 %s）
+  注意：flag 需放在位置参数之前（Go flag 解析遇位置参数即停止）。
 
 examples:
   proxyd serve https://example.com/sub?token=xxx
   proxyd serve -range 43000-43100 https://a.com/sub https://b.com/link
-  proxyd serve -c proxyd.yaml
+  proxyd start -c proxyd.yaml
+  proxyd nodes add socks5://user:pass@1.2.3.4:1080 我的节点
 `, version, config.DefaultPortRange)
 }
 
@@ -154,6 +216,9 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	if pid, alive := readPIDFile(pidPath(cfg)); alive {
+		return fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
+	}
 	a, err := app.New(cfg, cfgPath)
 	if err != nil {
 		return err
@@ -162,6 +227,12 @@ func cmdServe(args []string) error {
 	apiSrv := api.New(cfg.APIListen, a)
 	if err := apiSrv.Start(); err != nil {
 		return fmt.Errorf("start api on %s: %w", cfg.APIListen, err)
+	}
+	// 登记 pid 文件（供 stop/status/防重复启动），退出时清理
+	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
+		log.Printf("[proxyd] 写 pid 文件失败（不影响运行）: %v", err)
+	} else {
+		defer func() { _ = os.Remove(pidPath(cfg)) }()
 	}
 	log.Printf("[proxyd] web 控制台: http://%s/", cfg.APIListen)
 	log.Printf("[proxyd] external controller: http://%s (可对接 metacubexd/yacd)", cfg.ExternalController)
@@ -194,7 +265,7 @@ func cmdSysproxy(args []string) error {
 	cfgFile := fs.String("c", config.DefaultPath(), "配置文件路径")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		return fmt.Errorf("用法: proxyd sysproxy on|off|status [-c 配置文件]")
+		return fmt.Errorf("用法: proxyd sysproxy [-c 配置文件] on|off|status")
 	}
 	cfg, err := config.Load(*cfgFile)
 	if err != nil {

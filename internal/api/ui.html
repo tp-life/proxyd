@@ -1,393 +1,1575 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>proxyd 控制台</title>
-<style>
-  :root { --bg:#0f1115; --card:#1a1d24; --border:#2a2e38; --fg:#e6e8ec; --dim:#8b919e;
-          --accent:#4f8cff; --ok:#34c759; --bad:#ff453a; }
-  * { box-sizing:border-box; margin:0; padding:0; }
-  body { background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; }
-  .layout { display:flex; min-height:100vh; }
-  nav { width:170px; flex-shrink:0; border-right:1px solid var(--border); padding:20px 0;
-        position:sticky; top:0; height:100vh; }
-  nav h1 { font-size:18px; padding:0 16px 16px; }
-  nav .item { display:block; padding:9px 16px; color:var(--dim); cursor:pointer; border-left:2px solid transparent;
-              user-select:none; }
-  nav .item:hover { color:var(--fg); }
-  nav .item.active { color:var(--fg); border-left-color:var(--accent); background:rgba(79,140,255,.08); }
-  main { flex:1; max-width:1000px; padding:24px 20px 64px; }
-  .panel { display:none; }
-  .panel.active { display:block; }
-  h2 { font-size:16px; margin-bottom:14px; }
-  h3 { font-size:14px; margin:18px 0 8px; color:var(--dim); font-weight:600; }
-  .modes { display:flex; gap:8px; }
-  .modes button { padding:6px 16px; border-radius:8px; border:1px solid var(--border);
-                  background:var(--card); color:var(--fg); cursor:pointer; font-size:14px; }
-  .modes button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
-  .btn { padding:6px 14px; border-radius:8px; border:1px solid var(--border); background:var(--card);
-         color:var(--fg); cursor:pointer; }
-  .btn:hover { border-color:var(--accent); }
-  .btn:disabled { opacity:.5; cursor:default; }
-  .muted { color:var(--dim); font-size:13px; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; margin-bottom:16px; }
-  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
-  .card .name { font-weight:600; margin-bottom:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .card .stat { font-size:13px; color:var(--dim); }
-  .card .stat b { color:var(--ok); }
-  .card .big { font-size:22px; font-weight:600; }
-  details { margin:0 0 10px; background:var(--card); border:1px solid var(--border); border-radius:10px; }
-  details > summary { cursor:pointer; padding:10px 14px; font-weight:600; user-select:none; }
-  details > .body { padding:0 14px 12px; }
-  table { width:100%; border-collapse:collapse; }
-  th,td { padding:7px 10px; text-align:left; border-bottom:1px solid var(--border); }
-  th { color:var(--dim); font-weight:600; font-size:12px; }
-  tr:last-child td { border-bottom:none; }
-  tr.dead td { color:var(--dim); }
-  .port { font-family:ui-monospace,Menlo,monospace; color:var(--accent); cursor:pointer; }
-  .port:hover { text-decoration:underline; }
-  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
-  .badge.ok { background:rgba(52,199,89,.15); color:var(--ok); }
-  .badge.bad { background:rgba(255,69,58,.15); color:var(--bad); }
-  .delay { font-family:ui-monospace,Menlo,monospace; }
-  .mono { font-family:ui-monospace,Menlo,monospace; font-size:13px; }
-  #toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--card);
-           border:1px solid var(--accent); padding:8px 18px; border-radius:8px; display:none; z-index:9; }
-  #toast.err { border-color:var(--bad); }
-  input[type=search], input[type=text], input[type=number] { padding:6px 12px; border-radius:8px;
-           border:1px solid var(--border); background:var(--card); color:var(--fg); }
-  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0; }
-  .nodepick { max-height:260px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;
-              padding:8px 10px; background:var(--card); column-width:260px; }
-  .nodepick label { display:block; padding:2px 0; white-space:nowrap; overflow:hidden;
-                    text-overflow:ellipsis; cursor:pointer; }
-  .nodepick label.dead { color:var(--dim); }
-  ul.plain { list-style:none; }
-  ul.plain li { display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); }
-  ul.plain li:last-child { border-bottom:none; }
-  .spin { display:inline-block; animation:sp 1s linear infinite; }
-  @keyframes sp { to { transform:rotate(360deg); } }
-</style>
-</head>
-<body>
-<div class="layout">
-  <nav id="nav">
-    <h1>proxyd</h1>
-    <a class="item active" data-panel="overview">概览</a>
-    <a class="item" data-panel="subs">订阅与节点</a>
-    <a class="item" data-panel="ports">端口映射</a>
-    <a class="item" data-panel="rules">自定义规则</a>
-    <a class="item" data-panel="groups">节点分组</a>
-    <a class="item" data-panel="settings">设置</a>
-  </nav>
-  <main>
-    <!-- 概览 -->
-    <section class="panel active" id="panel-overview">
-      <h2>概览</h2>
-      <div class="cards" id="statCards"></div>
-      <h3>代理模式（主端口）</h3>
-      <div class="modes" id="modes">
-        <button data-mode="rule">规则</button>
-        <button data-mode="global">全局</button>
-        <button data-mode="direct">直连</button>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>proxyd 控制台</title>
+    <style>
+      :root {
+        --bg: #f7f8fa;
+        --card: #ffffff;
+        --border: #e3e6eb;
+        --fg: #1f2329;
+        --dim: #6b7280;
+        --accent: #4f46e5;
+        --accent-dk: #4338ca;
+        --accent-lt: #818cf8;
+        --accent-bg: #eef2ff;
+        --navbg: #1e293b;
+        --navfg: #cbd5e1;
+        --ok: #16a34a;
+        --warn: #ca8a04;
+        --bad: #dc2626;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          14px/1.5 -apple-system,
+          "PingFang SC",
+          "Helvetica Neue",
+          sans-serif;
+      }
+
+      /* ---- 顶部导航（深色底）---- */
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 8;
+        background: var(--navbg);
+      }
+      .bar {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 20px;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        column-gap: 4px;
+      }
+      .brand {
+        font-size: 17px;
+        font-weight: 700;
+        padding: 12px 20px 12px 0;
+        color: #fff;
+      }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+      }
+      nav .item {
+        display: block;
+        padding: 13px 14px 11px;
+        color: var(--navfg);
+        cursor: pointer;
+        user-select: none;
+        border-bottom: 2px solid transparent;
+      }
+      nav .item:hover {
+        color: #fff;
+      }
+      nav .item.active {
+        color: #fff;
+        border-bottom-color: var(--accent-lt);
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 20px 64px;
+      }
+      .panel {
+        display: none;
+      }
+      .panel.active {
+        display: block;
+      }
+      h2 {
+        font-size: 17px;
+        margin-bottom: 14px;
+      }
+      h3 {
+        font-size: 13px;
+        margin: 22px 0 8px;
+        color: var(--dim);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .modes {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .modes button {
+        padding: 6px 16px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--fg);
+        cursor: pointer;
+        font-size: 14px;
+      }
+      .modes button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .modes button.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .btn {
+        padding: 6px 14px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--fg);
+        cursor: pointer;
+      }
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .btn.pri {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .btn.pri:hover {
+        background: var(--accent-dk);
+      }
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .muted {
+        color: var(--dim);
+        font-size: 13px;
+      }
+      .hint {
+        color: var(--dim);
+        font-size: 12px;
+        margin-top: 4px;
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 12px;
+        margin-bottom: 4px;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 12px 14px;
+        border-top: 2px solid var(--accent);
+      }
+      .card .name {
+        font-weight: 600;
+        margin-bottom: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .card .stat {
+        font-size: 13px;
+        color: var(--dim);
+      }
+      .card .stat b {
+        color: var(--ok);
+      }
+      .card .big {
+        font-size: 22px;
+        font-weight: 600;
+      }
+
+      details {
+        margin: 0 0 10px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        scroll-margin-top: 64px;
+        transition: border-color 0.3s;
+      }
+      details > summary {
+        cursor: pointer;
+        padding: 10px 14px;
+        font-weight: 600;
+        user-select: none;
+      }
+      details > .body {
+        padding: 0 14px 12px;
+      }
+      details.flash {
+        border-color: var(--accent);
+      }
+      details.flash > summary {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+
+      /* ---- 订阅快捷导航 chips ---- */
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .chip {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+        padding: 4px 12px;
+        font-size: 13px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--card);
+        cursor: pointer;
+      }
+      .chip:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .chip.active {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .chip .cnt {
+        font-size: 12px;
+        opacity: 0.75;
+        font-family: ui-monospace, Menlo, monospace;
+      }
+
+      /* ---- 已映射端口 chip 网格（概览页） ---- */
+      .pgrid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 4px 0 6px;
+      }
+      .pchip {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 6px;
+        padding: 4px 10px;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--card);
+        max-width: 240px;
+      }
+      .pchip .p {
+        font-family: ui-monospace, Menlo, monospace;
+        font-weight: 600;
+        color: var(--accent);
+      }
+      .pchip .n {
+        font-size: 12px;
+        color: var(--dim);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pchip:hover {
+        border-color: var(--accent);
+      }
+      .pchip.dead {
+        opacity: 0.55;
+      }
+      /* 特殊端口：主端口/自动优选 accent 描边，分组用 warn 色区分 */
+      .pchip.main {
+        border-color: var(--accent);
+      }
+      .pchip.main .n {
+        color: var(--accent);
+      }
+      .pchip.grp {
+        border-color: var(--warn);
+      }
+      .pchip.grp .n {
+        color: var(--warn);
+      }
+
+      .tw {
+        overflow-x: auto;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+      }
+      .tw table {
+        min-width: 560px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 7px 10px;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--dim);
+        font-weight: 600;
+        font-size: 12px;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      tr.dead td {
+        color: var(--dim);
+      }
+      td .nm,
+      .plain .nm {
+        max-width: 340px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .port {
+        font-family: ui-monospace, Menlo, monospace;
+        color: var(--accent);
+        cursor: pointer;
+      }
+      .port:hover {
+        text-decoration: underline;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        border: 1px solid transparent;
+      }
+      .badge.ok {
+        color: var(--ok);
+        border-color: var(--ok);
+      }
+      .badge.warn {
+        color: var(--warn);
+        border-color: var(--warn);
+      }
+      .badge.bad {
+        color: var(--bad);
+        border-color: var(--bad);
+      }
+      .delay {
+        font-family: ui-monospace, Menlo, monospace;
+      }
+      .dl-fast {
+        color: var(--ok);
+      }
+      .dl-mid {
+        color: var(--warn);
+      }
+      .dl-slow {
+        color: var(--bad);
+      }
+      .mono {
+        font-family: ui-monospace, Menlo, monospace;
+        font-size: 13px;
+      }
+
+      /* ---- 开关（纯 CSS toggle switch）---- */
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+      .switch input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .switch .slider {
+        position: absolute;
+        inset: 0;
+        background: #cbd2d9;
+        border-radius: 20px;
+        transition: background 0.15s;
+        cursor: pointer;
+      }
+      .switch .slider::before {
+        content: "";
+        position: absolute;
+        width: 16px;
+        height: 16px;
+        left: 2px;
+        top: 2px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.15s;
+      }
+      .switch input:checked + .slider {
+        background: var(--accent);
+      }
+      .switch input:checked + .slider::before {
+        transform: translateX(16px);
+      }
+      .opt {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 10px 0;
+      }
+      .opt label.tl {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        cursor: pointer;
+      }
+
+      #toast {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--card);
+        border: 1px solid var(--accent);
+        padding: 8px 18px;
+        border-radius: 4px;
+        display: none;
+        z-index: 9;
+      }
+      #toast.err {
+        border-color: var(--bad);
+      }
+
+      input[type="search"],
+      input[type="text"],
+      input[type="number"] {
+        padding: 6px 12px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--fg);
+      }
+      input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      input[type="checkbox"] {
+        accent-color: var(--accent);
+      }
+      /* ---- 定制下拉（排序/筛选/节点选择）：appearance:none + CSS 箭头 ---- */
+      select.sel {
+        appearance: none;
+        -webkit-appearance: none;
+        padding: 6px 30px 6px 12px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+        background-color: var(--card);
+        color: var(--fg);
+        font-size: 14px;
+        cursor: pointer;
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%234f46e5' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
+      }
+      select.sel:hover {
+        border-color: var(--accent);
+      }
+      select.sel:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      select.sel:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin: 10px 0;
+      }
+
+      /* ---- 分组编辑器的节点选择框：纵向列表 + 垂直滚动 ---- */
+      /* max-height 默认值；实际高度由 JS 按视口自适应（见 fitGrpNodes） */
+      .nodepick {
+        max-height: 340px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 4px;
+        background: var(--card);
+      }
+      .nodepick label {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 5px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .nodepick label:hover {
+        background: var(--bg);
+      }
+      .nodepick label:has(input:checked) {
+        background: var(--accent-bg);
+      }
+      .nodepick input {
+        flex-shrink: 0;
+      }
+      .nodepick .nm {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .nodepick label.dead .nm {
+        color: var(--dim);
+      }
+      /* 已被其他分组占用的节点：右侧组名 tag（可多个，溢出省略号，title 提示完整组名） */
+      .nodepick .tags {
+        display: flex;
+        gap: 4px;
+        overflow: hidden;
+        flex-shrink: 1;
+        max-width: 45%;
+      }
+      .nodepick .tag {
+        display: inline-block;
+        padding: 0 6px;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        border-radius: 4px;
+        font-size: 11px;
+        line-height: 18px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 90px;
+      }
+
+      ul.plain {
+        list-style: none;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0 12px;
+      }
+      ul.plain li {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      ul.plain li:last-child {
+        border-bottom: none;
+      }
+      /* 规则 URL 条目：内容区独占一行（flex 换行） */
+      ul.plain li.ruli {
+        flex-wrap: wrap;
+      }
+      /* 规则 URL 原始内容折叠区：限高 + 纵向滚动 */
+      .rucontent {
+        max-height: 360px;
+        overflow: auto;
+        font:
+          12px ui-monospace,
+          Menlo,
+          monospace;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 8px 10px;
+        margin: 6px 0 2px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .spin {
+        display: inline-block;
+        animation: sp 1s linear infinite;
+      }
+      @keyframes sp {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="bar">
+        <span class="brand">proxyd</span>
+        <nav id="nav">
+          <a class="item active" data-panel="overview">概览</a>
+          <a class="item" data-panel="subs">订阅与节点</a>
+          <a class="item" data-panel="ports">端口映射</a>
+          <a class="item" data-panel="rules">自定义规则</a>
+          <a class="item" data-panel="groups">节点分组</a>
+        </nav>
       </div>
-      <h3>操作</h3>
-      <div class="row">
-        <button class="btn" id="testBtn">手动测速</button>
-        <button class="btn" id="refreshBtn">刷新订阅</button>
-        <span class="muted" id="opStatus"></span>
-      </div>
-      <p class="muted" id="meta"></p>
-    </section>
+    </header>
+    <main>
+      <!-- 概览（状态摘要 + 设置） -->
+      <section class="panel active" id="panel-overview">
+        <h2>概览</h2>
+        <div class="cards" id="statCards"></div>
+        <h3>已映射端口</h3>
+        <div class="pgrid" id="portChips"></div>
+        <h3>代理模式（主端口）</h3>
+        <div class="modes" id="modes">
+          <button data-mode="rule">规则</button>
+          <button data-mode="global">全局</button>
+          <button data-mode="direct">直连</button>
+        </div>
+        <p class="hint" id="modeHint" style="display: none">
+          主端口使用最优节点已开启，模式切换对主端口不生效
+        </p>
+        <p class="muted" id="meta"></p>
 
-    <!-- 订阅与节点 -->
-    <section class="panel" id="panel-subs">
-      <h2>订阅与节点</h2>
-      <div class="row">
-        <input type="text" id="subUrl" placeholder="粘贴订阅地址 https://…" style="flex:1;max-width:480px">
-        <button class="btn" id="addSubBtn">添加订阅</button>
-      </div>
-      <div id="subList"></div>
-    </section>
+        <h3>主端口</h3>
+        <div class="row">
+          <input
+            type="number"
+            id="mainPort"
+            style="width: 120px"
+            min="1"
+            max="65535"
+          />
+          <button class="btn pri" id="saveMainPortBtn">保存</button>
+          <span class="muted"
+            >规则模式入口；保存后立即热更新，系统代理开启时自动重绑</span
+          >
+        </div>
+        <div class="opt">
+          <label class="tl"
+            ><span class="switch"
+              ><input type="checkbox" id="mainAutoOn" /><span
+                class="slider"
+              ></span
+            ></span>
+            主端口使用最优节点</label
+          >
+        </div>
+        <p class="hint">
+          开启后主端口跳过规则、直连最优节点（与自动选优端口并存，互不影响）
+        </p>
+        <div class="opt">
+          <label class="tl">固定节点</label>
+          <select class="sel" id="mainNode" style="max-width: 320px"></select>
+          <span class="muted" id="mainNodeHint"></span>
+        </div>
+        <p class="hint">
+          不开优选时可把主端口固定到指定节点（跳过规则）；节点失效时自动回退规则模式，恢复后自动再生效
+        </p>
 
-    <!-- 端口映射 -->
-    <section class="panel" id="panel-ports">
-      <h2>端口映射（每端口固定走对应节点）</h2>
-      <table>
-        <thead><tr><th>端口</th><th>节点</th><th>订阅</th><th>延迟</th><th>状态</th></tr></thead>
-        <tbody id="ports"></tbody>
-      </table>
-    </section>
+        <h3>节点映射端口区间</h3>
+        <div class="row">
+          <input type="number" id="rangeLo" style="width: 110px" /> —
+          <input type="number" id="rangeHi" style="width: 110px" />
+          <button class="btn pri" id="saveRangeBtn">保存</button>
+          <span class="muted">保存后立即重新分配端口并热更新</span>
+        </div>
 
-    <!-- 自定义规则 -->
-    <section class="panel" id="panel-rules">
-      <h2>自定义规则</h2>
-      <p class="muted">规则逐条前置到内置规则之前，先生效。支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD /
-        IP-CIDR / GEOSITE / GEOIP 等 mihomo 规则语法，格式 <span class="mono">类型,内容,策略</span>，策略可填 DIRECT / REJECT / 节点名 / 分组名。</p>
-      <ul class="plain" id="rules"></ul>
-      <div class="row">
-        <input type="text" id="ruleInput" class="mono" placeholder="DOMAIN-SUFFIX,example.com,DIRECT" style="flex:1;max-width:520px">
-        <button class="btn" id="addRuleBtn">添加规则</button>
-      </div>
-      <h3>规则 URL（跟随订阅刷新拉取，支持 mihomo 规则文本 / gfwlist）</h3>
-      <ul class="plain" id="ruleUrls"></ul>
-      <div class="row">
-        <input type="text" id="ruName" placeholder="名称，如 gfwlist" style="width:160px">
-        <input type="text" id="ruUrl" placeholder="https://…" style="flex:1;max-width:420px">
-        <button class="btn" id="addRuBtn">添加规则 URL</button>
-      </div>
-    </section>
+        <h3>自动选优端口</h3>
+        <div class="opt">
+          <label class="tl"
+            ><span class="switch"
+              ><input type="checkbox" id="autoPortOn" /><span
+                class="slider"
+              ></span
+            ></span>
+            启用</label
+          >
+          <input
+            type="number"
+            id="autoPort"
+            placeholder="41998"
+            style="width: 110px"
+          />
+          <button class="btn pri" id="saveAutoPortBtn">保存</button>
+        </div>
+        <p class="hint">独立端口固定走延迟最低的可用节点，与主端口互不影响</p>
 
-    <!-- 节点分组 -->
-    <section class="panel" id="panel-groups">
-      <h2>节点分组（一组节点 → 指定端口，自动选优）</h2>
-      <p class="muted">分组成员取所选节点与当前可用节点的交集；组内按延迟自动选优（url-test）。失效节点也可勾选，恢复后自动加入。</p>
-      <ul class="plain" id="groups"></ul>
-      <div class="row">
-        <input type="text" id="grpName" placeholder="分组名" style="width:160px">
-        <input type="number" id="grpPort" placeholder="端口" style="width:110px">
-        <button class="btn" id="addGrpBtn">添加分组</button>
-      </div>
-      <div class="nodepick" id="grpNodes"></div>
-    </section>
+        <h3>系统代理</h3>
+        <div class="opt">
+          <label class="tl"
+            ><span class="switch"
+              ><input type="checkbox" id="sysProxyOn" /><span
+                class="slider"
+              ></span
+            ></span>
+            把系统代理指向主端口（<span id="sysProxyTarget"></span>）</label
+          >
+        </div>
+        <p class="hint">
+          关闭 proxyd 前请先在此关闭，或用 proxyd sysproxy off 恢复
+        </p>
 
-    <!-- 设置 -->
-    <section class="panel" id="panel-settings">
-      <h2>设置</h2>
-      <h3>节点映射端口区间</h3>
-      <div class="row">
-        <input type="number" id="rangeLo" style="width:110px"> —
-        <input type="number" id="rangeHi" style="width:110px">
-        <button class="btn" id="saveRangeBtn">保存</button>
-        <span class="muted">保存后立即重新分配端口并热更新</span>
-      </div>
-      <h3>自动选优端口（固定走延迟最低的可用节点）</h3>
-      <div class="row">
-        <label><input type="checkbox" id="autoPortOn"> 启用</label>
-        <input type="number" id="autoPort" placeholder="41998" style="width:110px">
-        <button class="btn" id="saveAutoPortBtn">保存</button>
-      </div>
-      <h3>系统代理</h3>
-      <div class="row">
-        <label><input type="checkbox" id="sysProxyOn"> 把系统代理指向主端口（<span id="sysProxyTarget"></span>）</label>
-        <span class="muted">关闭 proxyd 前请先在此关闭，或用 proxyd sysproxy off 恢复</span>
-      </div>
-    </section>
-  </main>
-</div>
-<div id="toast"></div>
+        <h3>开机自启</h3>
+        <div class="opt">
+          <label class="tl"
+            ><span class="switch"
+              ><input type="checkbox" id="autostartOn" /><span
+                class="slider"
+              ></span
+            ></span>
+            登录后自动后台运行 proxyd</label
+          >
+        </div>
+        <p class="hint">也可用 proxyd autostart on|off|status 管理</p>
+      </section>
 
-<script>
-const $ = s => document.querySelector(s);
-let data = null, ruleUrls = [];
-const grpSel = new Set(); // 分组编辑器里勾选的节点名
+      <!-- 订阅与节点 -->
+      <section class="panel" id="panel-subs">
+        <h2>订阅与节点</h2>
+        <div class="row">
+          <button class="btn" id="testBtn">手动测速</button>
+          <button class="btn" id="refreshBtn">刷新订阅</button>
+          <span class="muted" id="opStatus"></span>
+        </div>
+        <h3>
+          手动节点（自有代理：http(s)/socks5 URL 或 ss/vmess
+          等分享链接，落盘到配置文件）
+        </h3>
+        <div id="manualSec" style="scroll-margin-top: 64px">
+          <div id="manualNodeList"></div>
+          <div class="row">
+            <input
+              type="text"
+              id="mnUrl"
+              placeholder="socks5://user:pass@host:1080 或 ss://…"
+              style="flex: 1; max-width: 480px"
+            />
+            <input
+              type="text"
+              id="mnName"
+              placeholder="名称（可选）"
+              style="width: 140px"
+            />
+            <button class="btn pri" id="addMnBtn">添加节点</button>
+          </div>
+        </div>
+        <h3>订阅</h3>
+        <div class="chips" id="subChips"></div>
+        <div class="row">
+          <input
+            type="text"
+            id="subUrl"
+            placeholder="粘贴订阅地址 https://…"
+            style="flex: 1; max-width: 480px"
+          />
+          <button class="btn pri" id="addSubBtn">添加订阅</button>
+        </div>
+        <div id="subList"></div>
+      </section>
 
-function toast(msg, isErr) {
-  const t = $('#toast'); t.textContent = msg; t.className = isErr ? 'err' : ''; t.style.display = 'block';
-  setTimeout(() => t.style.display = 'none', 2200);
-}
+      <!-- 端口映射 -->
+      <section class="panel" id="panel-ports">
+        <h2>端口映射（每端口固定走对应节点）</h2>
+        <div class="row">
+          <select id="portSort" class="sel">
+            <option value="default">默认排序</option>
+            <option value="delay">按延迟排序</option>
+          </select>
+        </div>
+        <div class="tw">
+          <table>
+            <thead>
+              <tr>
+                <th>端口</th>
+                <th>节点</th>
+                <th>订阅</th>
+                <th>延迟</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="ports"></tbody>
+          </table>
+        </div>
+      </section>
 
-// ---- 导航 ----
-document.querySelectorAll('#nav .item').forEach(el => el.onclick = () => {
-  document.querySelectorAll('#nav .item').forEach(x => x.classList.toggle('active', x === el));
-  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + el.dataset.panel));
-});
+      <!-- 自定义规则 -->
+      <section class="panel" id="panel-rules">
+        <h2>自定义规则</h2>
+        <p class="muted">
+          规则逐条前置到内置规则之前，先生效。支持 DOMAIN / DOMAIN-SUFFIX /
+          DOMAIN-KEYWORD / IP-CIDR / GEOSITE / GEOIP 等 mihomo 规则语法，格式
+          <span class="mono">类型,内容,策略</span>，策略可填 DIRECT / REJECT /
+          节点名 / 分组名。
+        </p>
+        <ul class="plain" id="rules" style="margin-top: 10px"></ul>
+        <div class="row">
+          <input
+            type="text"
+            id="ruleInput"
+            class="mono"
+            placeholder="DOMAIN-SUFFIX,example.com,DIRECT"
+            style="flex: 1; max-width: 520px"
+          />
+          <button class="btn pri" id="addRuleBtn">添加规则</button>
+        </div>
+        <h3>规则 URL（跟随订阅刷新拉取，支持 mihomo 规则文本 / gfwlist）</h3>
+        <ul class="plain" id="ruleUrls"></ul>
+        <div class="row">
+          <input
+            type="text"
+            id="ruName"
+            placeholder="名称，如 gfwlist"
+            style="width: 160px"
+          />
+          <input
+            type="text"
+            id="ruUrl"
+            placeholder="https://…"
+            style="flex: 1; max-width: 420px"
+          />
+          <button class="btn pri" id="addRuBtn">添加规则 URL</button>
+        </div>
+      </section>
 
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      <!-- 节点分组 -->
+      <section class="panel" id="panel-groups">
+        <h2>节点分组（一组节点 → 指定端口，自动选优）</h2>
+        <p class="muted">
+          分组成员取所选节点与当前可用节点的交集；组内按延迟自动选优（url-test）。失效节点也可勾选，恢复后自动加入。
+        </p>
+        <ul class="plain" id="groups" style="margin-top: 10px"></ul>
+        <div class="row">
+          <input
+            type="text"
+            id="grpName"
+            placeholder="分组名"
+            style="width: 160px"
+          />
+          <input
+            type="number"
+            id="grpPort"
+            placeholder="端口"
+            style="width: 110px"
+          />
+          <button class="btn pri" id="addGrpBtn">添加分组</button>
+        </div>
+        <div class="row">
+          <select id="grpSort" class="sel">
+            <option value="default">默认排序</option>
+            <option value="delay">按延迟排序</option>
+          </select>
+          <span class="muted"
+            >仅影响下方待选列表的显示顺序，不影响已保存分组</span
+          >
+        </div>
+        <div class="nodepick" id="grpNodes"></div>
+      </section>
+    </main>
+    <div id="toast"></div>
 
-function nodeStatus(n) {
-  return n.alive ? '<span class="badge ok">可用</span>'
-                 : `<span class="badge bad" title="${esc(n.fail_reason || '')}">失效</span>`;
-}
+    <script>
+      const $ = (s) => document.querySelector(s);
+      let data = null,
+        ruleUrls = [];
+      const grpSel = new Set(); // 分组编辑器里勾选的节点名
+      let activeChip = null; // 订阅快捷导航当前选中（null=全部，'manual'=手动节点，其余为订阅名）
+      let portSort = "default"; // 端口映射排序：default=端口顺序，delay=按延迟（内存态，不持久化）
+      let grpSort = "default"; // 分组待选节点排序：同上，仅影响显示顺序（内存态，不持久化）
+      const subSort = {}; // 每个订阅（含手动节点表，key="manual"）节点排序：default|asc|desc（内存态，不持久化）
+      const ruContent = {}; // 规则 URL 原始内容的展开状态与已拉取文本（render 每 10s 重绘后据此恢复）
 
-function render() {
-  if (!data) return;
-  const alive = data.nodes.filter(n => n.alive).length;
+      function toast(msg, isErr) {
+        const t = $("#toast");
+        t.textContent = msg;
+        t.className = isErr ? "err" : "";
+        t.style.display = "block";
+        setTimeout(() => (t.style.display = "none"), 2200);
+      }
 
-  // 概览
-  $('#statCards').innerHTML = `
-    <div class="card"><div class="stat">主端口（${esc(data.mode)} 模式）</div><div class="big mono">${data.mixed_port}</div></div>
-    <div class="card"><div class="stat">自动选优端口</div><div class="big mono">${data.auto_port || '关闭'}</div></div>
+      // ---- 导航 ----
+      document.querySelectorAll("#nav .item").forEach(
+        (el) =>
+          (el.onclick = () => {
+            document
+              .querySelectorAll("#nav .item")
+              .forEach((x) => x.classList.toggle("active", x === el));
+            document
+              .querySelectorAll(".panel")
+              .forEach((p) =>
+                p.classList.toggle(
+                  "active",
+                  p.id === "panel-" + el.dataset.panel,
+                ),
+              );
+            if (el.dataset.panel === "groups") fitGrpNodes();
+          }),
+      );
+
+      // 节点选择框高度自适应视口：框底延伸到视口底部附近（留 24px 边距），
+      // 面板切换/窗口缩放/数据渲染后重算（上方分组列表高度会变，纯 CSS calc 拿不到准确偏移）。
+      function fitGrpNodes() {
+        const el = $("#grpNodes");
+        if (!el || !el.offsetParent) return; // 面板隐藏时跳过
+        const h = window.innerHeight - el.getBoundingClientRect().top - 24;
+        el.style.maxHeight = Math.max(160, h) + "px";
+      }
+      window.addEventListener("resize", fitGrpNodes);
+
+      const esc = (s) =>
+        String(s).replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+
+      // 延迟按快慢上色：<300ms 绿 / <800ms 黄 / 其余红；失效置灰
+      const delaySpan = (n) =>
+        n.alive
+          ? `<span class="delay ${n.delay < 300 ? "dl-fast" : n.delay < 800 ? "dl-mid" : "dl-slow"}">${n.delay}ms</span>`
+          : '<span class="delay muted">—</span>';
+
+      function nodeStatus(n) {
+        return n.alive
+          ? '<span class="badge ok">可用</span>'
+          : `<span class="badge bad" title="${esc(n.fail_reason || "")}">失效</span>`;
+      }
+
+      // 订阅节点表格行（订阅分组与手动节点健康表共用）
+      function nodeRow(n) {
+        // 操作列：设为主端口。节点失效/未分配端口时不可用；已是主端口时仅标识
+        const isMain = data.main_node && data.main_node === n.key;
+        const opBtn = isMain
+          ? `<button class="btn" style="padding:0 8px;font-size:12px" disabled>当前主端口</button>`
+          : `<button class="btn" style="padding:0 8px;font-size:12px" data-main-node="${esc(n.key)}"${n.alive && n.port ? "" : ' disabled title="节点失效或未分配端口"'}>设为主端口</button>`;
+        return `
+    <tr class="${n.alive ? "" : "dead"}"><td><div class="nm" title="${esc(n.name)}">${esc(n.name)}</div></td><td class="muted">${esc(n.type)}</td>
+    <td class="delay">${n.port || "—"}</td>
+    <td>${delaySpan(n)}</td>
+    <td>${nodeStatus(n)}${!n.alive && n.fail_reason ? ` <span class="muted">${esc(n.fail_reason)}</span>` : ""}</td>
+    <td>${opBtn}</td></tr>`;
+      }
+
+      // 订阅节点表排序：asc=延迟升序，desc=延迟降序；失效/未测速排最后，同值按端口。
+      // 不动原始数组，仅影响显示顺序（default 时原样返回）。
+      function sortNodes(list, mode) {
+        if (mode !== "asc" && mode !== "desc") return list;
+        return [...list].sort((a, b) => {
+          const da = a.alive && a.delay > 0 ? a.delay : Infinity;
+          const db = b.alive && b.delay > 0 ? b.delay : Infinity;
+          // 两者都失效时 da-db 为 NaN（falsy），自动回退端口比较
+          const cmp = mode === "asc" ? da - db : db - da;
+          return cmp || (a.port || Infinity) - (b.port || Infinity);
+        });
+      }
+
+      // 订阅排序下拉：选中态从 subSort 恢复（render 重绘不丢状态）
+      function subSortSel(key) {
+        const v = subSort[key] || "default";
+        return `<select class="sel" data-sub-sort="${esc(key)}">
+      <option value="default"${v === "default" ? " selected" : ""}>默认排序</option>
+      <option value="asc"${v === "asc" ? " selected" : ""}>延迟升序</option>
+      <option value="desc"${v === "desc" ? " selected" : ""}>延迟降序</option></select>`;
+      }
+
+      function render() {
+        if (!data) return;
+        const alive = data.nodes.filter((n) => n.alive).length;
+
+        // 概览：状态摘要
+        $("#statCards").innerHTML = `
+    <div class="card"><div class="stat">主端口（${data.main_auto ? "最优节点" : esc(data.mode) + " 模式"}）</div><div class="big mono">${data.mixed_port}</div></div>
+    <div class="card"><div class="stat">自动选优端口</div><div class="big mono">${data.auto_port || "关闭"}</div></div>
     <div class="card"><div class="stat">节点 可用/总数</div><div class="big">${alive} / ${data.nodes.length}</div></div>
-    <div class="card"><div class="stat">端口映射</div><div class="big mono">${data.ports.length} 个（${data.port_range[0]}-${data.port_range[1]}）</div></div>`;
-  document.querySelectorAll('#modes button').forEach(b =>
-    b.classList.toggle('active', b.dataset.mode === data.mode));
-  $('#meta').textContent = `监听 ${data.listen} ｜ 系统代理 ${data.system_proxy ? '开' : '关'} ｜ 更新于 ${new Date().toLocaleTimeString()}`;
+    <div class="card"><div class="stat">端口映射</div><div class="big mono">${data.ports.length} 个</div></div>`;
 
-  // 订阅与节点：按订阅分组，可折叠
-  $('#subList').innerHTML = data.subscriptions.map(s => {
-    const nodes = data.nodes.filter(n => n.subscription === s.name);
-    const rows = nodes.map(n => `
-      <tr class="${n.alive ? '' : 'dead'}"><td>${esc(n.name)}</td><td class="muted">${esc(n.type)}</td>
-      <td class="delay">${n.port || '—'}</td>
-      <td class="delay">${n.alive ? n.delay + 'ms' : '—'}</td>
-      <td>${nodeStatus(n)}${!n.alive && n.fail_reason ? ` <span class="muted">${esc(n.fail_reason)}</span>` : ''}</td></tr>`).join('')
-      || '<tr><td colspan="5" class="muted">该订阅暂无节点</td></tr>';
-    return `<details open><summary>${esc(s.name)}　<span class="muted">节点 ${s.alive}/${s.total} 可用</span>
+        // 已映射端口 chip 网格：节点映射端口折叠为区间（42000-42051）+
+        // 特殊端口（主端口/自动优选/分组）逐个展示，按端口升序
+        {
+          const chips = [
+            {
+              port: data.mixed_port,
+              label: data.main_auto
+                ? "主端口·最优节点"
+                : data.main_node
+                  ? "主端口·固定节点"
+                  : "主端口·规则模式",
+              cls: "main",
+            },
+          ];
+          if (data.auto_port)
+            chips.push({
+              port: data.auto_port,
+              label: "自动优选",
+              cls: "main",
+            });
+          (data.groups || []).forEach((g) =>
+            chips.push({ port: g.port, label: "分组·" + g.name, cls: "grp" }),
+          );
+          if (data.ports.length) {
+            const lo = Math.min(...data.ports.map((p) => p.port));
+            const hi = Math.max(...data.ports.map((p) => p.port));
+            chips.push({
+              port: lo,
+              text: lo === hi ? String(lo) : `${lo}-${hi}`,
+              label: "节点映射",
+              cls: "",
+            });
+          }
+          chips.sort((a, b) => a.port - b.port);
+          $("#portChips").innerHTML =
+            chips
+              .map(
+                (c) =>
+                  `<span class="pchip ${c.cls}" title="${esc(c.text || String(c.port))} · ${esc(c.label)}"><span class="p">${esc(c.text || String(c.port))}</span><span class="n">${esc(c.label)}</span></span>`,
+              )
+              .join("") +
+            (data.ports.length
+              ? ""
+              : '<span class="muted" style="align-self:center">暂无节点映射</span>');
+        }
+        document
+          .querySelectorAll("#modes button")
+          .forEach((b) =>
+            b.classList.toggle("active", b.dataset.mode === data.mode),
+          );
+        $("#modeHint").style.display = data.main_auto ? "" : "none";
+        // “更新于”显示服务器本地时间（overview.server_time 为带时区偏移的 RFC3339，
+        // 用 Date 解析而非字符串截取，避免时区换算错误）；老版本无该字段时回退浏览器时间
+        const updated = data.server_time
+          ? new Date(data.server_time)
+          : new Date();
+        $("#meta").textContent =
+          `监听 ${data.listen} ｜ 已映射 ${data.ports.length} 个端口 ｜ 系统代理 ${data.system_proxy ? "开" : "关"} ｜ 更新于 ${updated.toLocaleTimeString("zh-CN", { hour12: false })}`;
+
+        // 订阅与节点：手动节点管理区（面板顶部）
+        const mnHealth = data.nodes.filter((n) => n.subscription === "manual");
+        const mnRows = sortNodes(mnHealth, subSort.manual)
+          .map(nodeRow)
+          .join("");
+        const mnEntries = (data.manual_nodes || [])
+          .map(
+            (m) => `
+    <li><b>${esc(m.name || "(无法解析)")}</b>
+    <span class="muted mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(m.url)}</span>
+    <button class="btn" style="padding:0 8px;font-size:12px" data-del-mn="${m.index}">删除</button></li>`,
+          )
+          .join("");
+        $("#manualNodeList").innerHTML =
+          `<ul class="plain">${mnEntries || '<li class="muted">暂无手动节点</li>'}</ul>` +
+          (mnHealth.length
+            ? `<div class="row" style="margin:8px 0 0">${subSortSel("manual")}</div><div class="tw" style="margin-top:8px"><table><thead><tr><th>节点</th><th>类型</th><th>端口</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead><tbody>${mnRows}</tbody></table></div>`
+            : "");
+
+        // 订阅快捷导航 chips（含手动节点一项）
+        const mnTotal = (data.manual_nodes || []).length;
+        const chips = [
+          `<span class="chip${activeChip === null ? " active" : ""}" data-chip="">全部</span>`,
+        ]
+          .concat(
+            data.subscriptions.map(
+              (s) =>
+                `<span class="chip${activeChip === s.name ? " active" : ""}" data-chip="${esc(s.name)}">${esc(s.name)} <span class="cnt">${s.alive}/${s.total}</span></span>`,
+            ),
+          )
+          .concat(
+            mnTotal
+              ? [
+                  `<span class="chip${activeChip === "manual" ? " active" : ""}" data-chip="manual">手动节点 <span class="cnt">${mnHealth.filter((n) => n.alive).length}/${mnTotal}</span></span>`,
+                ]
+              : [],
+          );
+        $("#subChips").innerHTML = chips.join("");
+
+        // 订阅列表：按订阅分组，可折叠（chip 点击定位时自动展开 + 高亮）
+        $("#subList").innerHTML =
+          data.subscriptions
+            .map((s, i) => {
+              const rows =
+                sortNodes(
+                  data.nodes.filter((n) => n.subscription === s.name),
+                  subSort[s.name],
+                )
+                  .map(nodeRow)
+                  .join("") ||
+                '<tr><td colspan="6" class="muted">该订阅暂无节点</td></tr>';
+              return `<details open id="sub-idx-${i}"><summary>${esc(s.name)}　<span class="muted">节点 ${s.alive}/${s.total} 可用</span>
       <button class="btn" style="float:right;padding:0 8px;font-size:12px" data-del-sub="${esc(s.name)}">删除</button></summary>
-      <div class="body"><table>
-      <thead><tr><th>节点</th><th>类型</th><th>端口</th><th>延迟</th><th>状态</th></tr></thead>
-      <tbody>${rows}</tbody></table></div></details>`;
-  }).join('') || '<div class="muted">暂无订阅，可在上方添加</div>';
+      <div class="body"><div class="row" style="margin:0 0 8px">${subSortSel(s.name)}</div><div class="tw" style="border:none"><table>
+      <thead><tr><th>节点</th><th>类型</th><th>端口</th><th>延迟</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div></details>`;
+            })
+            .join("") || '<div class="muted">暂无订阅，可在上方添加</div>';
 
-  // 端口映射
-  $('#ports').innerHTML = data.ports.map(p => `
+        // 端口映射（可选按延迟排序：delay<=0/失效排最后，同延迟按端口；不动原始数据）
+        let plist = data.ports;
+        if (portSort === "delay") {
+          plist = [...data.ports].sort((a, b) => {
+            const da = a.alive && a.delay > 0 ? a.delay : Infinity;
+            const db = b.alive && b.delay > 0 ? b.delay : Infinity;
+            return da - db || a.port - b.port;
+          });
+        }
+        $("#ports").innerHTML =
+          plist
+            .map(
+              (p) => `
     <tr><td class="port" title="点击复制代理地址" data-copy="http://${data.listen}:${p.port}">${p.port}</td>
-    <td>${esc(p.node)}</td><td class="muted">${esc(p.subscription)}</td>
-    <td class="delay">${p.delay}ms</td>
-    <td><span class="badge ${p.alive?'ok':'bad'}">${p.alive?'可用':'失效'}</span></td></tr>`).join('')
-    || '<tr><td colspan="5" class="muted">暂无映射</td></tr>';
+    <td><div class="nm" title="${esc(p.node)}">${esc(p.node)}</div></td><td class="muted">${esc(p.subscription)}</td>
+    <td>${p.alive ? `<span class="delay ${p.delay < 300 ? "dl-fast" : p.delay < 800 ? "dl-mid" : "dl-slow"}">${p.delay}ms</span>` : '<span class="delay muted">—</span>'}</td>
+    <td><span class="badge ${p.alive ? "ok" : "bad"}">${p.alive ? "可用" : "失效"}</span></td></tr>`,
+            )
+            .join("") || '<tr><td colspan="5" class="muted">暂无映射</td></tr>';
 
-  // 自定义规则
-  $('#rules').innerHTML = (data.custom_rules || []).map((r, i) => `
+        // 自定义规则
+        $("#rules").innerHTML =
+          (data.custom_rules || [])
+            .map(
+              (r, i) => `
     <li><span class="mono" style="flex:1">${esc(r)}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-rule="${i}">删除</button></li>`).join('')
-    || '<li class="muted">暂无自定义规则</li>';
+    <button class="btn" style="padding:0 8px;font-size:12px" data-del-rule="${i}">删除</button></li>`,
+            )
+            .join("") || '<li class="muted">暂无自定义规则</li>';
 
-  // 规则 URL
-  $('#ruleUrls').innerHTML = ruleUrls.map(ru => `
-    <li><b>${esc(ru.name)}</b><span class="muted mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(ru.url)}</span>
-    <span class="muted">${ru.error ? '拉取失败' : ru.count + ' 条' + (ru.warn ? '（缓存）' : '')}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-ru="${esc(ru.name)}">删除</button></li>`).join('')
-    || '<li class="muted">暂无规则 URL</li>';
+        // 规则 URL（「查看内容」展开原始文本；展开态与文本存 ruContent，重绘后恢复）
+        $("#ruleUrls").innerHTML =
+          ruleUrls
+            .map((ru) => {
+              const st = ruContent[ru.name];
+              return `
+    <li class="ruli"><b>${esc(ru.name)}</b><span class="muted mono" style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(ru.url)}</span>
+    <span class="muted">${ru.error ? "拉取失败" : ru.count + " 条" + (ru.warn ? "（缓存）" : "")}</span>
+    <button class="btn" style="padding:0 8px;font-size:12px" data-view-ru="${esc(ru.name)}">${st && st.open ? "收起" : "查看内容"}</button>
+    <button class="btn" style="padding:0 8px;font-size:12px" data-del-ru="${esc(ru.name)}">删除</button>
+${st && st.open ? `<pre class="rucontent">${esc(st.text == null ? "加载中…" : st.text)}</pre>` : ""}</li>`;
+            })
+            .join("") || '<li class="muted">暂无规则 URL</li>';
 
-  // 节点分组
-  $('#groups').innerHTML = (data.groups || []).map(g => `
+        // 节点分组
+        $("#groups").innerHTML =
+          (data.groups || [])
+            .map(
+              (g) => `
     <li><b>${esc(g.name)}</b>
     <span class="port" title="点击复制代理地址" data-copy="http://${data.listen}:${g.port}">:${g.port}</span>
-    <span class="muted" style="flex:1">${(g.nodes || []).map(esc).join('、')}</span>
-    <button class="btn" style="padding:0 8px;font-size:12px" data-del-grp="${esc(g.name)}">删除</button></li>`).join('')
-    || '<li class="muted">暂无分组，勾选下方节点后添加</li>';
+    <span class="muted" style="flex:1">${(g.nodes || []).map(esc).join("、")}</span>
+    <button class="btn" style="padding:0 8px;font-size:12px" data-del-grp="${esc(g.name)}">删除</button></li>`,
+            )
+            .join("") || '<li class="muted">暂无分组，勾选下方节点后添加</li>';
 
-  // 分组编辑器：全量节点（含失效，置灰但可选），保留已勾选状态
-  grpSel.forEach(n => { if (!data.nodes.some(x => x.name === n)) grpSel.delete(n); });
-  $('#grpNodes').innerHTML = data.nodes.map(n => `
-    <label class="${n.alive ? '' : 'dead'}"><input type="checkbox" data-grp-node="${esc(n.name)}" ${grpSel.has(n.name) ? 'checked' : ''}>
-    ${esc(n.name)} <span class="muted">${n.alive ? n.delay + 'ms' : '失效'}</span></label>`).join('')
-    || '<div class="muted">暂无节点</div>';
+        // 分组编辑器：全量节点（含失效，置灰但可选），纵向列表 + 垂直滚动，保留已勾选状态
+        grpSel.forEach((n) => {
+          if (!data.nodes.some((x) => x.name === n)) grpSel.delete(n);
+        });
+        // 节点 -> 已占用它的分组名列表（用于右侧 tag 标识；仍可勾选）
+        const usedBy = {};
+        (data.groups || []).forEach((g) =>
+          (g.nodes || []).forEach((n) => {
+            (usedBy[n] = usedBy[n] || []).push(g.name);
+          }),
+        );
+        // 待选节点显示顺序：default=订阅/端口顺序，delay=按延迟升序（失效/无延迟排最后，同延迟按端口）
+        let gnodes = data.nodes;
+        if (grpSort === "delay") {
+          gnodes = [...data.nodes].sort((a, b) => {
+            const da = a.alive && a.delay > 0 ? a.delay : Infinity;
+            const db = b.alive && b.delay > 0 ? b.delay : Infinity;
+            return da - db || (a.port || Infinity) - (b.port || Infinity);
+          });
+        }
+        $("#grpNodes").innerHTML =
+          gnodes
+            .map((n) => {
+              const tags = (usedBy[n.name] || [])
+                .map((g) => `<span class="tag">${esc(g)}</span>`)
+                .join("");
+              return `
+    <label class="${n.alive ? "" : "dead"}" title="${esc(n.name)}"><input type="checkbox" data-grp-node="${esc(n.name)}" ${grpSel.has(n.name) ? "checked" : ""}>
+    <span class="nm">${esc(n.name)}</span>  ${tags ? `<span class="tags" title="已在分组：${esc(usedBy[n.name].join("、"))}">${tags}</span>` : ""}<span class="muted">${n.alive ? n.delay + "ms" : "失效"}</span>
+   </label>`;
+            })
+            .join("") ||
+          '<div class="muted" style="padding:6px 8px">暂无节点</div>';
+        fitGrpNodes();
 
-  // 设置
-  if (!$('#rangeLo').value) $('#rangeLo').value = data.port_range[0];
-  if (!$('#rangeHi').value) $('#rangeHi').value = data.port_range[1];
-  $('#autoPortOn').checked = data.auto_port > 0;
-  if (!$('#autoPort').value) $('#autoPort').value = data.auto_port || 41998;
-  $('#sysProxyOn').checked = data.system_proxy;
-  $('#sysProxyTarget').textContent = `127.0.0.1:${data.mixed_port}`;
-}
+        // 概览-设置区（输入框仅在未填写时初始化，避免覆盖用户正在编辑的值）
+        if (!$("#mainPort").value) $("#mainPort").value = data.mixed_port;
+        if (!$("#rangeLo").value) $("#rangeLo").value = data.port_range[0];
+        if (!$("#rangeHi").value) $("#rangeHi").value = data.port_range[1];
+        $("#mainAutoOn").checked = !!data.main_auto;
+        // 主端口固定节点下拉：main-auto 开启时禁用（auto 优先）；
+        // 选项列出全部当前可用节点（value 用稳定 key），按延迟升序（失效排最后），
+        // 文字带延迟（`节点名 (端口) · 123ms`）；当前所选节点失效时保留该选项并提示回退
+        {
+          const sel = $("#mainNode");
+          sel.disabled = !!data.main_auto;
+          const delayText = (n) => (n.delay > 0 ? n.delay + "ms" : "未测");
+          const opts = [`<option value="">跟随规则/模式</option>`].concat(
+            data.nodes
+              .filter((n) => n.alive && n.port)
+              .sort((a, b) => a.delay - b.delay || a.port - b.port)
+              .map(
+                (n) =>
+                  `<option value="${esc(n.key)}">${esc(n.name)} (${n.port}) · ${delayText(n)}</option>`,
+              ),
+          );
+          if (
+            data.main_node &&
+            !data.nodes.some((n) => n.key === data.main_node && n.alive)
+          ) {
+            const cur = data.nodes.find((n) => n.key === data.main_node);
+            opts.push(
+              `<option value="${esc(data.main_node)}">${esc(cur ? cur.name : data.main_node)}${cur && cur.port ? ` (${cur.port})` : ""} · 失效（不可用）</option>`,
+            );
+          }
+          sel.innerHTML = opts.join("");
+          sel.value = data.main_node || "";
+          $("#mainNodeHint").textContent = data.main_auto
+            ? "最优节点已开启，固定节点暂不生效"
+            : data.main_node && !data.main_node_up
+              ? "当前节点不可用，已回退规则模式"
+              : "";
+        }
+        $("#autoPortOn").checked = data.auto_port > 0;
+        if (!$("#autoPort").value)
+          $("#autoPort").value = data.auto_port || 41998;
+        $("#sysProxyOn").checked = data.system_proxy;
+        $("#sysProxyTarget").textContent = `127.0.0.1:${data.mixed_port}`;
+        $("#autostartOn").checked = !!data.autostart;
+      }
 
-async function load() {
-  try {
-    const [ov, ru] = await Promise.all([
-      fetch('/api/overview').then(r => r.json()),
-      fetch('/api/rule-urls').then(r => r.json()),
-    ]);
-    data = ov; ruleUrls = ru || [];
-    render();
-  } catch (e) { console.error(e); }
-}
+      async function load() {
+        try {
+          const [ov, ru] = await Promise.all([
+            fetch("/api/overview").then((r) => r.json()),
+            fetch("/api/rule-urls").then((r) => r.json()),
+          ]);
+          data = ov;
+          ruleUrls = ru || [];
+          render();
+        } catch (e) {
+          console.error(e);
+        }
+      }
 
-// 触发异步操作（刷新/测速）：按钮进入 loading 并轮询结果
-async function triggerOp(btn, url, label) {
-  btn.disabled = true;
-  $('#opStatus').innerHTML = `<span class="spin">⟳</span> ${label}中…`;
-  await fetch(url, {method:'POST'});
-  let n = 0;
-  const timer = setInterval(async () => {
-    n++;
-    await load();
-    if (n >= 10) {
-      clearInterval(timer);
-      btn.disabled = false;
-      $('#opStatus').textContent = label + '完成';
-      setTimeout(() => $('#opStatus').textContent = '', 2000);
-    }
-  }, 3000);
-}
+      // 触发异步操作（刷新/测速）：按钮进入 loading 并轮询结果
+      async function triggerOp(btn, url, label) {
+        btn.disabled = true;
+        $("#opStatus").innerHTML = `<span class="spin">⟳</span> ${label}中…`;
+        await fetch(url, { method: "POST" });
+        let n = 0;
+        const timer = setInterval(async () => {
+          n++;
+          await load();
+          if (n >= 10) {
+            clearInterval(timer);
+            btn.disabled = false;
+            $("#opStatus").textContent = label + "完成";
+            setTimeout(() => ($("#opStatus").textContent = ""), 2000);
+          }
+        }, 3000);
+      }
 
-$('#refreshBtn').onclick = () => triggerOp($('#refreshBtn'), '/api/refresh', '刷新订阅');
-$('#testBtn').onclick = () => triggerOp($('#testBtn'), '/api/test', '测速');
+      $("#refreshBtn").onclick = () =>
+        triggerOp($("#refreshBtn"), "/api/refresh", "刷新订阅");
+      $("#testBtn").onclick = () =>
+        triggerOp($("#testBtn"), "/api/test", "测速");
+      $("#portSort").onchange = (e) => {
+        portSort = e.target.value;
+        render();
+      };
+      $("#grpSort").onchange = (e) => {
+        grpSort = e.target.value;
+        render();
+      };
 
-document.querySelectorAll('#modes button').forEach(b => b.onclick = async () => {
-  const resp = await fetch('/api/mode', {method:'POST', body: JSON.stringify({mode: b.dataset.mode})});
-  if (resp.ok) { data.mode = b.dataset.mode; render(); toast('已切换到 ' + b.textContent + ' 模式'); }
-  else toast('切换失败：' + await resp.text(), true);
-});
+      document.querySelectorAll("#modes button").forEach(
+        (b) =>
+          (b.onclick = async () => {
+            const resp = await fetch("/api/mode", {
+              method: "POST",
+              body: JSON.stringify({ mode: b.dataset.mode }),
+            });
+            if (resp.ok) {
+              data.mode = b.dataset.mode;
+              render();
+              toast("已切换到 " + b.textContent + " 模式");
+            } else toast("切换失败：" + (await resp.text()), true);
+          }),
+      );
 
-// POST 助手：失败时 toast 错误内容
-async function post(url, body, okMsg) {
-  const resp = await fetch(url, {method:'POST', body: JSON.stringify(body)});
-  if (resp.ok) { if (okMsg) toast(okMsg); load(); return true; }
-  toast('操作失败：' + await resp.text(), true);
-  return false;
-}
-async function del(url, okMsg) {
-  const resp = await fetch(url, {method:'DELETE'});
-  if (resp.ok) { toast(okMsg); load(); return true; }
-  toast('删除失败：' + await resp.text(), true);
-  return false;
-}
+      // POST 助手：失败时 toast 错误内容
+      async function post(url, body, okMsg) {
+        const resp = await fetch(url, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        if (resp.ok) {
+          if (okMsg) toast(okMsg);
+          load();
+          return true;
+        }
+        toast("操作失败：" + (await resp.text()), true);
+        return false;
+      }
+      async function del(url, okMsg) {
+        const resp = await fetch(url, { method: "DELETE" });
+        if (resp.ok) {
+          toast(okMsg);
+          load();
+          return true;
+        }
+        toast("删除失败：" + (await resp.text()), true);
+        return false;
+      }
 
-$('#addSubBtn').onclick = async () => {
-  const url = $('#subUrl').value.trim();
-  if (!url) return;
-  if (await post('/api/subscriptions', {url}, '已添加，后台刷新中…')) $('#subUrl').value = '';
-};
-$('#addRuleBtn').onclick = async () => {
-  const rule = $('#ruleInput').value.trim();
-  if (!rule) return;
-  if (await post('/api/rules', {rule}, '规则已添加')) $('#ruleInput').value = '';
-};
-$('#addRuBtn').onclick = async () => {
-  const name = $('#ruName').value.trim(), url = $('#ruUrl').value.trim();
-  if (!name || !url) { toast('请填写名称和 URL', true); return; }
-  if (await post('/api/rule-urls', {name, url}, '规则 URL 已添加')) { $('#ruName').value = ''; $('#ruUrl').value = ''; }
-};
-$('#addGrpBtn').onclick = async () => {
-  const name = $('#grpName').value.trim();
-  const port = parseInt($('#grpPort').value, 10);
-  const nodes = [...grpSel];
-  if (!name || !port || nodes.length === 0) { toast('请填写分组名、端口并勾选节点', true); return; }
-  if (await post('/api/groups', {name, port, nodes}, '分组已添加')) {
-    $('#grpName').value = ''; $('#grpPort').value = ''; grpSel.clear();
-  }
-};
-$('#saveRangeBtn').onclick = async () => {
-  const lo = parseInt($('#rangeLo').value, 10), hi = parseInt($('#rangeHi').value, 10);
-  if (!lo || !hi) { toast('请填写起始和结束端口', true); return; }
-  if (!await post('/api/port-range', {range: `${lo}-${hi}`}, '端口区间已更新')) {
-    $('#rangeLo').value = ''; $('#rangeHi').value = '';
-  }
-};
-$('#saveAutoPortBtn').onclick = async () => {
-  const on = $('#autoPortOn').checked;
-  const port = parseInt($('#autoPort').value, 10);
-  if (on && !port) { toast('请填写端口', true); return; }
-  await post('/api/auto-port', {port: on ? port : 0}, on ? '自动选优端口已开启' : '自动选优端口已关闭');
-};
-$('#sysProxyOn').onchange = async e => {
-  const on = e.target.checked;
-  const resp = await fetch('/api/system-proxy', {method:'POST', body: JSON.stringify({enabled: on})});
-  if (resp.ok) { toast(on ? '系统代理已开启' : '系统代理已关闭'); load(); }
-  else { toast('操作失败：' + await resp.text(), true); e.target.checked = !on; }
-};
+      // 开关通用：POST enabled，失败时还原开关状态
+      async function flip(input, url, onMsg, offMsg) {
+        const on = input.checked;
+        const resp = await fetch(url, {
+          method: "POST",
+          body: JSON.stringify({ enabled: on }),
+        });
+        if (resp.ok) {
+          toast(on ? onMsg : offMsg);
+          load();
+        } else {
+          toast("操作失败：" + (await resp.text()), true);
+          input.checked = !on;
+        }
+      }
 
-document.addEventListener('change', e => {
-  const n = e.target.dataset && e.target.dataset.grpNode;
-  if (n) { e.target.checked ? grpSel.add(n) : grpSel.delete(n); }
-});
+      $("#addSubBtn").onclick = async () => {
+        const url = $("#subUrl").value.trim();
+        if (!url) return;
+        if (await post("/api/subscriptions", { url }, "已添加，后台刷新中…"))
+          $("#subUrl").value = "";
+      };
+      $("#addRuleBtn").onclick = async () => {
+        const rule = $("#ruleInput").value.trim();
+        if (!rule) return;
+        if (await post("/api/rules", { rule }, "规则已添加"))
+          $("#ruleInput").value = "";
+      };
+      $("#addRuBtn").onclick = async () => {
+        const name = $("#ruName").value.trim(),
+          url = $("#ruUrl").value.trim();
+        if (!name || !url) {
+          toast("请填写名称和 URL", true);
+          return;
+        }
+        if (await post("/api/rule-urls", { name, url }, "规则 URL 已添加")) {
+          $("#ruName").value = "";
+          $("#ruUrl").value = "";
+        }
+      };
+      $("#addGrpBtn").onclick = async () => {
+        const name = $("#grpName").value.trim();
+        const port = parseInt($("#grpPort").value, 10);
+        const nodes = [...grpSel];
+        if (!name || !port || nodes.length === 0) {
+          toast("请填写分组名、端口并勾选节点", true);
+          return;
+        }
+        if (await post("/api/groups", { name, port, nodes }, "分组已添加")) {
+          $("#grpName").value = "";
+          $("#grpPort").value = "";
+          grpSel.clear();
+        }
+      };
+      $("#saveMainPortBtn").onclick = async () => {
+        const port = parseInt($("#mainPort").value, 10);
+        if (!port) {
+          toast("请填写主端口", true);
+          return;
+        }
+        if (!(await post("/api/main-port", { port }, "主端口已更新为 " + port)))
+          $("#mainPort").value = "";
+      };
+      $("#mainAutoOn").onchange = (e) =>
+        flip(
+          e.target,
+          "/api/main-auto",
+          "主端口已切换为最优节点（跳过规则）",
+          "主端口已恢复规则模式",
+        );
+      $("#mainNode").onchange = (e) =>
+        post(
+          "/api/main-node",
+          { node: e.target.value },
+          e.target.value
+            ? "主端口已固定到所选节点（跳过规则）"
+            : "主端口已恢复跟随规则/模式",
+        );
+      $("#saveRangeBtn").onclick = async () => {
+        const lo = parseInt($("#rangeLo").value, 10),
+          hi = parseInt($("#rangeHi").value, 10);
+        if (!lo || !hi) {
+          toast("请填写起始和结束端口", true);
+          return;
+        }
+        if (
+          !(await post(
+            "/api/port-range",
+            { range: `${lo}-${hi}` },
+            "端口区间已更新",
+          ))
+        ) {
+          $("#rangeLo").value = "";
+          $("#rangeHi").value = "";
+        }
+      };
+      $("#saveAutoPortBtn").onclick = async () => {
+        const on = $("#autoPortOn").checked;
+        const port = parseInt($("#autoPort").value, 10);
+        if (on && !port) {
+          toast("请填写端口", true);
+          return;
+        }
+        await post(
+          "/api/auto-port",
+          { port: on ? port : 0 },
+          on ? "自动选优端口已开启" : "自动选优端口已关闭",
+        );
+      };
+      $("#sysProxyOn").onchange = (e) =>
+        flip(e.target, "/api/system-proxy", "系统代理已开启", "系统代理已关闭");
+      $("#autostartOn").onchange = (e) =>
+        flip(e.target, "/api/autostart", "开机自启已开启", "开机自启已关闭");
+      $("#addMnBtn").onclick = async () => {
+        const url = $("#mnUrl").value.trim(),
+          name = $("#mnName").value.trim();
+        if (!url) return;
+        if (
+          await post(
+            "/api/manual-nodes",
+            name ? { url, name } : { url },
+            "节点已添加，后台刷新中…",
+          )
+        ) {
+          $("#mnUrl").value = "";
+          $("#mnName").value = "";
+        }
+      };
 
-document.addEventListener('click', async e => {
-  const d = e.target.dataset || {};
-  if (d.delSub && confirm(`删除订阅 ${d.delSub}？`)) { await del('/api/subscriptions/' + encodeURIComponent(d.delSub), '已删除，刷新中…'); return; }
-  if (d.delRule !== undefined) { await del('/api/rules/' + d.delRule, '规则已删除'); return; }
-  if (d.delRu && confirm(`删除规则 URL ${d.delRu}？`)) { await del('/api/rule-urls/' + encodeURIComponent(d.delRu), '规则 URL 已删除'); return; }
-  if (d.delGrp && confirm(`删除分组 ${d.delGrp}？`)) { await del('/api/groups/' + encodeURIComponent(d.delGrp), '分组已删除'); return; }
-  if (d.copy) { navigator.clipboard.writeText(d.copy); toast('已复制 ' + d.copy); }
-});
+      // 订阅快捷导航：点击 chip 定位/展开对应订阅（或手动节点区），「全部」恢复
+      function jumpToChip(key) {
+        activeChip = key || null;
+        document
+          .querySelectorAll("#subChips .chip")
+          .forEach((c) =>
+            c.classList.toggle(
+              "active",
+              (c.dataset.chip || null) === activeChip,
+            ),
+          );
+        let el = null;
+        if (activeChip === "manual") {
+          el = $("#manualSec");
+        } else if (activeChip !== null) {
+          const i = (data ? data.subscriptions : []).findIndex(
+            (s) => s.name === activeChip,
+          );
+          if (i >= 0) el = document.getElementById("sub-idx-" + i);
+        }
+        if (!el) return;
+        if (el.tagName === "DETAILS") el.open = true;
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        el.classList.add("flash");
+        setTimeout(() => el.classList.remove("flash"), 1600);
+      }
 
-load();
-setInterval(load, 10000);
-</script>
-</body>
+      document.addEventListener("change", (e) => {
+        const n = e.target.dataset && e.target.dataset.grpNode;
+        if (n) {
+          e.target.checked ? grpSel.add(n) : grpSel.delete(n);
+        }
+        const ss = e.target.dataset && e.target.dataset.subSort;
+        if (ss !== undefined) {
+          subSort[ss] = e.target.value;
+          render();
+        }
+      });
+
+      document.addEventListener("click", async (e) => {
+        const d = e.target.dataset || {};
+        if (d.chip !== undefined) {
+          jumpToChip(d.chip);
+          return;
+        }
+        if (d.delSub && confirm(`删除订阅 ${d.delSub}？`)) {
+          await del(
+            "/api/subscriptions/" + encodeURIComponent(d.delSub),
+            "已删除，刷新中…",
+          );
+          return;
+        }
+        if (d.delRule !== undefined) {
+          await del("/api/rules/" + d.delRule, "规则已删除");
+          return;
+        }
+        if (d.delRu && confirm(`删除规则 URL ${d.delRu}？`)) {
+          await del(
+            "/api/rule-urls/" + encodeURIComponent(d.delRu),
+            "规则 URL 已删除",
+          );
+          delete ruContent[d.delRu];
+          return;
+        }
+        // 查看/收起规则 URL 原始内容：首次展开才请求，文本缓存进 ruContent
+        if (d.viewRu) {
+          const st = (ruContent[d.viewRu] = ruContent[d.viewRu] || {
+            open: false,
+            text: null,
+          });
+          st.open = !st.open;
+          if (st.open && st.text === null) {
+            render(); // 立即显示"加载中…"
+            const resp = await fetch(
+              "/api/rule-urls/" + encodeURIComponent(d.viewRu) + "/content",
+            );
+            st.text = resp.ok
+              ? atob(await resp.text())
+              : "加载失败：" + (await resp.text());
+          }
+          render();
+          return;
+        }
+        // 节点操作列：设为主端口（overview.main_node 存节点 key）
+        if (d.mainNode) {
+          await post(
+            "/api/main-node",
+            { node: d.mainNode },
+            "主端口已固定到该节点（跳过规则）",
+          );
+          return;
+        }
+        if (d.delMn !== undefined && confirm("删除该手动节点？")) {
+          await del("/api/manual-nodes/" + d.delMn, "节点已删除，刷新中…");
+          return;
+        }
+        if (d.delGrp && confirm(`删除分组 ${d.delGrp}？`)) {
+          await del(
+            "/api/groups/" + encodeURIComponent(d.delGrp),
+            "分组已删除",
+          );
+          return;
+        }
+        if (d.copy) {
+          navigator.clipboard.writeText(d.copy);
+          toast("已复制 " + d.copy);
+        }
+      });
+
+      load();
+      setInterval(load, 10000);
+    </script>
+  </body>
 </html>
