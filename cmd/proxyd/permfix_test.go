@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"proxyd/internal/config"
 )
 
 // stubRepairHooks 替换交互/提权钩子并登记恢复；返回 sudo 调用记录。
@@ -130,5 +132,49 @@ func TestConfigPathFromArgs(t *testing.T) {
 	// flag 解析遇位置参数停止：-c 在订阅 URL 之后不生效
 	if got := configPathFromArgs([]string{"https://a.com/sub", "-c", "/tmp/b.yaml"}); got == "/tmp/b.yaml" {
 		t.Fatal("位置参数之后的 -c 不应被当作配置文件路径")
+	}
+}
+
+func TestOfferStateDirRepairUnwritableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 下权限位不生效，跳过")
+	}
+	dir := t.TempDir()
+	// 目录本身可写（模拟 777），但其中的 proxyd.log 曾被 sudo 运行写成 root 所有
+	locked := filepath.Join(dir, "proxyd.log")
+	if err := os.WriteFile(locked, []byte("x"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	calls := stubRepairHooks(t, true, true, func(args ...string) error {
+		// 模拟 sudo chown 的效果：恢复文件写权限
+		return os.Chmod(locked, 0o644)
+	})
+	cfg := &config.Config{StateDir: dir}
+	if err := offerStateDirRepair(cfg); err != nil {
+		t.Fatalf("修复后应通过: %v", err)
+	}
+	if len(*calls) != 1 || !strings.Contains((*calls)[0], "chown -R") || !strings.Contains((*calls)[0], dir) {
+		t.Fatalf("sudo 调用不符合预期: %v", *calls)
+	}
+	// 修复完成后再次启动不应触发修复
+	if err := offerStateDirRepair(cfg); err != nil {
+		t.Fatalf("修复完成后不应再报错: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("修复完成后不应再次调用 sudo: %v", *calls)
+	}
+}
+
+func TestOfferStateDirRepairAllWritable(t *testing.T) {
+	calls := stubRepairHooks(t, true, true, nil)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "proxyd.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := offerStateDirRepair(&config.Config{StateDir: dir}); err != nil {
+		t.Fatalf("全部可写时不应报错: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("无需修复时不应调用 sudo: %v", *calls)
 	}
 }

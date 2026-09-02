@@ -180,12 +180,36 @@ func offerStateDirRepair(cfg *config.Config) error {
 		}
 		return offerOwnershipRepair(nearestExistingDir(cfg.StateDir))
 	}
-	if err := probeWritable(cfg.StateDir); err == nil {
-		return nil
-	} else if !isPermission(err) {
+	if err := probeWritable(cfg.StateDir); err != nil {
+		if !isPermission(err) {
+			return nil
+		}
+		return offerOwnershipRepair(cfg.StateDir)
+	}
+	// 目录可写不代表其中的既有文件可写：曾用 sudo 运行时 proxyd.log、proxyd.pid、
+	// geo 数据等会以 root 属主残留，目录本身（尤其 777）探测会通过，
+	// 但追加写日志/换 pid 文件仍会被拒。逐个探测顶层条目，修复所有不可写项。
+	blocked, err := unwritableEntries(cfg.StateDir)
+	if err != nil || len(blocked) == 0 {
 		return nil
 	}
-	return offerOwnershipRepair(cfg.StateDir)
+	return offerOwnershipRepair(blocked...)
+}
+
+// unwritableEntries 返回 dir 顶层当前用户不可写的条目（文件或子目录）；全部可写返回空。
+func unwritableEntries(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var blocked []string
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if perr := probeWritable(p); perr != nil && isPermission(perr) {
+			blocked = append(blocked, p)
+		}
+	}
+	return blocked, nil
 }
 
 // loadConfigOrRepair 包装 loadConfig：配置读取因权限不足失败时，先尝试交互修复
