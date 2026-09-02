@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +176,80 @@ func TestCheckConcurrencyDefault(t *testing.T) {
 	for _, n := range nodes {
 		if !n.Alive {
 			t.Errorf("节点 %s Alive=false", n.Name)
+		}
+	}
+}
+
+// TestCheckLimitsWorkerGoroutines 验证大批节点排队时，健康检查只保留固定数量的
+// worker，而不会为每个节点预先创建一个等待信号量的 goroutine。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于启动本地 SOCKS/HTTP 服务并报告资源上限断言。
+//
+// 返回值：无；通过 goroutine 增量和最终节点状态断言表达结果。
+//
+// 错误情况：若排队节点导致 goroutine 数量随节点数线性增长，或释放阻塞请求后有
+// 节点未完成检测，测试失败。阈值为运行时及测试服务器预留了充足余量，避免把正常
+// 的 HTTP/SOCKS 转发协程误判为泄漏。
+func TestCheckLimitsWorkerGoroutines(t *testing.T) {
+	const (
+		concurrency = 4
+		nodeCount   = 256
+	)
+	started := make(chan struct{}, concurrency)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	// 失败断言也必须先释放服务端 handler，否则 httptest.Close 会等待连接结束并让
+	// 测试看似挂死。sync.Once 同时允许正常路径和 Cleanup 安全调用同一清理动作。
+	unblock := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(unblock)
+
+	socksPort := startSocks5Server(t)
+	nodes := make([]*node.Node, 0, nodeCount)
+	for i := 0; i < nodeCount; i++ {
+		nodes = append(nodes, socksNode(fmt.Sprintf("bounded-%d", i), socksPort))
+	}
+
+	baseline := runtime.NumGoroutine()
+	done := make(chan struct{})
+	go func() {
+		Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, concurrency)
+		close(done)
+	}()
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("等待第 %d 个并发探测启动超时", i+1)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if delta := runtime.NumGoroutine() - baseline; delta > 64 {
+		t.Fatalf("排队节点创建了过多 goroutine: delta=%d, nodeCount=%d", delta, nodeCount)
+	}
+
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("释放探测请求后健康检查未及时结束")
+	}
+	for _, n := range nodes {
+		if !n.Alive {
+			t.Fatalf("节点 %s 未完成健康检查: reason=%s", n.Name, n.FailReason)
 		}
 	}
 }

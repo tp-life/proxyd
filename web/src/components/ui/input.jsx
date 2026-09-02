@@ -42,12 +42,12 @@ export const Input = forwardRef(function Input({ className, type = "text", ...pr
       type={type}
       className={cn(
         [
-          "flex h-10 w-full min-w-0 rounded-md border border-neutral-200 bg-white px-3 py-2 text-sm text-neutral-950 shadow-xs",
+          "flex h-10 w-full min-w-0 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground",
           "transition-[border-color,box-shadow] duration-200",
-          "placeholder:text-neutral-400",
-          "focus-visible:border-neutral-400 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-black/10",
+          "placeholder:text-muted-foreground/75",
+          "focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/15",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          "aria-invalid:border-red-500 aria-invalid:ring-red-500/20",
+          "aria-invalid:border-destructive aria-invalid:ring-destructive/20",
         ].join(" "),
         className,
       )}

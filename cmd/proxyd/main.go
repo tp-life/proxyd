@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"proxyd/internal/api"
 	"proxyd/internal/app"
@@ -281,7 +282,12 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	defer apiSrv.Shutdown(context.Background())
+	// API 优雅关闭最多等待 3 秒；届时若 /api/traffic 等长连接仍未结束则强制断开。
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		apiSrv.Shutdown(shutdownCtx)
+	}()
 
 	// 配置开启系统代理时启动即应用，退出时恢复关闭
 	if cfg.SystemProxy {

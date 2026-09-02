@@ -35,30 +35,36 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 		concurrency = defaultConcurrency
 	}
 
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
+	ordinaryCount := 0
 	for _, n := range nodes {
-		if n == nil {
-			continue
+		if n != nil && n.DialerProxy() == "" {
+			ordinaryCount++
 		}
-		if n.DialerProxy() != "" {
-			continue
-		}
-		wg.Add(1)
-		go func(n *node.Node) {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				// 整体取消时不再排队，直接标记死亡
-				n.Alive = false
-				n.Delay = 0
-				return
-			}
-			checkOne(ctx, n, url, timeout)
-		}(n)
 	}
+
+	// 固定 worker 池把 goroutine 数量限制在配置并发度内。旧实现虽然用信号量限制了
+	// 网络请求数，却仍为每个节点创建一个 goroutine；节点很多或探测超时时，这些排队
+	// goroutine 会长期保留栈和节点引用，造成与节点数线性相关的额外内存占用。
+	workerCount := min(concurrency, ordinaryCount)
+	jobs := make(chan *node.Node)
+	var wg sync.WaitGroup
+	for range workerCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs {
+				// 即使整轮已取消，也让 checkOne 处理每个排队节点。它会从已取消的父上下文
+				// 立即返回并统一清空旧 Alive/Delay 状态，避免刷新取消后残留上轮健康结果。
+				checkOne(ctx, n, url, timeout)
+			}
+		}()
+	}
+	for _, n := range nodes {
+		if n != nil && n.DialerProxy() == "" {
+			jobs <- n
+		}
+	}
+	close(jobs)
 	wg.Wait()
 	resolveDialerCandidates(nodes, dialerTargets)
 }

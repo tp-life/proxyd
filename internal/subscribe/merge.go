@@ -12,6 +12,11 @@ import (
 	"proxyd/internal/node"
 )
 
+// maxConcurrentSubscriptionFetches 是单轮刷新允许同时读取的订阅响应数。
+// 单个响应上限为 32 MiB；固定为 4 可以约束最坏情况下的并行响应缓冲内存，同时仍
+// 保留多源并发能力。该限制只影响大量订阅的排队时长，不改变单源解析或降级语义。
+const maxConcurrentSubscriptionFetches = 4
+
 // Merge 合并多个订阅的节点：
 //   - 按 Node.Key() 去重，先出现的保留（订阅按名字排序后依次处理，保证结果稳定）；
 //   - excludeRe 非 nil 时按节点名过滤掉匹配项；
@@ -196,35 +201,56 @@ func FetchAllWithInfoAndFilters(ctx context.Context, subs []config.Subscription,
 	}
 	infos := make(map[string]UserInfo, len(subs))
 	errs := make([]error, len(subs))
-	var mu sync.Mutex
+	nodesByIndex := make([][]*node.Node, len(subs))
+	infosByIndex := make([]UserInfo, len(subs))
+	enabledCount := 0
+	for _, sub := range subs {
+		if sub.IsEnabled() {
+			enabledCount++
+		}
+	}
+
+	// worker 只写各自任务索引对应的切片槽位，不共享写 map，因此无需在网络请求结束
+	// 时竞争互斥锁。所有 worker 完成后再按原订阅顺序汇总，既保留错误槽位语义，也让
+	// goroutine 与潜在的大响应体数量不再随订阅总数增长。
+	jobs := make(chan int)
 	var wg sync.WaitGroup
+	for range min(maxConcurrentSubscriptionFetches, enabledCount) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				sub := subs[i]
+				nodes, info, err := FetchWithInfo(ctx, sub, stateDir)
+				if err != nil {
+					var warning *FetchWarning
+					errs[i] = err
+					if !errors.As(err, &warning) {
+						// 无缓存的硬失败不应写入空来源；其它任务继续执行，保持单源隔离。
+						continue
+					}
+				}
+				nodesByIndex[i] = nodes
+				infosByIndex[i] = info
+			}
+		}()
+	}
 	for i, sub := range subs {
 		// 禁用订阅仍保留在配置与缓存中，但不应产生网络请求或进入节点合并。
 		// errs 保持与原 subs 等长，对应槽位留 nil，让调用方能区分“主动禁用”和“拉取失败”。
-		if !sub.IsEnabled() {
-			continue
+		if sub.IsEnabled() {
+			jobs <- i
 		}
-		wg.Add(1)
-		go func(i int, sub config.Subscription) {
-			defer wg.Done()
-			nodes, info, err := FetchWithInfo(ctx, sub, stateDir)
-			if err != nil {
-				var w *FetchWarning
-				if !errors.As(err, &w) {
-					errs[i] = err
-					return
-				}
-				// 警告：拉取失败但有缓存节点可用
-				errs[i] = err
-			}
-			mu.Lock()
-			nodesBySub[sub.Name] = nodes
-			if !info.IsZero() {
-				infos[sub.Name] = info
-			}
-			mu.Unlock()
-		}(i, sub)
 	}
+	close(jobs)
 	wg.Wait()
+	for i, sub := range subs {
+		if nodesByIndex[i] != nil {
+			nodesBySub[sub.Name] = nodesByIndex[i]
+		}
+		if !infosByIndex[i].IsZero() {
+			infos[sub.Name] = infosByIndex[i]
+		}
+	}
 	return MergeFiltered(nodesBySub, includeRe, excludeRe), infos, errs
 }

@@ -18,6 +18,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"proxyd/internal/app"
@@ -104,17 +106,53 @@ type LogsResponse struct {
 // 配置文件通常只有数 KiB；上限用于避免本地 API 被误传大文件后占用过多内存。
 const maxImportedConfigBytes int64 = 1 << 20
 
+// apiIdleTimeout 是 HTTP keep-alive 连接在两个请求之间允许闲置的最长时间。
+// 该超时不作用于正在传输的 /api/traffic 流，只回收客户端遗忘的空闲连接及其缓冲区。
+const apiIdleTimeout = 2 * time.Minute
+
+// asyncRefreshTimeout 是一次后台全局刷新或测速允许执行的最长时间。
+// 与原 API 行为保持一致；超时上下文同时作为服务关闭时取消在途任务的边界。
+const asyncRefreshTimeout = 3 * time.Minute
+
 // Server 包装自有 API 与 Web 控制台的 HTTP 服务。
 type Server struct {
 	addr string
 	app  *app.App
 	srv  *http.Server
 	ln   net.Listener
+
+	triggerMu      sync.Mutex
+	triggerWake    chan struct{}
+	triggerCancel  context.CancelFunc
+	triggerClosed  bool
+	pendingRefresh bool
+	pendingTest    bool
+	runRefresh     func(context.Context, bool) error
+
+	// memoryBytes 缓存 mihomo `/memory` 流推送的最新 inuse 值；0 表示尚未拿到。
+	// `/memory` 是一秒一跳的常驻流，不能在请求路径上同步解码，否则每次轮询都会被阻塞一拍。
+	memoryBytes atomic.Uint64
+	memCancel   context.CancelFunc
 }
 
-// New 创建 API 服务（addr 如 127.0.0.1:19091）。
+// New 创建 API 服务及惰性启动的刷新任务合并器。
+//
+// 参数：
+//   - addr: string，API 监听地址，例如 127.0.0.1:19091；可使用端口 0 由系统分配。
+//   - a: *app.App，应用层用例编排器，负责执行刷新、配置变更和只读查询。
+//
+// 返回值：
+//   - *Server：尚未监听网络的服务实例；首次 trigger 时才创建后台 worker。
+//
+// 错误情况：构造阶段不做监听或外部 I/O，因此不返回错误。a 为 nil 时构造仍可完成，
+// 但任何需要应用层的 handler 都无法工作；正常入口必须传入有效 App。
 func New(addr string, a *app.App) *Server {
-	return &Server{addr: addr, app: a}
+	return &Server{
+		addr:        addr,
+		app:         a,
+		triggerWake: make(chan struct{}, 1),
+		runRefresh:  a.Refresh,
+	}
 }
 
 // Start 在后台启动 API 与内嵌 Web 控制台监听。
@@ -185,8 +223,15 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.ln = ln
-	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// ReadHeaderTimeout 防止慢速请求头长期占用连接；IdleTimeout 只回收请求间的空闲
+	// keep-alive。不能设置全局 WriteTimeout，因为 /api/traffic 是合法的常驻流式响应。
+	s.srv = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       apiIdleTimeout,
+	}
 	go func() { _ = s.srv.Serve(ln) }()
+	s.startMemoryWatcher()
 	return nil
 }
 
@@ -198,10 +243,26 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
-// Shutdown 优雅关闭。
+// Shutdown 停止接收后台刷新请求，并优雅关闭 HTTP 服务；超时后强制断开连接。
+//
+// 参数：
+//   - ctx: context.Context，限制 HTTP 在途请求完成的等待时间。
+//
+// 返回值：无；关闭错误不再向上传播，调用方可依赖方法幂等地完成退出清理。
+//
+// 错误情况：/api/traffic 是常驻 NDJSON 流，浏览器未关闭时 Shutdown 可能等到 ctx
+// 超时，此时退化为 Close。后台刷新 worker 会先收到取消信号，但这里不无限等待它，
+// 因为应用层事务可能正在等待自身锁；worker 数量固定为一个，不会继续累积资源。
 func (s *Server) Shutdown(ctx context.Context) {
-	if s.srv != nil {
-		_ = s.srv.Shutdown(ctx)
+	s.stopTriggerWorker()
+	if s.memCancel != nil {
+		s.memCancel()
+	}
+	if s.srv == nil {
+		return
+	}
+	if err := s.srv.Shutdown(ctx); err != nil {
+		_ = s.srv.Close()
 	}
 }
 
@@ -316,20 +377,145 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleConnections 代理 mihomo `GET /connections` JSON。
+// handleConnections 代理 mihomo `GET /connections` JSON，并注入当前内存占用。
 //
 // 参数：
 //   - w: http.ResponseWriter，用于写出上游成功响应的状态码、头和正文。
 //   - r: *http.Request，提供客户端取消信号，并携带需要原样透传到 mihomo 的查询参数。
 //
-// 返回值：无；成功时透传上游 2xx/204 语义。
+// 返回值：无；成功时透传上游 JSON，且在顶层补充 `memory`（字节数）字段。
 //
 // 错误情况：
 //   - external-controller 缺失或 URL 非法时返回 500，明确区分为本地配置错误。
 //   - 上游不可达或返回非 2xx 时返回稳定 502，不泄漏 secret 或上游正文。
-//   - 响应体复制异常只记日志，因为响应可能已经开始写出，继续改状态码没有意义。
+//   - 内存来自后台 watcher 缓存（mihomo `/memory` 是一秒一跳的常驻流，不能同步拉取），
+//     尚未采集到时省略该字段；上游 JSON 解析失败时原样透传，连接列表本身不受影响。
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
-	s.proxyControllerResponse(w, r, http.MethodGet, "/connections", r.URL.Query(), "connections")
+	resp, err := s.doControllerRequest(r.Context(), http.MethodGet, "/connections", r.URL.Query())
+	if err != nil {
+		s.writeControllerProxyError(w, "connections", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.writeControllerUnexpectedStatus(w, "connections", resp.StatusCode)
+		return
+	}
+	// 连接数量可能很多，但仍给一个上限，避免异常上游把内存打爆。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil && r.Context().Err() == nil {
+		log.Printf("[api] proxy controller connections response read failed: %v", err)
+	}
+	out := enrichConnectionsWithMemory(body, s.memoryBytes.Load())
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	if cacheControl := resp.Header.Get("Cache-Control"); cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := w.Write(out); err != nil && r.Context().Err() == nil {
+		log.Printf("[api] proxy controller connections response write failed: %v", err)
+	}
+}
+
+// enrichConnectionsWithMemory 把内存占用注入连接列表响应顶层。
+//
+// 参数：
+//   - body: []byte，mihomo `/connections` 的原始 JSON。
+//   - memory: uint64，mihomo `/memory` 返回的 inuse 字节数；0 表示不可用。
+//
+// 返回值：
+//   - []byte：注入 `memory` 字段后的 JSON；解析失败或 memory 为 0 时原样返回。
+//
+// 错误情况：
+//   - 无；所有异常输入都会退化为原样透传。
+func enrichConnectionsWithMemory(body []byte, memory uint64) []byte {
+	if memory == 0 {
+		return body
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	raw, err := json.Marshal(memory)
+	if err != nil {
+		return body
+	}
+	payload["memory"] = raw
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// startMemoryWatcher 启动后台 goroutine 订阅 mihomo `/memory` 流。
+//
+// 参数：无；接收者 `s` 提供 external-controller 配置与缓存字段。
+//
+// 返回值：无；watcher 生命周期由 Shutdown 通过 memCancel 结束。
+//
+// 错误情况：
+//   - mihomo `/memory` 是常驻 NDJSON 式流（每秒推送一次 inuse），同步拉取会阻塞请求路径，
+//     因此只能在后台持续消费并把最新值写入缓存；连接断开或上游不可达时延迟重试。
+func (s *Server) startMemoryWatcher() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.memCancel = cancel
+	go s.watchMemory(ctx)
+}
+
+// watchMemory 持续消费 mihomo `/memory` 流并刷新内存缓存。
+//
+// 参数：
+//   - ctx: context.Context，Shutdown 时取消，正在解码的流会随连接关闭而退出。
+//
+// 返回值：无；只有 ctx 取消后才会返回。
+//
+// 错误情况：
+//   - 建连失败、非 2xx 或流中断都进入 2 秒退避重试，不写日志，避免上游长期不可用时刷日志。
+func (s *Server) watchMemory(ctx context.Context) {
+	for ctx.Err() == nil {
+		_ = s.streamMemory(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// streamMemory 建立一次 `/memory` 流连接并逐条消费，直到流出错或被取消。
+//
+// 参数：
+//   - ctx: context.Context，控制这次流的生命周期。
+//
+// 返回值：
+//   - error：建连失败、非 2xx 或流解码失败时返回；ctx 取消导致的错误同样返回，由调用方判断。
+//
+// 错误情况：
+//   - 上游推送的 inuse 为 0 时忽略该帧，保留上一次有效值，避免启动瞬间的空采样把缓存清零。
+func (s *Server) streamMemory(ctx context.Context) error {
+	resp, err := s.doControllerRequest(ctx, http.MethodGet, "/memory", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("memory stream returned status %d", resp.StatusCode)
+	}
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 16<<20))
+	for {
+		var payload struct {
+			Inuse uint64 `json:"inuse"`
+		}
+		if err := decoder.Decode(&payload); err != nil {
+			return err
+		}
+		if payload.Inuse > 0 {
+			s.memoryBytes.Store(payload.Inuse)
+		}
+	}
 }
 
 // handleDeleteConnections 代理 mihomo `DELETE /connections`，用于关闭全部连接。
@@ -774,16 +960,114 @@ func (s *Server) handleTestSub(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// trigger 异步执行一轮流水线；fetch=true 拉订阅+测速，false 仅测速。
-// 完整一轮可能耗时数十秒（订阅拉取 + 全部节点测速）。
+// trigger 把全局刷新或测速请求提交给单一后台 worker，并合并尚未执行的同类请求。
+//
+// 参数：
+//   - fetch: bool，true 表示拉订阅后测速，false 表示只测试当前节点。
+//
+// 返回值：无；API 仍立即返回 202，任务结果延续既有行为写入日志与应用状态。
+//
+// 错误情况：服务已关闭时忽略新任务。正在执行期间，同类突发请求最多保留一个待执行
+// 标记；完整刷新与仅测速分别保留，避免把不同用户意图互相覆盖。
 func (s *Server) trigger(fetch bool) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		defer cancel()
-		if err := s.app.Refresh(ctx, fetch); err != nil {
-			log.Printf("[api] trigger(fetch=%v): %v", fetch, err)
+	s.triggerMu.Lock()
+	defer s.triggerMu.Unlock()
+	if s.triggerClosed {
+		return
+	}
+	if s.triggerCancel == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.triggerCancel = cancel
+		go s.runTriggerWorker(ctx)
+	}
+	if fetch {
+		s.pendingRefresh = true
+	} else {
+		s.pendingTest = true
+	}
+	select {
+	case s.triggerWake <- struct{}{}:
+	default:
+		// 一个唤醒信号足以让 worker 读取 mutex 保护的全部待执行标记；重复信号没有价值。
+	}
+}
+
+// runTriggerWorker 串行消费合并后的全局刷新与测速任务。
+//
+// 参数：
+//   - ctx: context.Context，服务关闭时取消 worker 和当前应用层任务。
+//
+// 返回值：无；每个任务独立建立三分钟超时并把失败写入日志。
+//
+// 错误情况：应用层错误不终止 worker，后续待执行任务仍会继续。关闭导致的 context
+// 错误不重复记录，避免正常退出污染日志；panic 延续 Go 默认行为，不在此吞掉程序错误。
+func (s *Server) runTriggerWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.triggerWake:
+			for {
+				fetch, ok := s.takePendingTrigger()
+				if !ok {
+					break
+				}
+				taskCtx, cancel := context.WithTimeout(ctx, asyncRefreshTimeout)
+				err := s.runRefresh(taskCtx, fetch)
+				cancel()
+				if err != nil && ctx.Err() == nil {
+					log.Printf("[api] trigger(fetch=%v): %v", fetch, err)
+				}
+			}
 		}
-	}()
+	}
+}
+
+// takePendingTrigger 原子地取出一个待执行任务，完整刷新优先于仅测速。
+//
+// 参数：无；待执行状态保存在 Server 内部并由 triggerMu 保护。
+//
+// 返回值：
+//   - bool：任务的 fetch 参数；没有任务时值无意义。
+//   - bool：是否成功取得任务。
+//
+// 错误情况：无。只清除本次取出的一个标记，另一类任务仍会在当前唤醒周期继续执行。
+func (s *Server) takePendingTrigger() (bool, bool) {
+	s.triggerMu.Lock()
+	defer s.triggerMu.Unlock()
+	if s.pendingRefresh {
+		s.pendingRefresh = false
+		return true, true
+	}
+	if s.pendingTest {
+		s.pendingTest = false
+		return false, true
+	}
+	return false, false
+}
+
+// stopTriggerWorker 禁止新任务、清空未执行任务并取消唯一后台 worker。
+//
+// 参数：无。
+//
+// 返回值：无；方法可重复调用，尚未触发过任务时只记录关闭状态。
+//
+// 错误情况：不等待应用层回调退出，避免回调正等待应用互斥锁时阻塞 HTTP 关闭。取消
+// 上下文会尽快终止支持 context 的网络操作，且固定单 worker 保证最多残留一个在途调用。
+func (s *Server) stopTriggerWorker() {
+	s.triggerMu.Lock()
+	if s.triggerClosed {
+		s.triggerMu.Unlock()
+		return
+	}
+	s.triggerClosed = true
+	s.pendingRefresh = false
+	s.pendingTest = false
+	cancel := s.triggerCancel
+	s.triggerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // handleSetPortRange 修改节点映射端口区间：持久化 + 重新分配端口 + 热更新（不同步测速）。

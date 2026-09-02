@@ -331,8 +331,10 @@ function sortByDelay(list, mode) {
  * tableViewportHeight 计算 Radix ScrollArea 数据表格的可视高度。
  *
  * 功能说明：
- * 官方 Table 需要明确 viewport 高度才能虚拟滚动。当前控制台多数列表较短，
- * 因此高度应随行数收缩，避免出现大块空白；数据较多时再封顶并启用滚动。
+ * 官方 Table 需要明确 viewport 高度才能虚拟滚动。高度随行数增长，数据较少时
+ * 收缩避免大块空白；数据较多时封顶并启用滚动。封顶取页面给定上限与当前视口
+ * 可用高度（视口高减去页头/工具栏约 260px 的留白）的较小值，这样大屏能利用
+ * 更多空间，小屏也不会把页面撑出嵌套滚动条。
  *
  * 参数说明：
  * - rowCount: number，当前数据行数。
@@ -342,12 +344,17 @@ function sortByDelay(list, mode) {
  * 返回包含表头在内的 viewport 像素高度。
  *
  * 可能的异常/错误情况：
- * 非法或负行数按 0 处理；maximum 非法时使用 480px。
+ * 非法或负行数按 0 处理；maximum 非法时使用 720px；视口高度不可用时退回 maximum。
  */
-function tableViewportHeight(rowCount, maximum = 480) {
+function tableViewportHeight(rowCount, maximum = 720) {
   const safeCount = Number.isFinite(rowCount) && rowCount > 0 ? Math.floor(rowCount) : 0;
-  const safeMaximum = Number.isFinite(maximum) && maximum >= 144 ? maximum : 480;
-  return Math.min(safeMaximum, Math.max(144, (safeCount + 1) * 48));
+  const safeMaximum = Number.isFinite(maximum) && maximum >= 288 ? maximum : 720;
+  const viewportCap =
+    typeof window !== "undefined" && window.innerHeight
+      ? Math.max(320, window.innerHeight - 260)
+      : safeMaximum;
+  const cap = Math.min(safeMaximum, viewportCap);
+  return Math.min(cap, Math.max(288, (safeCount + 1) * 48));
 }
 
 /**
@@ -932,12 +939,12 @@ function useTrafficStream(showToast) {
 }
 
 /**
- * useConnectionsFeed 管理活动连接页的轮询、筛选和关闭操作。
+ * useConnectionsFeed 管理活动连接页的加载、筛选和关闭操作。
  *
  * 功能说明：
- * 这个 hook 只在 `activeView === "connections"` 时工作，并且只轮询 `/api/connections`
- * 一个接口。这样可以确保页面切换时及时停表，避免连接页把全局状态拖慢，也避免
- * 连接操作和其他页面轮询互相覆盖。
+ * 这个 hook 只在 `activeView === "connections"` 时工作，并且只请求 `/api/connections`
+ * 一个接口。页面进入时加载一次，之后完全由手动刷新按钮和关闭动作触发重新拉取，
+ * 不做自动轮询，避免长连接页持续占用请求与重绘。
  *
  * 参数说明：
  * - activeView: string，当前页面 id。
@@ -966,7 +973,6 @@ function useConnectionsFeed(activeView, requestConfirmation, showToast) {
   const [updatedAt, setUpdatedAt] = useState(null);
   const [query, setQuery] = useState("");
   const [transport, setTransport] = useState("all");
-  const [paused, setPaused] = useState(false);
   const [pendingIds, setPendingIds] = useState(() => new Set());
   const [closingAll, setClosingAll] = useState(false);
   const requestControllerRef = useRef(null);
@@ -1054,14 +1060,13 @@ function useConnectionsFeed(activeView, requestConfirmation, showToast) {
       return undefined;
     }
 
+    // 该页只做手动刷新：进入页面时加载一次，之后由刷新按钮或关闭动作触发，
+    // 不再自动轮询，避免长连接页持续占用请求与重绘。
     loadConnections();
-    // 暂停只停止自动轮询，不禁用手动刷新和关闭动作，便于用户冻结列表后检查细节。
-    const timer = paused ? 0 : window.setInterval(loadConnections, 2000);
     return () => {
-      if (timer) window.clearInterval(timer);
       requestControllerRef.current?.abort();
     };
-  }, [activeView, loadConnections, paused]);
+  }, [activeView, loadConnections]);
 
   /**
    * closeConnection 关闭单条活动连接。
@@ -1195,7 +1200,6 @@ function useConnectionsFeed(activeView, requestConfirmation, showToast) {
     error,
     hasLoaded,
     loading,
-    paused,
     pendingIds,
     query,
     refreshing,
@@ -1206,7 +1210,6 @@ function useConnectionsFeed(activeView, requestConfirmation, showToast) {
     updatedAt,
     visibleRows,
     setQuery,
-    setPaused,
     setTransport,
     closeAllConnections,
     closeConnection,
@@ -1433,7 +1436,7 @@ function App() {
   );
 
   /**
-   * useConnectionsFeed 接入活动连接页的轮询与关闭能力。
+   * useConnectionsFeed 接入活动连接页的加载与关闭能力。
    *
    * 功能说明：
    * 这个 hook 只在活动连接页可见时工作，避免后台页签继续打 `/api/connections`。
@@ -1441,7 +1444,7 @@ function App() {
    * 需要挂一次数据源即可。
    *
    * 参数说明：
-   * - activeView: string，当前激活视图名称，用于控制是否轮询。
+   * - activeView: string，当前激活视图名称，用于控制是否加载。
    * - requestConfirmation: Function，全局确认对话框请求函数。
    * - showToast: Function，全局 toast 展示函数。
    *
@@ -1815,6 +1818,7 @@ function App() {
             )}
             {activeView === "nodes" && (
               <NodesPage
+                busy={busy}
                 forms={forms}
                 initialSource={nodeSourceFilter}
                 overview={overview}
@@ -1856,6 +1860,7 @@ function App() {
                 onCopy={copyProxyURL}
                 onDelete={deleteJSON}
                 onForm={updateForm}
+                onPost={postJSON}
                 onSort={setGroupSort}
                 onSubmit={submitGroup}
                 onToggleNode={toggleNodeSelection}
@@ -2097,15 +2102,15 @@ function Topbar({ activeView, busy, loading, onMenu, onPalette, onRefresh, onTes
           </TooltipTrigger>
           <TooltipContent>命令菜单 · ⌘K</TooltipContent>
         </Tooltip>
-        <Button disabled={Boolean(busy)} variant="outline" type="button" onClick={onTest}>
-          <Gauge size={16} aria-hidden="true" />
-          <span className="desktop-action-label">测试节点</span>
-          <span className="mobile-action-label">测速</span>
+        <Button disabled={Boolean(busy)} loading={busy === "测速"} variant="outline" type="button" onClick={onTest}>
+          {busy !== "测速" && <Gauge size={16} aria-hidden="true" />}
+          <span className="desktop-action-label">{busy === "测速" ? "测速中…" : "测试节点"}</span>
+          <span className="mobile-action-label">{busy === "测速" ? "测速中" : "测速"}</span>
         </Button>
-        <Button disabled={Boolean(busy)} type="button" onClick={onRefresh}>
-          <RefreshCw className={classNames((busy || loading) && "animate-spin")} size={16} aria-hidden="true" />
-          <span className="desktop-action-label">同步订阅</span>
-          <span className="mobile-action-label">同步</span>
+        <Button disabled={Boolean(busy)} loading={busy === "刷新订阅"} type="button" onClick={onRefresh}>
+          {busy !== "刷新订阅" && <RefreshCw className={classNames((busy || loading) && "animate-spin")} size={16} aria-hidden="true" />}
+          <span className="desktop-action-label">{busy === "刷新订阅" ? "同步中…" : "同步订阅"}</span>
+          <span className="mobile-action-label">{busy === "刷新订阅" ? "同步中" : "同步"}</span>
         </Button>
       </div>
     </header>
@@ -2237,8 +2242,8 @@ function OverviewPage({
           </div>
           <div className="overview-hero-actions">
             <Button className="command-button" size="icon" variant="outline" type="button" onClick={onPalette} aria-label="打开命令菜单"><Search size={16} aria-hidden="true" /></Button>
-            <Button disabled={Boolean(busy)} variant="outline" type="button" onClick={onTest}><Gauge size={16} aria-hidden="true" />测速</Button>
-            <Button disabled={Boolean(busy)} type="button" onClick={onRefresh}><RefreshCw className={classNames((busy || loading) && "animate-spin")} size={16} aria-hidden="true" />同步</Button>
+            <Button disabled={Boolean(busy)} loading={busy === "测速"} variant="outline" type="button" onClick={onTest}>{busy !== "测速" && <Gauge size={16} aria-hidden="true" />}{busy === "测速" ? "测速中…" : "测速"}</Button>
+            <Button disabled={Boolean(busy)} loading={busy === "刷新订阅"} type="button" onClick={onRefresh}>{busy !== "刷新订阅" && <RefreshCw className={classNames((busy || loading) && "animate-spin")} size={16} aria-hidden="true" />}{busy === "刷新订阅" ? "同步中…" : "同步"}</Button>
           </div>
         </header>
 
@@ -2580,6 +2585,7 @@ function buildTrafficPath(samples, key, peak) {
  * 添加手动节点使用 Radix Dialog，避免常驻大表单挤压列表首屏。
  *
  * 参数说明：
+ * - busy: string，全局后台操作标识；非空时禁用测速按钮，等于“测速”时显示加载态。
  * - forms: object，全局受控表单状态。
  * - initialSource: string，从订阅页跳转时指定的初始来源。
  * - overview: object，概览、节点和稳定端口分配数据。
@@ -2591,7 +2597,7 @@ function buildTrafficPath(samples, key, peak) {
  * 可能的异常/错误情况：
  * 空地址会在前端拦截；后端解析、热更新或持久化失败由 onPost 统一 toast。
  */
-function NodesPage({ forms, initialSource, overview, onDelete, onForm, onMainNode, onPost, onSourceChange, onTest }) {
+function NodesPage({ busy, forms, initialSource, overview, onDelete, onForm, onMainNode, onPost, onSourceChange, onTest }) {
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [query, setQuery] = useState("");
@@ -2678,7 +2684,7 @@ function NodesPage({ forms, initialSource, overview, onDelete, onForm, onMainNod
     <div className="stack">
       <PageHeader eyebrow="代理资源" title="代理节点" detail="跨订阅查看健康状态、延迟与稳定端口分配。">
         <div className="page-actions">
-          <Button variant="outline" type="button" onClick={onTest}><Gauge size={16} aria-hidden="true" />测试全部</Button>
+          <Button disabled={Boolean(busy)} loading={busy === "测速"} variant="outline" type="button" onClick={onTest}>{busy !== "测速" && <Gauge size={16} aria-hidden="true" />}{busy === "测速" ? "测速中…" : "测试全部"}</Button>
           <Button type="button" onClick={() => setAddOpen(true)}><Plus size={16} aria-hidden="true" />添加节点</Button>
         </div>
       </PageHeader>
@@ -2799,6 +2805,31 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [saving, setSaving] = useState(false);
+  // 单个订阅的同步/测速是同步接口（最长 3 分钟），期间必须给行内按钮明确的加载态，
+  // 否则点击后到完成 toast 之间页面毫无反馈。key 形如 `${name}:${action}`。
+  const [pendingAction, setPendingAction] = useState("");
+
+  /**
+   * runSubAction 执行单个订阅的同步或测速，并维护行内加载状态。
+   *
+   * 参数说明：
+   * - name: string，订阅名称。
+   * - action: string，`refresh` 或 `test`。
+   *
+   * 返回值说明：返回 Promise<void>。
+   *
+   * 可能的异常/错误情况：
+   * 已有动作进行中时忽略新的点击；接口错误由 onSubAction 统一 toast，这里只负责状态复位。
+   */
+  async function runSubAction(name, action) {
+    if (pendingAction) return;
+    setPendingAction(`${name}:${action}`);
+    try {
+      await onSubAction(name, action);
+    } finally {
+      setPendingAction("");
+    }
+  }
 
   /**
    * openEditor 打开新增或编辑对话框。
@@ -2893,6 +2924,8 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
           const stateLabel = {
             disabled: "已停用", empty: "无节点", error: "异常", degraded: "使用缓存", healthy: "正常",
           }[subscription.state] || "未知";
+          const testing = pendingAction === `${subscription.name}:test`;
+          const syncing = pendingAction === `${subscription.name}:refresh`;
           return (
             <article className="subscription-card" key={subscription.name}>
               <div className="subscription-card-head">
@@ -2908,8 +2941,8 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
               {info && <div className="subscription-usage"><span>{info.usage}</span><span className={classNames(info.urgent && "urgent")}>{info.expire}</span></div>}
               <div className="subscription-card-actions">
                 <Button size="sm" variant="ghost" type="button" onClick={() => onNavigateNodes(subscription.name)}>查看节点</Button>
-                <Button disabled={!subscription.enabled} size="sm" variant="outline" type="button" onClick={() => onSubAction(subscription.name, "test")}>测速</Button>
-                <Button disabled={!subscription.enabled} size="sm" variant="outline" type="button" onClick={() => onSubAction(subscription.name, "refresh")}><RefreshCw size={14} aria-hidden="true" />同步</Button>
+                <Button disabled={!subscription.enabled || Boolean(pendingAction)} loading={testing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "test")}>{testing ? "测速中…" : "测速"}</Button>
+                <Button disabled={!subscription.enabled || Boolean(pendingAction)} loading={syncing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "refresh")}>{!syncing && <RefreshCw size={14} aria-hidden="true" />}{syncing ? "同步中…" : "同步"}</Button>
                 <Button aria-label={`编辑订阅 ${subscription.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditor(subscription)}><Pencil size={15} aria-hidden="true" /></Button>
                 <Button aria-label={`删除订阅 ${subscription.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/subscriptions/${encodeURIComponent(subscription.name)}`, "订阅已删除", `订阅 ${subscription.name}`)}><Trash2 size={15} aria-hidden="true" /></Button>
               </div>
@@ -3027,7 +3060,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
       data={nodes}
       emptyState="暂无节点"
       getRowId={(node, index) => node.key || `${node.subscription}:${node.name}:${index}`}
-      height={tableViewportHeight(nodes.length, 528)}
+      height={tableViewportHeight(nodes.length, 880)}
       minColumnWidth={84}
       resizable
     />
@@ -3111,7 +3144,7 @@ function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
         data={ports}
         emptyState={overview.port_mapping_enabled ? "暂无健康节点映射" : "暂无可保留的稳定分配"}
         getRowId={(port, index) => String(port.port || index)}
-        height={tableViewportHeight(ports.length, 576)}
+        height={tableViewportHeight(ports.length, 880)}
         minColumnWidth={88}
         resizable
       />
@@ -3129,7 +3162,7 @@ function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
  * - groupSort: string，待选节点排序。
  * - overview: object，概览数据。
  * - selectedNodes: Set<string>，当前勾选节点。
- * - onCopy/onDelete/onForm/onSort/onSubmit/onToggleNode: Function，操作回调。
+ * - onCopy/onDelete/onForm/onPost/onSort/onSubmit/onToggleNode: Function，操作回调。
  *
  * 返回值说明：
  * 返回分组页 React 元素。
@@ -3137,9 +3170,11 @@ function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
  * 可能的异常/错误情况：
  * 表单缺失本地拦截，后端冲突由父组件展示。
  */
-function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelete, onForm, onSort, onSubmit, onToggleNode }) {
+function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelete, onForm, onPost, onSort, onSubmit, onToggleNode }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [editingName, setEditingName] = useState("");
+  const [nodeQuery, setNodeQuery] = useState("");
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const nodes = groupSort === "delay" ? sortByDelay(overview.nodes, "delay") : overview.nodes;
   const sourceOptions = useMemo(() => {
     const names = (overview.subscriptions || []).filter((subscription) => subscription.enabled).map((subscription) => subscription.name);
@@ -3157,6 +3192,53 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
     });
     return result;
   }, [overview.groups]);
+
+  const normalizedQuery = nodeQuery.trim().toLowerCase();
+  const filteredNodes = normalizedQuery
+    ? nodes.filter((node) => `${node.name} ${node.subscription || ""}`.toLowerCase().includes(normalizedQuery))
+    : nodes;
+  const selectedCount = overview.nodes.reduce((count, node) => count + (selectedNodes.has(node.name) ? 1 : 0), 0);
+
+  /**
+   * toggleGroupExpanded 展开或收起某个分组的成员节点列表。
+   *
+   * 参数说明：
+   * - name: string，分组名。
+   *
+   * 返回值说明：无。
+   *
+   * 可能的异常/错误情况：无；展开状态只保存在本地，刷新概览不影响。
+   */
+  function toggleGroupExpanded(name) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
+  /**
+   * setNodesSelection 把一批节点的勾选状态统一调整为目标值。
+   *
+   * 功能说明：
+   * 全局勾选集合只暴露单节点 toggle，这里参考 syncSelectedNodes 的差量模式做批量
+   * 操作，避免逐个点击，也避免重复 toggle 把已符合目标的节点改反。
+   *
+   * 参数说明：
+   * - names: string[]，需要调整的节点名。
+   * - shouldSelect: boolean，目标勾选状态。
+   *
+   * 返回值说明：无。
+   *
+   * 可能的异常/错误情况：已不在节点目录中的名字会被忽略。
+   */
+  function setNodesSelection(names, shouldSelect) {
+    const nameSet = new Set(names);
+    overview.nodes.forEach((node) => {
+      if (nameSet.has(node.name) && selectedNodes.has(node.name) !== shouldSelect) onToggleNode(node.name);
+    });
+  }
 
   /**
    * syncSelectedNodes 把全局节点选择集合调整为目标集合。
@@ -3185,6 +3267,7 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
    */
   function openCreateDialog() {
     setEditingName("");
+    setNodeQuery("");
     onForm("groupName", "");
     onForm("groupPort", "");
     onForm("groupType", "fallback");
@@ -3205,12 +3288,40 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
    */
   function openEditDialog(group) {
     setEditingName(group.name);
+    setNodeQuery("");
     onForm("groupName", group.name);
     onForm("groupPort", String(group.port));
     onForm("groupType", group.type || "url-test");
     onForm("groupSubscription", group.subscription || "");
     syncSelectedNodes(group.nodes || []);
     setCreateOpen(true);
+  }
+
+  /**
+   * removeStaleNodes 从手动分组中移除已不在节点目录的成员。
+   *
+   * 功能说明：
+   * 通过 PUT 提交完整分组实现移除，复用后端的端口冲突校验、热更新与持久化事务。
+   * 单个移除与批量清理共用此入口，只是 names 长度不同。
+   *
+   * 参数说明：
+   * - group: object，overview 中的完整策略分组。
+   * - names: string[]，待移除的失效节点名。
+   *
+   * 返回值说明：返回 Promise<void>。
+   *
+   * 可能的异常/错误情况：
+   * 如果移除后分组不再有任何成员，后端会拒绝并 toast 提示，配置保持不变。
+   */
+  async function removeStaleNodes(group, names) {
+    const removal = new Set(names);
+    await onPost(`/api/groups/${encodeURIComponent(group.name)}`, {
+      name: group.name,
+      port: group.port,
+      type: group.type || "fallback",
+      subscription: "",
+      nodes: (group.nodes || []).filter((name) => !removal.has(name)),
+    }, names.length > 1 ? `已清除 ${names.length} 个失效节点` : `已移除失效节点 ${names[0]}`, "PUT");
   }
 
   /**
@@ -3235,30 +3346,78 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
       <section className="panel">
         <PanelTitle title="已有策略分组" detail="分组提供独立代理入口，并按选定策略选择节点" />
         <ul className="item-list">
-          {(overview.groups || []).map((group) => (
-            <li key={group.name}>
-              <b>{group.name}</b>
-              <button className="copy-link" type="button" onClick={() => onCopy(group.port)}>:{group.port}<Copy size={14} /></button>
-              <span>{GROUP_TYPE_LABELS[group.type] || group.type || "自动测速"}</span>
-              <span>{group.subscription ? `来源：${group.subscription}` : `${(group.nodes || []).length} 个固定节点`}</span>
-              <StatusBadge
-                ok={group.subscription
-                  ? overview.subscriptions.some((subscription) => subscription.name === group.subscription && subscription.enabled && subscription.alive > 0)
-                  : (group.nodes || []).some((name) => overview.nodes.some((node) => node.name === name && node.alive))}
-                text={group.subscription
-                  ? `${overview.subscriptions.find((subscription) => subscription.name === group.subscription)?.alive || 0} 个可用`
-                  : `${(group.nodes || []).filter((name) => overview.nodes.some((node) => node.name === name && node.alive)).length}/${(group.nodes || []).length} 可用`}
-              />
-              <Button aria-label={`编辑策略分组 ${group.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditDialog(group)}><Pencil size={15} aria-hidden="true" /></Button>
-              <Button aria-label={`删除策略分组 ${group.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/groups/${encodeURIComponent(group.name)}`, "分组已删除", `策略分组 ${group.name}`)}>
-                <Trash2 size={16} aria-hidden="true" />
-              </Button>
+          {(overview.groups || []).map((group) => {
+            const isExpanded = expandedGroups.has(group.name);
+            // 订阅来源的分组成员随订阅节点动态变化；手动分组则展示固定成员。
+            const memberNames = group.subscription
+              ? overview.nodes.filter((node) => node.subscription === group.subscription).map((node) => node.name)
+              : group.nodes || [];
+            const staleNames = group.subscription
+              ? []
+              : memberNames.filter((name) => !overview.nodes.some((node) => node.name === name));
+            return (
+            <li className="group-item" key={group.name}>
+              <div className="group-row">
+                <button aria-expanded={isExpanded} aria-label={`查看分组 ${group.name} 的节点`} className="group-toggle" type="button" onClick={() => toggleGroupExpanded(group.name)}>
+                  <ChevronDown size={15} aria-hidden="true" />
+                  <b>{group.name}</b>
+                </button>
+                <button className="copy-link" type="button" onClick={() => onCopy(group.port)}>:{group.port}<Copy size={14} /></button>
+                <span>{GROUP_TYPE_LABELS[group.type] || group.type || "自动测速"}</span>
+                <span>{group.subscription ? `来源：${group.subscription}` : `${(group.nodes || []).length} 个固定节点`}</span>
+                <StatusBadge
+                  ok={group.subscription
+                    ? overview.subscriptions.some((subscription) => subscription.name === group.subscription && subscription.enabled && subscription.alive > 0)
+                    : (group.nodes || []).some((name) => overview.nodes.some((node) => node.name === name && node.alive))}
+                  text={group.subscription
+                    ? `${overview.subscriptions.find((subscription) => subscription.name === group.subscription)?.alive || 0} 个可用`
+                    : `${(group.nodes || []).filter((name) => overview.nodes.some((node) => node.name === name && node.alive)).length}/${(group.nodes || []).length} 可用`}
+                />
+                <Button aria-label={`编辑策略分组 ${group.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditDialog(group)}><Pencil size={15} aria-hidden="true" /></Button>
+                <Button aria-label={`删除策略分组 ${group.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/groups/${encodeURIComponent(group.name)}`, "分组已删除", `策略分组 ${group.name}`)}>
+                  <Trash2 size={16} aria-hidden="true" />
+                </Button>
+              </div>
+              {isExpanded && (
+                <ul className="group-node-list">
+                  {staleNames.length > 1 && (
+                    <li>
+                      <button className="group-clean-stale" type="button" onClick={() => removeStaleNodes(group, staleNames)}>
+                        <Trash2 size={12} aria-hidden="true" />清除 {staleNames.length} 个失效节点
+                      </button>
+                    </li>
+                  )}
+                  {memberNames.length === 0 && (
+                    <li className="group-node-empty">{group.subscription ? "该订阅下暂无节点" : "该分组暂无成员节点"}</li>
+                  )}
+                  {memberNames.map((name) => {
+                    const node = overview.nodes.find((item) => item.name === name);
+                    return (
+                      <li className="group-node" key={name}>
+                        <i className={node && node.alive ? "on" : ""} aria-hidden="true" />
+                        <span className="group-node-name">{name}</span>
+                        {node ? (
+                          <span className={delayClass(node)}>{formatDelay(node)}</span>
+                        ) : (
+                          <>
+                            <span className="delay-muted">已不在节点目录</span>
+                            <button aria-label={`从分组 ${group.name} 移除失效节点 ${name}`} className="group-node-remove" type="button" onClick={() => removeStaleNodes(group, [name])}>
+                              <Trash2 size={12} aria-hidden="true" />
+                            </button>
+                          </>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
             </li>
-          ))}
+            );
+          })}
         </ul>
       </section>
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="group-dialog">
         <DialogClose className="dialog-close" aria-label="关闭新建分组对话框"><X size={16} aria-hidden="true" /></DialogClose>
         <DialogHeader><DialogTitle>{editingName ? "编辑策略分组" : "新建策略分组"}</DialogTitle><DialogDescription>可从一个订阅自动取节点，也可以手动勾选节点。编辑时分组名保持不变。</DialogDescription></DialogHeader>
         <div className="form-grid group-form">
@@ -3288,7 +3447,21 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
             />
           </Field>
         </div>
-        <div className="toolbar">
+        <div className="toolbar node-picker-toolbar">
+          <div className="picker-search">
+            <Field label="搜索节点">
+              <div className="input-with-icon">
+                <Search size={15} aria-hidden="true" />
+                <input
+                  aria-label="搜索候选节点"
+                  disabled={Boolean(forms.groupSubscription)}
+                  placeholder="节点名或订阅名…"
+                  value={nodeQuery}
+                  onChange={(event) => setNodeQuery(event.target.value)}
+                />
+              </div>
+            </Field>
+          </div>
           <Field compact label="候选节点排序">
             <Select
               ariaLabel="候选节点排序"
@@ -3297,16 +3470,28 @@ function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, onDelet
               options={[{ value: "default", label: "默认顺序" }, { value: "delay", label: "延迟从低到高" }]}
             />
           </Field>
+          <span className="picker-count">已选 {selectedCount} / 显示 {filteredNodes.length}</span>
+          <Button disabled={Boolean(forms.groupSubscription) || filteredNodes.length === 0} size="sm" type="button" variant="ghost" onClick={() => setNodesSelection(filteredNodes.map((node) => node.name), true)}>全选结果</Button>
+          <Button disabled={Boolean(forms.groupSubscription) || selectedCount === 0} size="sm" type="button" variant="ghost" onClick={() => setNodesSelection(overview.nodes.map((node) => node.name), false)}>清空</Button>
         </div>
-        <div className="node-picker">
-          {nodes.map((node) => (
-            <label className={classNames("node-option", (!node.alive || forms.groupSubscription) && "disabled")} key={`${node.subscription}:${node.name}`}>
-              <input checked={selectedNodes.has(node.name)} disabled={Boolean(forms.groupSubscription)} type="checkbox" onChange={() => onToggleNode(node.name)} />
-              <span className="node-name">{node.name}</span>
-              <span className={delayClass(node)}>{formatDelay(node)}</span>
-              {(usedBy[node.name] || []).map((group) => <small key={group}>{group}</small>)}
-            </label>
-          ))}
+        <div className="node-picker-scroll">
+          <div className="node-picker">
+            {filteredNodes.length === 0 && <p className="picker-empty">没有匹配的节点，换个关键词试试</p>}
+            {filteredNodes.map((node) => (
+              <label className={classNames("node-option", (!node.alive || forms.groupSubscription) && "disabled")} key={`${node.subscription}:${node.name}`}>
+                <input checked={selectedNodes.has(node.name)} disabled={Boolean(forms.groupSubscription)} type="checkbox" onChange={() => onToggleNode(node.name)} />
+                <span className="node-option-main">
+                  <span className="node-name">{node.name}</span>
+                  {(usedBy[node.name] || []).length > 0 && (
+                    <span className="node-option-tags">
+                      {(usedBy[node.name] || []).map((group) => <small key={group} title={group}>{group}</small>)}
+                    </span>
+                  )}
+                </span>
+                <span className={delayClass(node)}>{formatDelay(node)}</span>
+              </label>
+            ))}
+          </div>
         </div>
         <DialogFooter><Button variant="outline" type="button" onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" onClick={submitGroupDialog}>{editingName ? <Pencil size={16} aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}{editingName ? "保存修改" : "创建分组"}</Button></DialogFooter>
         </DialogContent>
@@ -3834,7 +4019,6 @@ function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
  * - error: string，最近一次加载错误文本。
  * - hasLoaded: boolean，是否至少完成过一次加载尝试。
  * - loading: boolean，是否处于首次加载。
- * - paused: boolean，是否暂停自动轮询。
  * - pendingIds: Set<string>，正在关闭中的连接 id 集合。
  * - query: string，搜索词。
  * - refreshing: boolean，是否正在刷新列表。
@@ -3844,7 +4028,7 @@ function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
  * - transport: string，当前协议筛选值。
  * - updatedAt: Date | null，最近一次刷新时间。
  * - visibleRows: Array<object>，当前筛选后可见的连接。
- * - setPaused/setQuery/setTransport: Function，暂停、搜索与协议筛选 setter。
+ * - setQuery/setTransport: Function，搜索与协议筛选 setter。
  * - closeAllConnections/closeConnection: Function，关闭全部与关闭单条动作。
  *
  * 返回值说明：
@@ -3860,7 +4044,6 @@ function ConnectionsPage({
   error,
   hasLoaded,
   loading,
-  paused,
   pendingIds,
   query,
   refreshing,
@@ -3870,7 +4053,6 @@ function ConnectionsPage({
   transport,
   updatedAt,
   visibleRows,
-  setPaused,
   setQuery,
   setTransport,
   closeAllConnections,
@@ -3995,7 +4177,6 @@ function ConnectionsPage({
           <div className="connection-refresh-state">
             <div>
               {refreshing && <Badge variant="secondary">更新中</Badge>}
-              {paused && <Badge variant="outline">已暂停</Badge>}
               <Badge variant="outline">{visibleCount}/{activeCount}</Badge>
             </div>
             <p>
@@ -4004,15 +4185,6 @@ function ConnectionsPage({
             <time dateTime={updatedAt?.toISOString() || undefined}>{updatedText}</time>
             </p>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setPaused(!paused)}
-            aria-label={paused ? "继续自动刷新活动连接" : "暂停自动刷新活动连接"}
-          >
-            {paused ? <Play size={16} aria-hidden="true" /> : <Pause size={16} aria-hidden="true" />}
-            <span>{paused ? "继续" : "暂停"}</span>
-          </Button>
           <Button
             disabled={loading}
             loading={refreshing}
@@ -4025,7 +4197,7 @@ function ConnectionsPage({
             <span>刷新</span>
           </Button>
           <Button
-            className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+            className="border-destructive/40 text-destructive hover:bg-destructive/10"
             disabled={!hasRows || closingAll}
             loading={closingAll}
             type="button"
@@ -4119,7 +4291,7 @@ function ConnectionsPage({
                 data={visibleRows}
                 emptyState="暂无活动连接"
                 getRowId={(row) => row.id}
-                height={tableViewportHeight(visibleRows.length, 624)}
+                height={tableViewportHeight(visibleRows.length, 960)}
                 minColumnWidth={88}
                 resizable
               />

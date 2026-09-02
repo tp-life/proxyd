@@ -2,8 +2,14 @@ package subscribe
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/node"
@@ -71,6 +77,96 @@ func TestFetchAllSkipsDisabledSubscription(t *testing.T) {
 	}
 	if len(nodes) != 1 || nodes[0].Name != "手动节点" || nodes[0].Subscription != ManualSubscription {
 		t.Fatalf("禁用订阅不应影响手动节点: %#v", nodes)
+	}
+}
+
+// TestFetchAllLimitsConcurrentSources 验证订阅数量很大时只启动固定数量的上游拉取，
+// 同时保持所有订阅最终都会被处理且错误切片仍与输入一一对应。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于启动受控 HTTP 上游并检查并发峰值。
+//
+// 返回值：无；通过最大在途请求数、节点数和错误槽位断言表达结果。
+//
+// 错误情况：上游并发超过限制、任务队列丢失订阅、解析失败或错误槽位错位时测试失败。
+// 测试响应为互不重复的 Shadowsocks 分享链接，避免节点去重掩盖漏拉取问题。
+func TestFetchAllLimitsConcurrentSources(t *testing.T) {
+	const sourceCount = maxConcurrentSubscriptionFetches + 8
+	var active atomic.Int32
+	var peak atomic.Int32
+	started := make(chan struct{}, sourceCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for observed := peak.Load(); current > observed && !peak.CompareAndSwap(observed, current); observed = peak.Load() {
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+			var index int
+			_, _ = fmt.Sscanf(r.URL.Path, "/%d", &index)
+			_, _ = fmt.Fprintf(w, "ss://aes-128-gcm:password@127.0.0.1:%d#node-%d\n", 10000+index, index)
+		case <-r.Context().Done():
+			return
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	// 无论断言从哪个分支退出，都先解除 handler 阻塞，避免 HTTP 服务清理等待在途请求。
+	unblock := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(unblock)
+
+	subs := make([]config.Subscription, 0, sourceCount)
+	for i := 0; i < sourceCount; i++ {
+		subs = append(subs, config.Subscription{
+			Name: fmt.Sprintf("sub-%d", i),
+			URL:  fmt.Sprintf("%s/%d", server.URL, i),
+			Type: "share",
+		})
+	}
+	type fetchOutcome struct {
+		nodes []*node.Node
+		errs  []error
+	}
+	stateDir := t.TempDir()
+	outcome := make(chan fetchOutcome, 1)
+	go func() {
+		nodes, _, errs := FetchAllWithInfoAndFilters(context.Background(), subs, stateDir, nil, nil)
+		outcome <- fetchOutcome{nodes: nodes, errs: errs}
+	}()
+
+	for i := 0; i < maxConcurrentSubscriptionFetches; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("等待第 %d 个订阅拉取启动超时", i+1)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := peak.Load(); got > maxConcurrentSubscriptionFetches {
+		t.Fatalf("订阅拉取并发峰值=%d，期望不超过 %d", got, maxConcurrentSubscriptionFetches)
+	}
+
+	unblock()
+	select {
+	case got := <-outcome:
+		if len(got.nodes) != sourceCount {
+			t.Fatalf("拉取完成节点数=%d，期望 %d", len(got.nodes), sourceCount)
+		}
+		if len(got.errs) != sourceCount {
+			t.Fatalf("错误槽位数=%d，期望 %d", len(got.errs), sourceCount)
+		}
+		for i, err := range got.errs {
+			if err != nil {
+				t.Fatalf("订阅 %d 意外失败: %v", i, err)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("解除上游阻塞后订阅批量拉取未及时结束")
 	}
 }
 

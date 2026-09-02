@@ -21,22 +21,22 @@ import { cn } from "../../lib/utils";
  * `badgeVariants` 定义徽标视觉变体。
  *
  * 功能说明：
- * 维持简洁的 new-york 中性色基调，让徽标可以嵌入控制台型页面而不显得突兀。
+ * 维持与全局赛博朋克深色主题一致的描边霓虹基调，让徽标可以嵌入控制台型页面而不显得突兀。
  */
 export const badgeVariants = cva(
   [
     "inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap",
     "transition-colors duration-200",
-    "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-black/10",
+    "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/25",
   ].join(" "),
   {
     variants: {
       variant: {
-        default: "border-transparent bg-neutral-900 text-white",
-        secondary: "border-transparent bg-neutral-100 text-neutral-900",
-        success: "border-transparent bg-emerald-100 text-emerald-900",
-        destructive: "border-transparent bg-red-600 text-white",
-        outline: "border-neutral-200 bg-white text-neutral-900",
+        default: "border-primary/40 bg-primary/10 text-primary",
+        secondary: "border-border bg-secondary text-secondary-foreground",
+        success: "border-success/40 bg-success/10 text-success",
+        destructive: "border-destructive/50 bg-destructive/15 text-destructive",
+        outline: "border-border bg-card text-foreground",
       },
     },
     defaultVariants: {

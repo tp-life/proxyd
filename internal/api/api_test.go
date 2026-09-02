@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,175 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/logbuf"
 )
+
+// TestTriggerCoalescesBurst 验证 API 短时间收到大量相同刷新请求时，只保留一个正在
+// 执行的任务和一个待执行任务，避免请求数直接转化为长期等待应用互斥锁的 goroutine。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于控制刷新回调阻塞点并检查调用次数。
+//
+// 返回值：无；通过两次执行记录和无第三次执行断言表达结果。
+//
+// 错误情况：首个任务未启动、突发请求全部丢失、相同任务未合并、fetch 语义改变，
+// 或关闭调度器不能取消在途回调时测试失败。
+func TestTriggerCoalescesBurst(t *testing.T) {
+	a, err := app.New(&config.Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	started := make(chan bool, 3)
+	release := make(chan struct{}, 2)
+
+	// 注入可控回调只替代应用层执行边界，不改变 trigger 的排队与合并逻辑。回调同时
+	// 监听 ctx，确保测试失败时 Shutdown 仍能终止 worker，而不会遗留测试 goroutine。
+	server.runRefresh = func(ctx context.Context, fetch bool) error {
+		select {
+		case started <- fetch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() { server.Shutdown(context.Background()) })
+
+	server.trigger(true)
+	select {
+	case fetch := <-started:
+		if !fetch {
+			t.Fatal("完整刷新被错误转换为仅测速")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("首个刷新任务未启动")
+	}
+
+	for i := 0; i < 500; i++ {
+		server.trigger(true)
+	}
+	release <- struct{}{}
+	select {
+	case fetch := <-started:
+		if !fetch {
+			t.Fatal("合并后的完整刷新被错误转换为仅测速")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("突发刷新请求被全部丢弃")
+	}
+
+	release <- struct{}{}
+	select {
+	case fetch := <-started:
+		t.Fatalf("相同突发请求未合并，出现第三次执行: fetch=%v", fetch)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestTriggerPreservesDifferentOperations 验证完整刷新执行期间收到的“仅测速”请求不会
+// 被同类刷新合并规则误删；两类意图各自最多排队一次并最终都执行。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于控制三次任务的执行边界。
+//
+// 返回值：无；通过后续任务同时包含 fetch=true 与 fetch=false 断言表达结果。
+//
+// 错误情况：任一任务未执行、任务类型被转换，或重复请求形成第四次执行时测试失败。
+func TestTriggerPreservesDifferentOperations(t *testing.T) {
+	a, err := app.New(&config.Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	started := make(chan bool, 4)
+	release := make(chan struct{}, 3)
+
+	// 回调只模拟耗时应用事务；监听 ctx 让测试清理可以可靠取消仍在阻塞的任务。
+	server.runRefresh = func(ctx context.Context, fetch bool) error {
+		select {
+		case started <- fetch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() { server.Shutdown(context.Background()) })
+
+	server.trigger(true)
+	select {
+	case fetch := <-started:
+		if !fetch {
+			t.Fatal("首个完整刷新类型错误")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("首个完整刷新未启动")
+	}
+
+	for i := 0; i < 100; i++ {
+		server.trigger(false)
+		server.trigger(true)
+	}
+	release <- struct{}{}
+
+	seen := map[bool]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case fetch := <-started:
+			seen[fetch] = true
+			release <- struct{}{}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("等待第 %d 个合并任务启动超时", i+1)
+		}
+	}
+	if !seen[true] || !seen[false] {
+		t.Fatalf("不同操作未被完整保留: seen=%v", seen)
+	}
+	select {
+	case fetch := <-started:
+		t.Fatalf("重复请求未合并，出现第四次执行: fetch=%v", fetch)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestStartConfiguresIdleConnectionTimeout 验证 API 服务只回收请求之间长期闲置的
+// keep-alive 连接，同时不设置会中断 /api/traffic 长连接响应的 WriteTimeout。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于启动随机端口监听并检查 http.Server 配置。
+//
+// 返回值：无；通过 IdleTimeout 与 WriteTimeout 断言表达结果。
+//
+// 错误情况：监听失败、空闲超时未配置，或误配置写超时导致流式 API 存在被切断风险时
+// 测试失败。清理使用有界上下文，避免异常连接让测试退出无限等待。
+func TestStartConfiguresIdleConnectionTimeout(t *testing.T) {
+	a, err := app.New(&config.Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	if err := server.Start(); err != nil {
+		t.Fatalf("启动 API 测试服务失败: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	})
+	if server.srv.IdleTimeout <= 0 {
+		t.Fatal("API 服务未配置空闲 keep-alive 连接回收时间")
+	}
+	if server.srv.WriteTimeout != 0 {
+		t.Fatalf("流式 API 不应配置全局 WriteTimeout: %s", server.srv.WriteTimeout)
+	}
+}
 
 // newIPv4Server 创建一个固定监听 `127.0.0.1` 的 httptest 服务。
 //
@@ -844,6 +1014,125 @@ func TestConnectionsAPIProxiesMihomoJSON(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != `{"connections":[{"id":"c1","metadata":{"host":"example.com"}}]}` {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+// TestConnectionsAPIInjectsMemory 验证 `GET /api/connections` 会附带缓存的内存占用。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：
+//   - 响应顶层缺少 `memory` 字段、数值与缓存不一致，或连接数据被改写时，测试失败。
+//   - 缓存尚未采集到（0）时必须退化为原样透传，不能因此拖垮连接列表主请求。
+func TestConnectionsAPIInjectsMemory(t *testing.T) {
+	t.Run("memory available", func(t *testing.T) {
+		upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/connections" {
+				t.Errorf("unexpected upstream path %q", r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			fmt.Fprint(w, `{"connections":[{"id":"c1"}],"downloadTotal":3,"uploadTotal":2}`)
+		}))
+		defer upstream.Close()
+
+		a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New("127.0.0.1:0", a)
+		srv.memoryBytes.Store(1048576)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
+		srv.handleConnections(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("body is not JSON: %v", err)
+		}
+		if got := payload["memory"]; got != float64(1048576) {
+			t.Fatalf("memory = %v, want 1048576", got)
+		}
+		conns, ok := payload["connections"].([]any)
+		if !ok || len(conns) != 1 {
+			t.Fatalf("connections = %v", payload["connections"])
+		}
+	})
+
+	t.Run("memory unavailable", func(t *testing.T) {
+		upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			fmt.Fprint(w, `{"connections":[]}`)
+		}))
+		defer upstream.Close()
+
+		a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New("127.0.0.1:0", a)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
+		srv.handleConnections(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if body := strings.TrimSpace(rec.Body.String()); body != `{"connections":[]}` {
+			t.Fatalf("body = %q", body)
+		}
+	})
+}
+
+// TestMemoryWatcherCachesInuse 验证后台 watcher 能从 mihomo `/memory` 流中刷新内存缓存。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：
+//   - 约定时间内缓存未更新为流中的 inuse 值时，测试失败。
+//   - 流首帧 inuse 为 0 时不得覆盖缓存，避免把启动瞬间的空采样当成真实值。
+func TestMemoryWatcherCachesInuse(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/memory" {
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, _ := w.(http.Flusher)
+		for _, v := range []uint64{0, 1048576} {
+			fmt.Fprintf(w, `{"inuse":%d,"oslimit":0}`+"\n", v)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		// 模拟常驻流：保持连接直到客户端（watcher 取消）断开。
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:0", a)
+	srv.startMemoryWatcher()
+	defer srv.memCancel()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for srv.memoryBytes.Load() != 1048576 {
+		if time.Now().After(deadline) {
+			t.Fatalf("memory cache = %d, want 1048576", srv.memoryBytes.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

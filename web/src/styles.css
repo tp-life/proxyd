@@ -3,6 +3,8 @@
  *
  * 功能说明：
  * 定义 Radix UI 组件所需的语义颜色，并为代理管理场景提供紧凑、清晰的桌面工作台布局。
+ * 整体采用赛博朋克深色霓虹主题：深空蓝紫底色 + 霓虹青/品红强调色，辅以网格、
+ * 扫描线与辉光装饰；所有颜色都收敛在 :root 变量中，便于整体调整。
  *
  * 参数说明：
  * 无；样式由 Vite 的 Tailwind 4 插件在构建阶段扫描并生成。
@@ -16,37 +18,42 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/*
+ * 赛博朋克深色霓虹主题：背景是带紫调的深空蓝黑，主色为霓虹青，品红作为第二霓虹色。
+ * 软色（*-soft）全部使用低明度版本，保证成功/警告/信息提示在深色底上仍然可读。
+ */
 :root {
-  --background: oklch(0.985 0.004 85);
-  --foreground: oklch(0.205 0.012 265);
-  --card: oklch(0.995 0.002 85);
-  --card-foreground: oklch(0.205 0.012 265);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.205 0.012 265);
-  --primary: oklch(0.58 0.205 255);
-  --primary-foreground: oklch(0.985 0.005 255);
-  --secondary: oklch(0.95 0.009 260);
-  --secondary-foreground: oklch(0.27 0.025 260);
-  --muted: oklch(0.958 0.006 85);
-  --muted-foreground: oklch(0.47 0.018 265);
-  --accent: oklch(0.95 0.025 255);
-  --accent-foreground: oklch(0.39 0.15 255);
-  --destructive: oklch(0.57 0.2 27);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.895 0.009 85);
-  --input: oklch(0.86 0.012 85);
-  --ring: oklch(0.58 0.205 255);
-  --success: oklch(0.54 0.135 168);
-  --success-soft: oklch(0.96 0.035 168);
-  --warning: oklch(0.62 0.145 70);
-  --warning-soft: oklch(0.965 0.035 78);
-  --info: oklch(0.56 0.18 255);
-  --info-soft: oklch(0.955 0.025 255);
-  --sidebar: oklch(0.992 0.003 85);
-  --sidebar-foreground: oklch(0.245 0.014 265);
-  --sidebar-muted: oklch(0.49 0.018 265);
-  --sidebar-accent: oklch(0.95 0.028 255);
-  --radius: 0.625rem;
+  --background: oklch(0.155 0.03 285);
+  --foreground: oklch(0.9 0.02 260);
+  --card: oklch(0.19 0.035 285);
+  --card-foreground: oklch(0.9 0.02 260);
+  --popover: oklch(0.21 0.04 285);
+  --popover-foreground: oklch(0.9 0.02 260);
+  --primary: oklch(0.84 0.15 197);
+  --primary-foreground: oklch(0.17 0.04 285);
+  --secondary: oklch(0.24 0.045 285);
+  --secondary-foreground: oklch(0.88 0.05 300);
+  --muted: oklch(0.22 0.04 285);
+  --muted-foreground: oklch(0.66 0.04 275);
+  --accent: oklch(0.26 0.07 305);
+  --accent-foreground: oklch(0.85 0.14 197);
+  --destructive: oklch(0.68 0.22 17);
+  --destructive-foreground: oklch(0.96 0.02 17);
+  --border: oklch(0.3 0.045 285);
+  --input: oklch(0.34 0.05 285);
+  --ring: oklch(0.84 0.15 197);
+  --success: oklch(0.82 0.17 165);
+  --success-soft: oklch(0.26 0.06 170);
+  --warning: oklch(0.83 0.15 85);
+  --warning-soft: oklch(0.28 0.06 80);
+  --info: oklch(0.74 0.14 290);
+  --info-soft: oklch(0.27 0.07 295);
+  --sidebar: oklch(0.175 0.035 285);
+  --sidebar-foreground: oklch(0.9 0.02 260);
+  --sidebar-muted: oklch(0.62 0.045 280);
+  --sidebar-accent: oklch(0.25 0.06 295);
+  --neon: oklch(0.78 0.17 330);
+  --radius: 0.5rem;
 }
 
 @theme inline {
@@ -79,10 +86,12 @@
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-muted: var(--sidebar-muted);
   --color-sidebar-accent: var(--sidebar-accent);
+  --color-neon: var(--neon);
   --radius-sm: calc(var(--radius) - 2px);
   --radius-md: var(--radius);
   --radius-lg: var(--radius);
-  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 @layer base {
@@ -100,6 +109,38 @@
     min-height: 100vh;
     letter-spacing: 0;
     font-size: 14px;
+    /* 网格线 + 两束霓虹光晕构成赛博朋克底色；光晕透明度很低，不干扰阅读。 */
+    background-image: radial-gradient(
+        1100px 560px at 88% -12%,
+        oklch(0.84 0.15 197 / 0.09),
+        transparent 62%
+      ),
+      radial-gradient(
+        1000px 640px at -8% 112%,
+        oklch(0.78 0.17 330 / 0.08),
+        transparent 62%
+      ),
+      linear-gradient(oklch(0.3 0.045 285 / 0.16) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(0.3 0.045 285 / 0.16) 1px, transparent 1px);
+    background-size:
+      auto,
+      auto,
+      44px 44px,
+      44px 44px;
+  }
+
+  /* 固定扫描线叠加层：pointer-events 关闭，仅提供终端质感。 */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      oklch(0 0 0 / 0.09) 0 1px,
+      transparent 1px 3px
+    );
   }
 
   button,
@@ -140,7 +181,8 @@
   code,
   pre,
   .mono-input {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      "Liberation Mono", monospace;
   }
 }
 
@@ -153,34 +195,76 @@
     @apply inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md border border-transparent px-3.5 text-sm font-medium no-underline outline-none transition-colors duration-200 focus-visible:ring-3 focus-visible:ring-ring/20 disabled:pointer-events-none disabled:opacity-55;
   }
 
-  .btn-primary { @apply bg-primary text-primary-foreground shadow-sm hover:bg-primary/90; }
-  .btn-secondary { @apply bg-secondary text-secondary-foreground hover:bg-secondary/75; }
-  .btn-outline { @apply border-input bg-card text-foreground hover:border-primary/25 hover:bg-accent; }
-  .btn-ghost { @apply bg-transparent text-foreground hover:bg-muted; }
-  .btn-danger { @apply bg-destructive text-destructive-foreground hover:bg-destructive/90; }
-  .btn-danger-ghost { @apply bg-transparent text-destructive hover:bg-destructive/10; }
-  .btn-sm { @apply h-8 gap-1.5 px-3 text-xs; }
-  .btn-lg { @apply h-10 px-5; }
-  .btn-icon { @apply size-9 p-0; }
-  .btn-spinner { @apply size-4 animate-spin; }
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+    box-shadow: 0 0 16px -4px oklch(0.84 0.15 197 / 0.55);
+  }
+  .btn-primary:hover {
+    box-shadow: 0 0 22px -4px oklch(0.84 0.15 197 / 0.75);
+  }
+  .btn-secondary {
+    @apply bg-secondary text-secondary-foreground hover:bg-secondary/75;
+  }
+  .btn-outline {
+    @apply border-input bg-card text-foreground hover:border-primary/25 hover:bg-accent;
+  }
+  .btn-ghost {
+    @apply bg-transparent text-foreground hover:bg-muted;
+  }
+  .btn-danger {
+    @apply bg-destructive text-destructive-foreground hover:bg-destructive/90;
+  }
+  .btn-danger-ghost {
+    @apply bg-transparent text-destructive hover:bg-destructive/10;
+  }
+  .btn-sm {
+    @apply h-8 gap-1.5 px-3 text-xs;
+  }
+  .btn-lg {
+    @apply h-10 px-5;
+  }
+  .btn-icon {
+    @apply size-9 p-0;
+  }
+  .btn-spinner {
+    @apply size-4 animate-spin;
+  }
 
   /*
    * 对话框与命令面板使用同一 Portal 层级。固定视口上限避免长表单超出屏幕，动画
    * 只改变透明度与位移，不参与布局测量，因此关闭后的焦点归还不会抖动。
    */
-  .dialog-backdrop { @apply fixed inset-0 z-50 bg-black/45; }
-  .dialog {
-    @apply fixed left-1/2 top-1/2 z-[51] max-h-[min(86vh,760px)] w-[min(560px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border bg-popover p-6 text-popover-foreground shadow-2xl outline-none;
+  .dialog-backdrop {
+    @apply fixed inset-0 z-50 bg-black/60;
   }
-  .dialog-header { @apply grid gap-1.5 pr-9; }
+  .dialog {
+    @apply fixed inset-0 z-[51] m-auto max-h-[min(86vh,760px)] w-[min(560px,calc(100vw-32px))] overflow-y-auto rounded-xl border bg-popover p-6 text-popover-foreground shadow-2xl outline-none;
+  }
+  .dialog-header {
+    @apply grid gap-1.5 pr-9;
+  }
   .dialog-header h2,
-  .dialog-header [role="heading"] { @apply m-0 text-lg font-semibold leading-7; }
-  .dialog-header p { @apply m-0 text-sm leading-6 text-muted-foreground; }
-  .dialog-footer { @apply mt-6 flex items-center justify-end gap-2; }
-  .radix-dialog-overlay[data-state="open"] { animation: radix-fade-in 180ms ease-out; }
-  .radix-dialog-overlay[data-state="closed"] { animation: radix-fade-out 140ms ease-in; }
-  .radix-dialog-content[data-state="open"] { animation: radix-dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1); }
-  .radix-dialog-content[data-state="closed"] { animation: radix-dialog-out 140ms ease-in; }
+  .dialog-header [role="heading"] {
+    @apply m-0 text-lg font-semibold leading-7;
+  }
+  .dialog-header p {
+    @apply m-0 text-sm leading-6 text-muted-foreground;
+  }
+  .dialog-footer {
+    @apply mt-6 flex shrink-0 items-center justify-end gap-2;
+  }
+  .radix-dialog-overlay[data-state="open"] {
+    animation: radix-fade-in 180ms ease-out;
+  }
+  .radix-dialog-overlay[data-state="closed"] {
+    animation: radix-fade-out 140ms ease-in;
+  }
+  .radix-dialog-content[data-state="open"] {
+    animation: radix-dialog-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .radix-dialog-content[data-state="closed"] {
+    animation: radix-dialog-out 140ms ease-in;
+  }
 
   /*
    * Tooltip 通过 Portal 脱离卡片裁剪区域；transform-origin 使用 Radix 计算的锚点，
@@ -190,90 +274,180 @@
     @apply z-[70] max-w-[360px] rounded-md border bg-popover px-3 py-2 text-xs leading-5 text-popover-foreground shadow-lg;
     transform-origin: var(--radix-tooltip-content-transform-origin);
   }
-  .radix-tooltip-content[data-state="delayed-open"] { animation: radix-pop-in 160ms ease-out; }
-  .radix-tooltip-arrow { @apply fill-popover; }
+  .radix-tooltip-content[data-state="delayed-open"] {
+    animation: radix-pop-in 160ms ease-out;
+  }
+  .radix-tooltip-arrow {
+    @apply fill-popover;
+  }
 
   /* ToggleGroup 表达互斥模式；data-state 保证键盘与程序更新共享同一选中状态。 */
-  .segmented { @apply inline-grid min-h-9 grid-flow-col overflow-hidden rounded-md border bg-muted/65 p-0.5; }
+  .segmented {
+    @apply inline-grid min-h-9 grid-flow-col overflow-hidden rounded-md border bg-muted/65 p-0.5;
+  }
   .segmented-item {
     @apply inline-flex min-h-8 items-center justify-center rounded-sm border-0 bg-transparent px-3 text-xs font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/35 disabled:pointer-events-none disabled:opacity-50;
   }
-  .segmented-item[data-state="on"] { @apply bg-card text-foreground shadow-sm; }
+  .segmented-item[data-state="on"] {
+    @apply bg-card text-foreground shadow-sm;
+  }
 
   /* Switch 的 Thumb 只反映 Root 的 data-state，避免视觉位置与受控业务值脱节。 */
   .switch {
     @apply relative inline-flex h-[22px] w-10 shrink-0 items-center rounded-full border border-input bg-muted outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50;
   }
-  .switch[data-state="checked"] { @apply border-primary bg-primary; }
-  .switch-thumb { @apply block size-4 translate-x-0.5 rounded-full bg-card shadow-sm transition-transform duration-200 will-change-transform; }
-  .switch-thumb[data-state="checked"] { transform: translateX(18px); }
+  .switch[data-state="checked"] {
+    @apply border-primary bg-primary;
+  }
+  .switch-thumb {
+    @apply block size-4 translate-x-0.5 rounded-full bg-card shadow-sm transition-transform duration-200 will-change-transform;
+  }
+  .switch-thumb[data-state="checked"] {
+    transform: translateX(18px);
+  }
 
   /*
    * Select Trigger 占满字段宽度；Content 读取 Radix 锚点宽度变量，使筛选栏与浮层
    * 对齐，选项高亮同时覆盖鼠标与键盘导航。
    */
-  .radix-select { @apply w-full; }
+  .radix-select {
+    @apply w-full;
+  }
   .radix-select-trigger {
     @apply inline-flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-card px-3 text-left text-sm text-foreground outline-none transition-colors focus:border-ring focus:ring-3 focus:ring-ring/15 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground disabled:opacity-70;
   }
-  .radix-select-trigger > span:first-child { @apply min-w-0 truncate; }
-  .radix-select-icon { @apply shrink-0 text-muted-foreground; }
+  .radix-select-trigger > span:first-child {
+    @apply min-w-0 truncate;
+  }
+  .radix-select-icon {
+    @apply shrink-0 text-muted-foreground;
+  }
   .radix-select-content {
     @apply z-[80] max-h-[min(360px,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-xl;
     transform-origin: var(--radix-select-content-transform-origin);
   }
-  .radix-select-content[data-state="open"] { animation: radix-pop-in 150ms ease-out; }
-  .radix-select-viewport { @apply p-0.5; }
+  .radix-select-content[data-state="open"] {
+    animation: radix-pop-in 150ms ease-out;
+  }
+  .radix-select-viewport {
+    @apply p-0.5;
+  }
   .radix-select-item {
     @apply relative flex min-h-9 select-none items-center rounded-md py-2 pl-3 pr-9 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-45 data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground;
   }
-  .radix-select-indicator { @apply absolute right-3 grid place-items-center text-primary; }
-  .radix-select-scroll-button { @apply flex h-7 items-center justify-center text-muted-foreground; }
+  .radix-select-indicator {
+    @apply absolute right-3 grid place-items-center text-primary;
+  }
+  .radix-select-scroll-button {
+    @apply flex h-7 items-center justify-center text-muted-foreground;
+  }
 
   /*
    * ScrollArea 只接管滚动条；表格保留原生语义。表头固定便于长列表扫读，拖拽手柄
    * 扩大命中区域但只绘制细分隔线，避免视觉噪声。
    */
-  .radix-data-table { @apply relative w-full overflow-hidden rounded-lg border bg-card; }
-  .radix-data-table-viewport { @apply size-full; }
-  .radix-data-table table { @apply w-full border-collapse text-sm; table-layout: fixed; }
-  .radix-data-table thead { @apply sticky top-0 z-10; }
-  .radix-data-table th { @apply relative h-11 border-b bg-muted/75 px-4 text-left text-xs font-semibold text-foreground; }
-  .radix-data-table td { @apply h-12 truncate border-b px-4 text-sm text-muted-foreground; }
-  .radix-data-table tbody tr { @apply transition-colors hover:bg-muted/45; }
-  .radix-data-table-sort { @apply flex size-full items-center gap-1.5 border-0 bg-transparent p-0 text-left text-inherit outline-none disabled:cursor-default; }
-  .radix-data-table-sort > svg { @apply shrink-0 text-muted-foreground; }
-  .radix-data-table-resizer { @apply absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none; }
+  .radix-data-table {
+    @apply relative w-full overflow-hidden rounded-lg border bg-card;
+  }
+  .radix-data-table-viewport {
+    @apply size-full;
+  }
+  .radix-data-table table {
+    @apply w-full border-collapse text-sm;
+    table-layout: fixed;
+  }
+  .radix-data-table thead {
+    @apply sticky top-0 z-10;
+  }
+  .radix-data-table th {
+    @apply relative h-11 border-b bg-muted/75 px-4 text-left text-xs font-semibold text-foreground;
+  }
+  .radix-data-table td {
+    @apply h-12 truncate border-b px-4 text-sm text-muted-foreground;
+  }
+  .radix-data-table tbody tr {
+    @apply transition-colors hover:bg-muted/45;
+  }
+  .radix-data-table-sort {
+    @apply flex size-full items-center gap-1.5 border-0 bg-transparent p-0 text-left text-inherit outline-none disabled:cursor-default;
+  }
+  .radix-data-table-sort > svg {
+    @apply shrink-0 text-muted-foreground;
+  }
+  .radix-data-table-resizer {
+    @apply absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none;
+  }
   .radix-data-table-resizer::after {
     @apply absolute bottom-2 right-1 top-2 w-px bg-border transition-colors;
     content: "";
   }
-  .radix-data-table-resizer:hover::after { @apply bg-primary; }
-  .radix-data-table-empty { @apply h-32 text-center text-muted-foreground; }
-  .radix-scrollbar { @apply flex touch-none select-none bg-muted/45 p-0.5 transition-colors; }
-  .radix-scrollbar[data-orientation="vertical"] { @apply w-2.5; }
-  .radix-scrollbar[data-orientation="horizontal"] { @apply h-2.5 flex-col; }
-  .radix-scroll-thumb { @apply relative flex-1 rounded-full bg-muted-foreground/30; }
-  .radix-scroll-corner { @apply bg-muted; }
+  .radix-data-table-resizer:hover::after {
+    @apply bg-primary;
+  }
+  .radix-data-table-empty {
+    @apply h-32 text-center text-muted-foreground;
+  }
+  .radix-scrollbar {
+    @apply flex touch-none select-none bg-muted/45 p-0.5 transition-colors;
+  }
+  .radix-scrollbar[data-orientation="vertical"] {
+    @apply w-2.5;
+  }
+  .radix-scrollbar[data-orientation="horizontal"] {
+    @apply h-2.5 flex-col;
+  }
+  .radix-scroll-thumb {
+    @apply relative flex-1 rounded-full bg-muted-foreground/30;
+  }
+  .radix-scroll-corner {
+    @apply bg-muted;
+  }
 
   /*
    * Toast Viewport 位于右下角并穿透空白区域。错误色仅强调边框，避免大面积高饱和
    * 红色打断控制台阅读；滑动距离由 Radix CSS 变量提供。
    */
-  .radix-toast-viewport { @apply fixed bottom-5 right-5 z-[90] m-0 flex w-[380px] max-w-[calc(100vw-32px)] list-none flex-col gap-3 outline-none; }
-  .radix-toast { @apply grid grid-cols-[minmax(0,1fr)_32px] items-start gap-3 rounded-lg border bg-card px-4 py-3 text-foreground shadow-2xl; }
-  .radix-toast-success { @apply border-success/30; }
+  .radix-toast-viewport {
+    @apply fixed bottom-5 right-5 z-[90] m-0 flex w-[380px] max-w-[calc(100vw-32px)] list-none flex-col gap-3 outline-none;
+  }
+  .radix-toast {
+    @apply grid grid-cols-[minmax(0,1fr)_32px] items-start gap-3 rounded-lg border bg-card px-4 py-3 text-foreground shadow-2xl;
+  }
+  .radix-toast-success {
+    @apply border-success/30;
+  }
   .radix-toast-error,
-  .radix-toast-destructive { @apply border-destructive/35; }
-  .radix-toast-copy { @apply grid min-w-0 gap-1; }
-  .radix-toast-copy > div:first-child { @apply text-sm font-semibold; }
-  .radix-toast-copy > div:last-child { @apply text-xs leading-5 text-muted-foreground; }
-  .radix-toast-close { @apply grid size-8 place-items-center rounded-md border-0 bg-transparent text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring; }
-  .radix-toast[data-state="open"] { animation: radix-toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1); }
-  .radix-toast[data-state="closed"] { animation: radix-toast-out 160ms ease-in; }
-  .radix-toast[data-swipe="move"] { transform: translateX(var(--radix-toast-swipe-move-x)); }
-  .radix-toast[data-swipe="cancel"] { transform: translateX(0); transition: transform 160ms ease-out; }
-  .radix-toast[data-swipe="end"] { animation: radix-toast-swipe-out 160ms ease-out; }
+  .radix-toast-destructive {
+    @apply border-destructive/35;
+  }
+  .radix-toast-copy {
+    @apply grid min-w-0 gap-1;
+  }
+  .radix-toast-copy > div:first-child {
+    @apply text-sm font-semibold;
+  }
+  .radix-toast-copy > div:last-child {
+    @apply text-xs leading-5 text-muted-foreground;
+  }
+  .radix-toast-close {
+    @apply grid size-8 place-items-center rounded-md border-0 bg-transparent text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring;
+  }
+  .radix-toast[data-state="open"] {
+    animation: radix-toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .radix-toast[data-state="closed"] {
+    animation: radix-toast-out 160ms ease-in;
+  }
+  .radix-toast[data-swipe="move"] {
+    transform: translateX(var(--radix-toast-swipe-move-x));
+  }
+  .radix-toast[data-swipe="cancel"] {
+    transform: translateX(0);
+    transition: transform 160ms ease-out;
+  }
+  .radix-toast[data-swipe="end"] {
+    animation: radix-toast-swipe-out 160ms ease-out;
+  }
 
   .app-shell {
     min-height: 100svh;
@@ -293,7 +467,9 @@
   }
 
   .brand-mark {
-    @apply grid size-9 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground shadow-sm;
+    @apply grid size-9 shrink-0 place-items-center rounded-lg text-primary-foreground;
+    background: linear-gradient(135deg, var(--primary), var(--neon));
+    box-shadow: 0 0 18px -4px oklch(0.84 0.15 197 / 0.6);
   }
 
   .brand-copy {
@@ -302,6 +478,10 @@
 
   .brand-copy b {
     @apply text-base font-semibold leading-5;
+    background: linear-gradient(100deg, var(--primary), var(--neon));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .brand-copy small {
@@ -321,7 +501,7 @@
   }
 
   .nav-heading {
-    @apply mb-1 mt-4 px-3 text-[11px] font-medium tracking-wide text-sidebar-muted;
+    @apply mb-1 mt-4 px-3 font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-sidebar-muted;
   }
 
   .nav-heading:first-child {
@@ -342,7 +522,11 @@
   }
 
   .nav-item.active {
-    @apply border-primary/10 bg-sidebar-accent text-primary;
+    @apply border-primary/25 bg-sidebar-accent text-primary;
+    box-shadow:
+      inset 2px 0 0 var(--primary),
+      0 0 14px -6px oklch(0.84 0.15 197 / 0.5);
+    text-shadow: 0 0 12px oklch(0.84 0.15 197 / 0.45);
   }
 
   .sidebar-status {
@@ -351,10 +535,12 @@
 
   .sidebar-status i {
     @apply size-2 rounded-full bg-success ring-4 ring-success/10;
+    box-shadow: 0 0 10px 1px oklch(0.82 0.17 165 / 0.65);
   }
 
   .sidebar-status.pending i {
     @apply bg-warning ring-warning/10;
+    box-shadow: 0 0 10px 1px oklch(0.83 0.15 85 / 0.65);
   }
 
   .sidebar-status b {
@@ -392,10 +578,12 @@
 
   .top-status i {
     @apply size-1.5 rounded-full bg-success;
+    box-shadow: 0 0 8px 1px oklch(0.82 0.17 165 / 0.6);
   }
 
   .top-status.working i {
     @apply bg-warning;
+    box-shadow: 0 0 8px 1px oklch(0.83 0.15 85 / 0.6);
   }
 
   .top-actions {
@@ -479,12 +667,14 @@
   }
 
   .metric > strong {
-    @apply my-1 block text-[26px] font-semibold leading-none tabular-nums text-foreground;
+    @apply my-1 block font-mono text-[26px] font-semibold leading-none tabular-nums text-foreground;
     letter-spacing: 0;
+    text-shadow: 0 0 16px oklch(0.84 0.15 197 / 0.35);
   }
 
   .panel {
     @apply min-w-0 rounded-xl border bg-card p-5;
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.05);
   }
 
   .panel.wide {
@@ -622,7 +812,8 @@
   }
 
   .page-kicker {
-    @apply text-[11px] font-semibold tracking-[0.08em] text-primary;
+    @apply font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-primary;
+    text-shadow: 0 0 12px oklch(0.84 0.15 197 / 0.45);
   }
 
   .page-header h1 {
@@ -853,7 +1044,7 @@
   }
 
   .subscription[open] {
-    @apply border-primary/15 shadow-lg shadow-black/5;
+    @apply border-primary/25 shadow-lg shadow-black/40;
   }
 
   .subscription > summary {
@@ -1053,15 +1244,27 @@
   }
 
   .node-option {
-    @apply grid min-h-11 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs transition-colors hover:border-primary/35 hover:bg-accent/30;
+    @apply grid min-h-11 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto]  gap-2 rounded-md border bg-card px-3 py-2 text-xs transition-colors hover:border-primary/35 hover:bg-accent/30;
   }
 
   .node-option > input {
     @apply size-4 accent-primary ring-0;
   }
 
-  .node-option > small {
-    @apply col-start-2 col-end-4 justify-self-start rounded-sm bg-info-soft px-1.5 py-0.5 text-[10px] text-info;
+  /*
+   * 节点卡片主列用纵向 grid 堆叠名称与标签，标签横向换行。不再用 grid 跨列
+   * 放置标签（col-start-2 col-end-4），避免标签行撑不开卡片高度造成溢出。
+   */
+  .node-option-main {
+    @apply grid min-w-0 content-start gap-1;
+  }
+
+  .node-option-tags {
+    @apply flex flex-wrap gap-1;
+  }
+
+  .node-option-tags > small {
+    @apply max-w-full overflow-hidden text-ellipsis whitespace-nowrap rounded-sm bg-info-soft px-1.5 py-0.5 text-[10px] leading-4 text-info;
   }
 
   .node-option.disabled {
@@ -1077,7 +1280,7 @@
   }
 
   .log-lines {
-    @apply grid min-h-[440px] max-h-[calc(100vh-330px)] content-start gap-0.5 overflow-auto rounded-lg border border-neutral-800 bg-[#17191d] p-4;
+    @apply grid min-h-[440px] max-h-[calc(100vh-330px)] content-start gap-0.5 overflow-auto rounded-lg border border-border bg-black/45 p-4;
   }
 
   .log-line,
@@ -1126,7 +1329,7 @@
   }
 
   .rule-url > pre {
-    @apply col-span-full m-0 max-h-[340px] overflow-auto rounded-md bg-[#191b1f] p-3 text-xs leading-5 text-[#e4e4e7] whitespace-pre-wrap;
+    @apply col-span-full m-0 max-h-[340px] overflow-auto rounded-md bg-black/45 p-3 text-xs leading-5 text-[#e4e4e7] whitespace-pre-wrap;
   }
 
   .settings-layout {
@@ -1226,11 +1429,11 @@
   }
 
   .setting-help-body {
-    @apply grid max-h-[min(68vh,560px)] gap-2 overflow-y-auto pr-1 text-xs leading-5 text-neutral-700;
+    @apply grid max-h-[min(68vh,560px)] gap-2 overflow-y-auto pr-1 text-xs leading-5 text-muted-foreground;
   }
 
   .setting-help-body > strong {
-    @apply text-sm font-semibold text-neutral-950;
+    @apply text-sm font-semibold text-foreground;
   }
 
   .setting-help-body p {
@@ -1242,7 +1445,7 @@
   }
 
   .setting-help-note {
-    @apply rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-950;
+    @apply rounded-md border border-success/25 bg-success-soft px-3 py-2 text-success;
   }
 
   .setting-control {
@@ -1302,7 +1505,7 @@
   }
 
   .palette-backdrop {
-    @apply fixed inset-0 z-50 grid place-items-start justify-center bg-black/45 px-4 pt-[12vh];
+    @apply fixed inset-0 z-50 grid place-items-start justify-center bg-black/60 px-4 pt-[12vh];
   }
 
   .palette {
@@ -1330,7 +1533,7 @@
   }
 
   .scrim {
-    @apply fixed inset-0 z-30 border-0 bg-black/45;
+    @apply fixed inset-0 z-30 border-0 bg-black/60;
   }
 
   .mobile-only {
@@ -1374,7 +1577,7 @@
 
   .policy-pane-header span,
   .section-heading-row span {
-    @apply text-[11px] font-medium tracking-wide text-muted-foreground;
+    @apply font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground;
   }
 
   .policy-pane-header h1 {
@@ -1450,12 +1653,22 @@
     @apply mt-3 grid grid-cols-[16px_minmax(0,1fr)] items-start gap-2.5 rounded-lg border border-info/20 bg-info-soft/65 px-3 py-3 text-info;
   }
 
-  .policy-mode-note > div { @apply grid min-w-0 gap-1; }
-  .policy-mode-note strong { @apply text-xs font-semibold text-foreground; }
+  .policy-mode-note > div {
+    @apply grid min-w-0 gap-1;
+  }
+  .policy-mode-note strong {
+    @apply text-xs font-semibold text-foreground;
+  }
   .policy-mode-note p,
-  .policy-mode-note small { @apply m-0 text-[11px] leading-[1.55] text-muted-foreground; }
-  .policy-mode-note small { @apply border-t border-info/15 pt-1.5; }
-  .policy-mode-note.inactive { @apply border-warning/20 bg-warning-soft/65 text-warning; }
+  .policy-mode-note small {
+    @apply m-0 text-[11px] leading-[1.55] text-muted-foreground;
+  }
+  .policy-mode-note small {
+    @apply border-t border-info/15 pt-1.5;
+  }
+  .policy-mode-note.inactive {
+    @apply border-warning/20 bg-warning-soft/65 text-warning;
+  }
 
   .policy-pane-footer {
     @apply mt-auto grid gap-1 border-t pt-5;
@@ -1501,6 +1714,15 @@
   .overview-hero-copy h2 {
     @apply mb-1 mt-0 text-[30px] font-semibold leading-9;
     letter-spacing: -0.025em;
+    background: linear-gradient(
+      100deg,
+      var(--foreground) 30%,
+      var(--primary) 70%,
+      var(--neon)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .overview-hero-copy p {
@@ -1541,7 +1763,10 @@
 
   .route-flow {
     @apply mt-5 grid min-w-0 items-center gap-2 overflow-x-auto pb-1;
-    grid-template-columns: minmax(145px, 1fr) 20px minmax(145px, 1fr) 20px minmax(145px, 1fr) 20px minmax(145px, 1fr);
+    grid-template-columns: minmax(145px, 1fr) 20px minmax(145px, 1fr) 20px minmax(
+        145px,
+        1fr
+      ) 20px minmax(145px, 1fr);
   }
 
   .route-step {
@@ -1679,6 +1904,107 @@
   .overview-quick-settings > button {
     @apply ml-auto;
   }
+
+  /*
+   * 策略分组的成员节点展开区。li 基础样式来自 .item-list，这里用更高优先级把它
+   * 改成纵向容器：首行保持原有信息排布，展开后在其下方列出成员节点及健康度。
+   */
+  .item-list > li.group-item {
+    @apply grid content-start gap-1;
+  }
+
+  .group-row {
+    @apply flex min-h-11 min-w-0 flex-wrap items-center gap-3;
+  }
+
+  .group-toggle {
+    @apply inline-flex min-w-0 items-center gap-1.5 rounded-sm border-0 bg-transparent p-0 text-left text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  .group-toggle b {
+    @apply truncate font-semibold;
+  }
+
+  .group-toggle > svg {
+    @apply shrink-0 text-muted-foreground transition-transform duration-200;
+  }
+
+  .group-toggle[aria-expanded="true"] > svg {
+    transform: rotate(180deg);
+  }
+
+  .group-node-list {
+    @apply m-0 ml-6 grid list-none grid-cols-1 gap-1 border-l border-border/70 p-0 pl-4;
+  }
+
+  .group-node {
+    @apply flex min-w-0 items-center gap-2 py-1 text-xs text-muted-foreground;
+  }
+
+  .group-node > i {
+    @apply size-1.5 shrink-0 rounded-full bg-muted-foreground/50;
+  }
+
+  .group-node > i.on {
+    @apply bg-success;
+    box-shadow: 0 0 6px oklch(0.82 0.17 165 / 0.6);
+  }
+
+  .group-node-name {
+    @apply min-w-0 flex-1 truncate text-foreground;
+  }
+
+  .group-node-empty {
+    @apply py-1 text-xs text-muted-foreground;
+  }
+
+  .group-node-remove {
+    @apply grid size-5 shrink-0 place-items-center rounded border-0 bg-transparent text-muted-foreground outline-none transition-colors hover:bg-destructive/15 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  .group-clean-stale {
+    @apply inline-flex w-fit items-center gap-1.5 border-0 bg-transparent p-0 py-1 text-xs font-medium text-destructive outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  /*
+   * 分组编辑弹窗加宽，并改为 flex 列布局：整个弹窗不滚动，头部、表单与底部操作栏
+   * 固定，仅节点选择区内部滚动，这样保存/取消按钮始终可见且不会遮挡节点。
+   */
+  .group-dialog {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    width: min(880px, calc(100vw - 32px));
+  }
+
+  /*
+   * 节点列表的滚动容器必须是普通块级盒子，内部 grid 不能直接做弹窗 flex 列的
+   * 子项：Chrome 在 grid 容器作为 flex item 被压缩时会把 auto 行高算成卡片的
+   * min-height，导致卡片内容（如“已加入分组”标签）溢出并与其他卡片重叠。
+   */
+  .group-dialog .node-picker-scroll {
+    @apply mt-3 min-h-[140px] flex-1 overflow-y-auto pr-1;
+  }
+
+  .group-dialog .node-picker {
+    @apply mt-0 max-h-none overflow-visible pr-0;
+  }
+
+  .node-picker-toolbar {
+    @apply items-end;
+  }
+
+  .picker-search {
+    @apply min-w-[200px] flex-1;
+  }
+
+  .picker-count {
+    @apply ml-auto whitespace-nowrap pb-2 font-mono text-xs text-muted-foreground;
+  }
+
+  .picker-empty {
+    @apply m-0 py-6 text-center text-xs text-muted-foreground;
+  }
 }
 
 /*
@@ -1686,52 +2012,109 @@
  * 末尾把持续时间压缩到近乎零，从而保留状态切换但避免对敏感用户造成视觉负担。
  */
 @keyframes radix-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes radix-fade-out {
-  from { opacity: 1; }
-  to { opacity: 0; }
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
+/*
+ * 对话框居中由 inset:0 + margin:auto 承担，关键帧只动画 transform 的位移与缩放。
+ * 注意不能用 transform: translate(-50%,-50%) 居中：Tailwind 4 的 translate 工具
+ * 类走的是原生 translate 属性，会与 transform 叠加造成双倍偏移抖动。
+ */
 @keyframes radix-dialog-in {
-  from { opacity: 0; transform: translate(-50%, calc(-50% + 10px)) scale(0.98); }
-  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes radix-dialog-out {
-  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  to { opacity: 0; transform: translate(-50%, calc(-50% + 6px)) scale(0.985); }
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
 }
 
 @keyframes radix-pop-in {
-  from { opacity: 0; transform: scale(0.97); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes radix-toast-in {
-  from { opacity: 0; transform: translateX(18px); }
-  to { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 @keyframes radix-toast-out {
-  from { opacity: 1; transform: translateX(0); }
-  to { opacity: 0; transform: translateX(14px); }
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(14px);
+  }
 }
 
 @keyframes radix-toast-swipe-out {
-  from { transform: translateX(var(--radix-toast-swipe-end-x)); }
-  to { transform: translateX(calc(100% + 24px)); }
+  from {
+    transform: translateX(var(--radix-toast-swipe-end-x));
+  }
+  to {
+    transform: translateX(calc(100% + 24px));
+  }
 }
 
 @keyframes view-enter {
-  from { opacity: 0; transform: translateY(8px); filter: blur(4px); }
-  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
 }
 
 @keyframes traffic-draw {
-  to { stroke-dashoffset: 0; }
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 @media (min-width: 761px) {

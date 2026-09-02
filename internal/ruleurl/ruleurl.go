@@ -29,6 +29,11 @@ const userAgent = "clash.meta/v1.19.30"
 // maxBodySize 限制规则源响应体大小。
 const maxBodySize = 32 << 20
 
+// maxConcurrentRuleFetches 是单轮刷新同时拉取规则源的最大数量。
+// 每个规则源响应最多占用 32 MiB，固定 worker 数可限制异常大响应叠加造成的内存峰值；
+// 任务仍会全部执行，并按输入索引写回结果，因此不会改变规则源优先级或错误隔离语义。
+const maxConcurrentRuleFetches = 4
+
 // MaxImportedRules 是全部规则源合并去重后的导入规则上限，超出截断（调用方打日志）。
 const MaxImportedRules = 10000
 
@@ -42,17 +47,35 @@ type Result struct {
 	Warn  error // 拉取失败但降级用了缓存
 }
 
-// FetchAll 并发拉取所有规则源；单个失败不影响其他。
+// FetchAll 使用固定 worker 池并发拉取所有规则源；单个失败不影响其他。
+//
+// 参数：
+//   - ctx: context.Context，控制整轮规则源请求的取消。
+//   - urls: []config.RuleURL，待拉取的规则源，结果严格保持相同索引顺序。
+//   - stateDir: string，规则源缓存目录根路径。
+//
+// 返回值：
+//   - []Result：与 urls 等长且一一对应的结果；单源失败只写入自身 Result。
+//
+// 错误情况：网络、解析及缓存降级错误由 Fetch 写入 Result，不会中断其它任务。空输入
+// 返回空切片；上下文取消后排队任务仍会快速进入 Fetch，以得到明确的取消错误或缓存结果。
 func FetchAll(ctx context.Context, urls []config.RuleURL, stateDir string) []Result {
 	results := make([]Result, len(urls))
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for i, ru := range urls {
+	for range min(maxConcurrentRuleFetches, len(urls)) {
 		wg.Add(1)
-		go func(i int, ru config.RuleURL) {
+		go func() {
 			defer wg.Done()
-			results[i] = Fetch(ctx, ru, stateDir)
-		}(i, ru)
+			for i := range jobs {
+				results[i] = Fetch(ctx, urls[i], stateDir)
+			}
+		}()
 	}
+	for i := range urls {
+		jobs <- i
+	}
+	close(jobs)
 	wg.Wait()
 	return results
 }

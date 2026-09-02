@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"proxyd/internal/config"
 )
@@ -128,6 +131,84 @@ func TestFetchAllConcurrent(t *testing.T) {
 	}
 	if results[2].Err != nil {
 		t.Errorf("c: %+v", results[2])
+	}
+}
+
+// TestFetchAllLimitsConcurrentSources 验证远程规则源使用固定 worker 数量，避免规则源
+// 数量增长时同时保留过多 32 MiB 响应缓冲区，同时保证结果顺序与输入保持一致。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于启动可阻塞的规则源并检查并发与顺序。
+//
+// 返回值：无；通过峰值并发和 Result.Name/Rules 断言表达结果。
+//
+// 错误情况：并发超过限制、任务丢失、结果错位或解析失败时测试失败。清理逻辑会在
+// 失败路径主动解除服务端阻塞，防止 httptest.Server.Close 等待连接造成假死。
+func TestFetchAllLimitsConcurrentSources(t *testing.T) {
+	const sourceCount = maxConcurrentRuleFetches + 8
+	var active atomic.Int32
+	var peak atomic.Int32
+	started := make(chan struct{}, sourceCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for observed := peak.Load(); current > observed && !peak.CompareAndSwap(observed, current); observed = peak.Load() {
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+			_, _ = fmt.Fprintf(w, "DOMAIN-SUFFIX,source%s.example,PROXY\n", r.URL.Path)
+		case <-r.Context().Done():
+			return
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	unblock := func() {
+		releaseOnce.Do(func() { close(release) })
+	}
+	t.Cleanup(unblock)
+
+	urls := make([]config.RuleURL, 0, sourceCount)
+	for i := 0; i < sourceCount; i++ {
+		urls = append(urls, config.RuleURL{
+			Name: fmt.Sprintf("rule-%d", i),
+			URL:  fmt.Sprintf("%s/%d", server.URL, i),
+		})
+	}
+	stateDir := t.TempDir()
+	outcome := make(chan []Result, 1)
+	go func() {
+		outcome <- FetchAll(context.Background(), urls, stateDir)
+	}()
+
+	for i := 0; i < maxConcurrentRuleFetches; i++ {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("等待第 %d 个规则源拉取启动超时", i+1)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := peak.Load(); got > maxConcurrentRuleFetches {
+		t.Fatalf("规则源拉取并发峰值=%d，期望不超过 %d", got, maxConcurrentRuleFetches)
+	}
+
+	unblock()
+	select {
+	case results := <-outcome:
+		if len(results) != sourceCount {
+			t.Fatalf("结果数=%d，期望 %d", len(results), sourceCount)
+		}
+		for i, result := range results {
+			if result.Name != urls[i].Name || result.Err != nil || len(result.Rules) != 1 {
+				t.Fatalf("结果 %d 与输入错位或拉取失败: %+v", i, result)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("解除上游阻塞后规则源批量拉取未及时结束")
 	}
 }
 
