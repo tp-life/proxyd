@@ -150,7 +150,7 @@ func cmdRestart(args []string) error {
 
 // cmdStatus 显示后台实例状态：pid、监听端口、web 地址。
 func cmdStatus(args []string) error {
-	cfg, _, err := loadConfigFile("status", args)
+	cfg, cfgPath, err := loadConfigFile("status", args)
 	if err != nil {
 		return err
 	}
@@ -166,12 +166,65 @@ func cmdStatus(args []string) error {
 	}
 	base := "http://" + cfg.APIListen
 	fmt.Printf("web 控制台: %s/\n", base)
+	apiUp := false
 	if resp, err := http.Get(base + "/healthz"); err == nil {
 		_ = resp.Body.Close()
 		fmt.Println("API: 正常")
+		apiUp = true
 	} else {
 		fmt.Println("API: 无响应（可能在初始化，或进程异常）")
 	}
+	if apiUp {
+		if c, err := newAPIClient(cfgPath); err == nil {
+			printOverviewSummary(c)
+		}
+	}
 	fmt.Printf("日志: %s\n", logPathFor(cfg))
 	return nil
+}
+
+// printOverviewSummary 在 status 输出后追加运行中实例的汇总信息；失败时静默跳过，不影响基础状态输出。
+func printOverviewSummary(c *apiClient) {
+	ov, err := c.overview()
+	if err != nil {
+		return
+	}
+	fmt.Printf("模式: %s\n", ov.Mode)
+	alive, total := 0, len(ov.Nodes)
+	for _, n := range ov.Nodes {
+		if n.Alive {
+			alive++
+		}
+	}
+	mapping := "关闭"
+	if ov.PortMappingEnabled {
+		mapping = fmt.Sprintf("开启（%d 个节点端口）", len(ov.Ports))
+	}
+	fmt.Printf("节点: %d/%d 可用；端口映射: %s（区间 %d-%d）\n",
+		alive, total, mapping, ov.PortRange[0], ov.PortRange[1])
+	if ov.AutoPort > 0 {
+		fmt.Printf("自动选优端口: %d\n", ov.AutoPort)
+	}
+	main := "规则模式"
+	switch {
+	case ov.MainAuto:
+		main = "固定走最优节点（main-auto）"
+	case ov.MainNode != "" && ov.MainNodeUp:
+		main = "固定节点（main-node，生效中）"
+	case ov.MainNode != "":
+		main = "固定节点（main-node，节点暂不可用，已回退规则模式）"
+	}
+	fmt.Printf("主端口: %s\n", main)
+	fmt.Printf("系统代理: %s；TUN: %s；DNS 预设: %s；开机自启: %s\n",
+		onOffText(ov.SystemProxy), onOffText(ov.TUN.Enabled), ov.DNSPreset, onOffText(ov.Autostart))
+	if ov.Version.Enabled && ov.Version.Latest != "" && ov.Version.Latest != ov.Version.Current {
+		fmt.Printf("发现新版本: %s（当前 %s，%s）\n", ov.Version.Latest, ov.Version.Current, ov.Version.URL)
+	}
+}
+
+func onOffText(on bool) string {
+	if on {
+		return "开启"
+	}
+	return "关闭"
 }

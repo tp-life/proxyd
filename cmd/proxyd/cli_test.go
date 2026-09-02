@@ -1,8 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
+	"time"
 
+	"proxyd/internal/api"
 	"proxyd/internal/app"
 )
 
@@ -50,13 +53,79 @@ func TestResolveManualIndex(t *testing.T) {
 }
 
 func TestParseCFlag(t *testing.T) {
-	cfg, rest := parseCFlag("t", []string{"-c", "/tmp/x.yaml", "add", "u"})
-	if cfg != "/tmp/x.yaml" || len(rest) != 2 || rest[0] != "add" {
-		t.Errorf("cfg=%q rest=%v", cfg, rest)
+	cfg, rest, err := parseCFlag("t", []string{"-c", "/tmp/x.yaml", "add", "u"})
+	if err != nil || cfg != "/tmp/x.yaml" || len(rest) != 2 || rest[0] != "add" {
+		t.Errorf("cfg=%q rest=%v err=%v", cfg, rest, err)
 	}
-	// flag 在位置参数之后不再解析（Go flag 语义，usage 已注明）
-	cfg, rest = parseCFlag("t", []string{"add", "-c", "/tmp/x.yaml"})
-	if len(rest) != 3 || rest[0] != "add" {
-		t.Errorf("rest=%v", rest)
+	// flag 在位置参数之后不再解析（Go flag 语义）；后位置 -c 会静默落到默认配置，
+	// 极易误操作其它实例，因此直接报错而不是放行
+	if _, _, err := parseCFlag("t", []string{"add", "-c", "/tmp/x.yaml"}); err == nil {
+		t.Error("后位置 -c 应报错")
+	}
+	// 普通位置参数不受影响
+	if _, rest, err := parseCFlag("t", []string{"add", "u"}); err != nil || len(rest) != 2 {
+		t.Errorf("rest=%v err=%v", rest, err)
+	}
+}
+
+func TestResolveNodeKey(t *testing.T) {
+	ov := &api.Overview{Nodes: []api.NodeEntry{
+		{Name: "香港 01", Key: "key-a", Subscription: "sub1", Port: 42001},
+		{Name: "香港 01", Key: "key-b", Subscription: "sub2", Port: 42002},
+		{Name: "日本 01", Key: "key-c", Subscription: "sub1", Port: 42003},
+	}}
+	// key 精确匹配优先
+	if key, err := resolveNodeKey(ov, "key-b"); err != nil || key != "key-b" {
+		t.Errorf("by key: %q, %v", key, err)
+	}
+	// 名称唯一时按名称解析
+	if key, err := resolveNodeKey(ov, "日本 01"); err != nil || key != "key-c" {
+		t.Errorf("by name: %q, %v", key, err)
+	}
+	// 重名时报错并列出候选 key
+	if _, err := resolveNodeKey(ov, "香港 01"); err == nil ||
+		!strings.Contains(err.Error(), "key-a") || !strings.Contains(err.Error(), "key-b") {
+		t.Errorf("重名应报错并列出候选: %v", err)
+	}
+	// 不存在
+	if _, err := resolveNodeKey(ov, "美国 01"); err == nil {
+		t.Error("不存在节点应报错")
+	}
+}
+
+func TestSubStateText(t *testing.T) {
+	cases := map[string]string{
+		"disabled": "已禁用",
+		"empty":    "无节点",
+		"error":    "全部失效",
+		"degraded": "部分可用",
+		"healthy":  "正常",
+		"其他":       "其他",
+	}
+	for in, want := range cases {
+		if got := subStateText(in); got != want {
+			t.Errorf("subStateText(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
+
+func TestShortID(t *testing.T) {
+	if got := shortID("0123456789abcdef"); got != "01234567" {
+		t.Errorf("long id: %q", got)
+	}
+	if got := shortID("abc"); got != "abc" {
+		t.Errorf("short id: %q", got)
+	}
+}
+
+func TestConnAge(t *testing.T) {
+	if got := connAge("not-a-time"); got != "-" {
+		t.Errorf("非法时间: %q", got)
+	}
+	if got := connAge(time.Now().Add(-90 * time.Second).Format(time.RFC3339Nano)); got != "1m30s" {
+		t.Errorf("90s: %q", got)
+	}
+	if got := connAge(time.Now().Add(-2*time.Hour - 3*time.Minute).Format(time.RFC3339Nano)); got != "2h3m" {
+		t.Errorf("2h3m: %q", got)
 	}
 }

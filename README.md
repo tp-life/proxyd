@@ -27,7 +27,7 @@
 - DNS 预设：`off | fake-ip | redir-host` 三档热切换，手写 `dns:` 始终优先；TUN 开启时控制台建议 fake-ip
 - 配置备份与恢复：Web 设置页默认导出打码 YAML，也可显式导出含凭据的完整备份；导入通过完整校验并原子落盘，重启后生效
 - 新版本提示：启动后异步检查官方 GitHub Releases，概览页仅在发现更新时提示；可用 `check-updates: false` 或设置页开关关闭
-- 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/refresh/test`），作为本地 API 客户端操作运行中的实例
+- 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
 - REST API 与 Web 控制台：
   - `http://127.0.0.1:19091/` 内嵌 React 19 + Tailwind 4 Web 控制台（通过官方 Registry 集成 beUI Button、Switch、Tabs 与 Table 源码，不依赖 Radix UI；概览含实时速率条，节点页显示订阅流量/到期信息，活动连接页展示域名、入口、进程与出口链路）
   - `http://127.0.0.1:19090` mihomo external-controller（兼容 metacubexd / yacd 面板）
@@ -77,15 +77,22 @@ proxyd mode [rule|global|direct]      # 查看/切换模式
 proxyd nodes                          # 按订阅分组列出节点/端口/延迟/失败原因
 proxyd nodes add socks5://u:p@1.2.3.4:1080 我的节点   # 添加手动节点
 proxyd subs list | proxyd subs add <名> <url> | proxyd subs del <名>
+proxyd subs set --rename 新名 旧名 | proxyd subs set --disable <名>   # 修改/启停订阅
+proxyd subs refresh <名> | proxyd subs test <名>                      # 单订阅刷新/测速
 proxyd rules list | proxyd rules add "DOMAIN-SUFFIX,example.com,DIRECT" | proxyd rules del 0
-proxyd rule-urls list|add|del|show <名>   proxyd groups list|add|del
+proxyd rules set 0 "<规则>" | proxyd rules move 0 2                   # 改规则 / 调优先级
+proxyd rule-urls list|add|del|show <名>   proxyd groups list|add|set|del
 proxyd groups add --type fallback --subscription airport-a hk 43000
 proxyd logs --tail 200 --level error
 proxyd tun status | proxyd tun on | proxyd tun off
 proxyd port-mapping [on|off|status] # 开关/查看逐节点端口映射
 proxyd port-range 43000-43100    proxyd auto-port 41998|off
 proxyd main-auto [on|off]        proxyd main-port 42999   # 主端口最优节点开关 / 改主端口
-proxyd main-node <节点key|off>                            # 主端口固定节点 / 清除
+proxyd main-node <节点名|key|off>                         # 主端口固定节点（可按名称）/ 清除
+proxyd conn list | proxyd conn close <id|all>             # 活动连接查看/关闭
+proxyd traffic                                            # 实时上/下行速率
+proxyd dns-preset [off|fake-ip|redir-host]   proxyd update-check [on|off]
+proxyd config export [--full] -o 备份.yaml | proxyd config import 备份.yaml
 proxyd refresh                   proxyd test
 ```
 

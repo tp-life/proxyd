@@ -112,7 +112,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd start [-c 配置]` | 后台守护模式：派生 detached 子进程执行 serve，日志落 `state-dir/proxyd.log`，pid 写 `state-dir/proxyd.pid`；启动后做就绪等待（轮询 API，最长 10s）并打印 Web 地址；已运行则报错 |
 | `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s，清理 pid 文件；stale pid 自动清理 |
 | `proxyd restart` | stop + start |
-| `proxyd status` | 运行中显示 pid、主端口/映射区间/auto-port、Web 地址与 API 健康状态 |
+| `proxyd status` | 运行中显示 pid、端口、Web 地址、API 健康状态，并追加实例汇总（模式/节点存活/端口映射/主端口策略/系统代理/TUN/DNS/自启/新版本提醒） |
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
 | `proxyd tun [-c 配置] on\|off\|status` | 开关/查看 TUN 模式及当前进程权限（操作运行中实例） |
@@ -124,23 +124,36 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 | 命令 | 说明 |
 |---|---|
+| `proxyd status` | 运行状态汇总：pid、端口、模式、节点存活数、端口映射、主端口策略、系统代理/TUN/DNS/自启开关、新版本提醒 |
 | `proxyd mode [rule\|global\|direct]` | 无参查看当前模式；带参切换（持久化） |
 | `proxyd refresh` / `proxyd test` | 触发刷新订阅 / 手动测速（后台执行） |
-| `proxyd subs list\|add <名> <url>\|del <名>` | 订阅管理 |
+| `proxyd subs list\|add <名> <url>\|del <名>` | 订阅管理（list 含状态列：正常/部分可用/全部失效/无节点/已禁用） |
+| `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] <名>` | 修改订阅；未给出的字段保持原值 |
+| `proxyd subs refresh <名>` / `proxyd subs test <名>` | 只刷新 / 只测速单个订阅（同步执行，失败原因直接返回） |
 | `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因 |
 | `proxyd nodes add <url> [名称]` | 添加手动节点（http(s)/socks5/分享链接） |
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
-| `proxyd rules list\|add "<规则>"\|del <下标>` | 自定义规则 |
+| `proxyd rules list\|add "<规则>"\|set <下标> "<规则>"\|move <从> <到>\|del <下标>` | 自定义规则的增改删与优先级调整 |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
 | `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组 |
+| `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
 | `proxyd logs [--tail N] [--level debug\|info\|warning\|error]` | 查看运行中实例的内存日志尾部 |
 | `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听 |
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
 | `proxyd auto-port <端口\|off>` | 设置/关闭自动选优端口；无参查看 |
 | `proxyd main-auto [on\|off]` | 开关「主端口使用最优节点」（跳过规则）；无参查看 |
-| `proxyd main-node [节点key\|off]` | 设置主端口固定节点（跳过规则、直达该节点）；无参查看，`off` 清除 |
+| `proxyd main-node [节点名\|key\|off]` | 设置主端口固定节点（跳过规则、直达该节点）；可直接给节点名（重名时按提示改用 key）；无参查看，`off` 清除 |
 | `proxyd main-port <端口>` | 修改主端口（热更新；系统代理开启时自动重绑）；无参查看 |
 | `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令 |
+| `proxyd dns-preset [off\|fake-ip\|redir-host]` | 查看/切换 DNS 预设；配置文件存在手写 `dns` 段时会提示预设不生效 |
+| `proxyd update-check [on\|off]` | 查看/开关启动版本检查；无参显示当前/最新版本与检查状态 |
+| `proxyd conn list` / `proxyd conn close <id\|all>` | 查看活动连接（出站、规则、目标、上下行、存活时长与内存占用）/ 关闭单条或全部连接 |
+| `proxyd traffic` | 实时上/下行速率（每秒刷新，Ctrl-C 退出） |
+| `proxyd config path` | 打印当前使用的配置文件绝对路径 |
+| `proxyd config export [--full] [-o 文件]` | 导出配置；默认打码（隐藏凭据），`--full` 完整备份；默认打印到标准输出 |
+| `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
+
+`-c` 等 flag 必须放在子命令参数之前（Go flag 解析遇位置参数即停止）；写在后面的 `-c` 会被检测到并直接报错，避免静默操作到默认配置对应的实例。
 
 ### 开机自启
 
@@ -282,7 +295,7 @@ tun:
 **主端口的三种状态**（同端口，热切换；自定义规则与内置规则只对第一种生效）：
 
 1. **规则模式**（默认）：顶层 mixed-port，走完整规则匹配，行为与 Clash 一致。
-2. **固定节点**（`main-node`，默认空）：主端口切换为同端口的 mixed listener，`proxy` 固定指向指定节点——跳过规则、直达该节点。配置里存节点 **Key**（协议+地址+凭据），重命名/重名时仍稳定；Web 概览页主端口卡片的「固定节点」下拉（列出全部当前可用节点，格式 `节点名 (端口)`）或 `proxyd main-node <节点key|off>` 设置，选择即保存。节点当前不可用（失效/订阅刷新后消失）时本轮自动回退规则模式并打日志，**配置保留不删**，节点恢复后自动再生效（Web 上下拉旁会提示"当前节点不可用，已回退规则模式"）。
+2. **固定节点**（`main-node`，默认空）：主端口切换为同端口的 mixed listener，`proxy` 固定指向指定节点——跳过规则、直达该节点。配置里存节点 **Key**（协议+地址+凭据），重命名/重名时仍稳定；Web 概览页主端口卡片的「固定节点」下拉（列出全部当前可用节点，格式 `节点名 (端口)`）或 `proxyd main-node <节点名|key|off>` 设置（CLI 可直接给节点名，重名时会列出候选要求改用 key），选择即保存。节点当前不可用（失效/订阅刷新后消失）时本轮自动回退规则模式并打日志，**配置保留不删**，节点恢复后自动再生效（Web 上下拉旁会提示"当前节点不可用，已回退规则模式"）。
 3. **自动优选**（`main-auto`，默认关闭）：主端口 listener 固定走 `AUTO` url-test 组——全部可用节点中自动选延迟最低者。与独立的 auto-port 可并存（共用 AUTO 组、各占端口）。无可用节点时本轮跳过该设置（主端口回退规则模式，日志有提示）。
 
 优先级：**`main-auto` 开启时 `main-node` 被忽略**（auto 优先，日志提示一句）。从规则模式切换到 listener 形态（开 main-auto / 设 main-node / 失效节点恢复后自动再生效）时内部统一做两阶段热更新（先短暂关闭主端口入口再切换形态），避免 mihomo 先监听后释放导致的同端口 bind 冲突；listener 之间互切（main-auto ↔ main-node）同名 `L<port>` 仅换 proxy 目标，由 mihomo 按 关闭→监听 顺序安全处理。节点映射端口、分组端口、auto-port 完全不受影响。

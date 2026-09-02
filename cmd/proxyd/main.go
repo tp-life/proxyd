@@ -89,6 +89,16 @@ func main() {
 			err = cmdMainNode(os.Args[2:])
 		case "main-port":
 			err = cmdMainPort(os.Args[2:])
+		case "dns-preset":
+			err = cmdDNSPreset(os.Args[2:])
+		case "update-check":
+			err = cmdUpdateCheck(os.Args[2:])
+		case "config":
+			err = cmdConfig(os.Args[2:])
+		case "conn":
+			err = cmdConn(os.Args[2:])
+		case "traffic":
+			err = cmdTraffic(os.Args[2:])
 		case "version", "-v", "--version":
 			fmt.Printf("proxyd %s\n", version)
 		case "-h", "--help", "help":
@@ -127,23 +137,32 @@ usage:
   proxyd version                        打印版本
 
 本地管理命令（操作运行中实例的 API，需先 proxyd start/serve）:
+  proxyd status                         运行状态汇总（pid/模式/节点/端口/开关一览）
   proxyd mode [rule|global|direct]      查看/切换主端口代理模式
   proxyd refresh                        刷新订阅与规则源
   proxyd test                           手动测速
   proxyd subs list|add <名> <url>|del <名>          订阅管理
+  proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable|--disable] <名>   修改订阅
+  proxyd subs refresh|test <名>         只刷新/测速单个订阅
   proxyd nodes                          按订阅分组列出节点/端口/延迟
   proxyd nodes add <url> [名称]         添加手动节点（http/socks5/分享链接）
   proxyd nodes del <名称|下标>          删除手动节点
-  proxyd rules list|add "<规则>"|del <下标>        自定义规则
+  proxyd rules list|add "<规则>"|set <下标> "<规则>"|move <从> <到>|del <下标>   自定义规则
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
+  proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点...]   修改分组
   proxyd logs [--tail N] [--level info|warning|error|debug]   查看最近日志
   proxyd port-range <起-止>             修改节点映射端口区间
   proxyd port-mapping [on|off|status]   开关/查看节点一对一端口映射
   proxyd auto-port <端口|off>           设置自动选优端口
   proxyd main-auto [on|off]             主端口固定走最优节点（跳过规则）；无参查看
-  proxyd main-node [节点key|off]        主端口固定走指定节点（跳过规则）；无参查看
+  proxyd main-node [节点名|key|off]     主端口固定走指定节点（跳过规则）；无参查看
   proxyd main-port <端口>               修改主端口；无参查看
+  proxyd dns-preset [off|fake-ip|redir-host]   查看/切换 DNS 预设
+  proxyd update-check [on|off]          查看/开关启动版本检查
+  proxyd conn list|close <id|all>       查看/关闭活动连接
+  proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
+  proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 flags:
   -c <文件>      配置文件路径（默认 ~/.config/proxyd/config.yaml；命令行给的订阅地址会自动保存进去）
