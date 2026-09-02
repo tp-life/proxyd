@@ -226,6 +226,7 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 | `GET /api/config/export` | 下载默认打码的 YAML；加 `?mask_tokens=false` 下载含真实凭据的完整备份 |
 | `POST /api/config/import/preview` | 上传不超过 1 MiB 的 YAML，仅校验并返回变更摘要、警告与内容摘要，不写磁盘 |
 | `POST /api/config/import` | 携带预览返回的 `X-Proxyd-Config-Digest` 确认导入；摘要一致后原子替换配置文件，返回 `restart_required: true` |
+| `POST /api/restart` | 重启 proxyd 进程：先返回 200，再异步派生 detached `restart` 子进程完成 stop→start；调用方轮询 `/healthz` 判断恢复，监听地址变更后需访问新地址 |
 | `POST /api/autostart` `{"enabled":true}` | 注册/移除开机自启项（OS 级状态，不写配置文件；overview 实时反映） |
 | `GET /api/rules` | 列出自定义规则 |
 | `POST /api/rules` `{"rule":"DOMAIN-SUFFIX,example.com,DIRECT"}` | 追加自定义规则（前置到内置规则之前） |
@@ -376,7 +377,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 订阅刷新 | 1 天 | `refresh-interval` | 重新拉取所有订阅与规则源（rule-urls）→ 测速（可访问性检测）→ 重新分配端口 → 热更新核心 |
 | 健康检测 | 5 分钟 | `health-interval` | 复用现有节点列表测速 → 死节点下端口、恢复的节点补位 → 热更新核心 |
 | 单次检测超时 | 5 秒 | `health-timeout` | 经节点出口对 `health-url` 发 HTTP 探测 |
-| 探测地址 | gstatic 204 | `health-url` | 可换，如 `http://cp.cloudflare.com/generate_204` |
+| 探测地址 | gstatic 204（HTTPS） | `health-url` | 可换，建议保持 HTTPS（如 `https://cp.cloudflare.com/generate_204`）；HTTP 地址易被机场劫持，导致重复 HEAD 探测失败 |
 
 **端口映射稳定性**：映射快照持久化在 `state-dir/mapping.json`——同一节点在刷新/重启后尽量保持原端口；新节点按延迟从低到高填空闲端口；可用节点多于端口容量时按延迟截断（日志会提示）。
 
@@ -430,7 +431,7 @@ mixed-port: 41999         # 主端口（规则模式），Web/CLI 可在线修�
 # system-proxy: false     # serve 启动时把系统代理指向主端口
 refresh-interval: 24h
 health-interval: 5m
-health-url: http://www.gstatic.com/generate_204
+health-url: https://www.gstatic.com/generate_204
 health-timeout: 5s
 include: "香港|日本"          # 可选：只保留匹配节点
 exclude: "到期|剩余流量"     # include 之后再排除
@@ -461,6 +462,8 @@ state-dir: ~/.local/state/proxyd       # 状态目录（快照/缓存/pid/日志
 
 - **启动后没有映射端口**：看日志——订阅拉取失败会用缓存与 nodes.json 快照；全部节点测速失败检查 `health-url` 是否可达。
 - **geo 下载慢/失败**：已内置镜像，仍失败可在配置 `geox-url` 换源；失败不影响代理本体（自动降级）。
+- **geo 报 `permission denied`**：多因曾用 `sudo`（如 TUN 授权）或其他用户运行过 proxyd，导致 `state-dir` 或其中 geo 文件属主异常。启动时 proxyd 会自动删除目录可写但不可读的 geo 文件让 mihomo 重新下载；若日志提示目录本身不可写，执行 `sudo chown -R $(id -un):$(id -gn) <state-dir>` 后重启即可。
+- **启动报 pid/配置文件 `permission denied`**：同样是属主异常。终端里运行 `serve`/`start` 时 proxyd 会探测到权限不足并提示是否修复，确认后执行一次 `sudo chown -R`（sudo 会要求输入登录密码）把属主归还给当前用户，然后继续以普通用户运行；非终端环境（如开机自启）则打印可手动执行的 chown 命令。
 - **改了配置文件什么时候生效**：模式经 Web/API 切换即时生效；其他改动重启进程生效（`mapping.json` 保证端口不漂）。
 - **节点数多于端口数**：按延迟保留最快的一批，其余节点仍在主端口的 PROXY 选择组里可用。
 - **端口被占**：换 `port-range` / `mixed-port` / `auto-port` / `api-listen` / `external-controller`（分组端口同理）。

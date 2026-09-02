@@ -37,18 +37,21 @@ import {
   ListFilter,
   Link2,
   Menu,
+  Moon,
   Network,
   Pause,
   Pencil,
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings,
   Shield,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   Terminal,
   Target,
   Trash2,
@@ -382,7 +385,7 @@ function proxyURL(listen, port) {
  * - port: number，目标端口。
  *
  * 返回值说明：
- * 返回多行 export 命令，可直接粘贴到终端。
+ * 返回单行 export 命令，可直接粘贴到终端一次生效。
  *
  * 可能的异常/错误情况：
  * 无；纯字符串拼接。mixed 端口同时支持 HTTP 与 SOCKS5，http(s)_proxy 用 http scheme、
@@ -390,11 +393,7 @@ function proxyURL(listen, port) {
  */
 function proxyEnvCommands(listen, port) {
   const host = listen || "127.0.0.1";
-  return [
-    `export http_proxy=http://${host}:${port}`,
-    `export https_proxy=http://${host}:${port}`,
-    `export all_proxy=socks5://${host}:${port}`,
-  ].join("\n");
+  return `export https_proxy=http://${host}:${port} http_proxy=http://${host}:${port} all_proxy=socks5://${host}:${port}`;
 }
 
 /**
@@ -1295,6 +1294,23 @@ function App() {
   const [selectedNodes, setSelectedNodes] = useState(new Set());
   const [ruleContent, setRuleContent] = useState({});
   const [confirmation, setConfirmation] = useState(null);
+  // 主题手动切换：默认深色，明亮模式选择持久化在 localStorage；
+  // index.html 的内联脚本会在首屏前恢复，React 这里负责后续切换与写回。
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem("proxyd-theme") === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("proxyd-theme", theme);
+    } catch {
+      // 隐私模式等场景下放弃持久化，不影响本次切换
+    }
+  }, [theme]);
   const [forms, setForms] = useState({
     subscriptionURL: "",
     manualURL: "",
@@ -1545,6 +1561,50 @@ function App() {
     } catch (error) {
       showToast(`导入失败：${error.message}`, "err");
     }
+  }, [requestConfirmation, showToast]);
+
+  /**
+   * restartApp 经确认后请求后端重启进程，并轮询 /healthz 等待服务恢复。
+   *
+   * 参数说明：无；复用全局确认框、请求封装和 toast。
+   *
+   * 返回值说明：
+   * 返回 Promise<void>；健康检查恢复后刷新页面，让全部状态从新进程重新加载。
+   *
+   * 可能的异常/错误情况：
+   * 请求被拒绝时 toast 错误；重启超时（例如导入配置修改了 API 监听地址）时提示
+   * 用户手动访问新地址，不做无意义的无限等待。
+   */
+  const restartApp = useCallback(async () => {
+    const accepted = await requestConfirmation({
+      title: "重启 proxyd？",
+      description: "重启期间代理入口与控制台会短暂中断，通常几秒内自动恢复。",
+      confirmLabel: "立即重启",
+      destructive: true,
+    });
+    if (!accepted) return;
+    try {
+      await requestJSON("/api/restart", { method: "POST" });
+    } catch (error) {
+      showToast(`重启失败：${error.message}`, "err");
+      return;
+    }
+    showToast("proxyd 正在重启，等待服务恢复…");
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      try {
+        const resp = await fetch("/healthz", { cache: "no-store" });
+        if (resp.ok) {
+          showToast("重启完成，正在刷新页面");
+          window.location.reload();
+          return;
+        }
+      } catch {
+        // 进程尚未恢复，继续等待
+      }
+    }
+    showToast("重启超时：若导入的配置修改了 API 监听地址，请手动访问新地址", "err");
   }, [requestConfirmation, showToast]);
 
   /**
@@ -1838,7 +1898,7 @@ function App() {
   return (
     <TooltipProvider delayDuration={250}>
       <div className="app-shell">
-      <Sidebar activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} />
+      <Sidebar activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} theme={theme} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))} />
       <main className={classNames("workspace", activeView === "overview" && "overview-workspace")}>
         {!overview ? (
           <EmptyState title="正在连接 proxyd" detail="等待 /api/overview 返回运行状态。" />
@@ -1937,6 +1997,7 @@ function App() {
                 onForm={updateForm}
                 onImportConfig={importConfig}
                 onPost={postJSON}
+                onRestart={restartApp}
               />
             )}
           </div>
@@ -2050,9 +2111,11 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
  * - activeView: string，当前页面 id。
  * - connected: boolean，是否已取得后端运行状态。
  * - mobileOpen: boolean，移动端抽屉是否展开。
+ * - theme: string，当前主题（dark/light）。
  * - onNavigate: Function，切换页面回调。
  * - onClose: Function，关闭移动端抽屉回调。
  * - onPalette: Function，打开全局命令菜单。
+ * - onToggleTheme: Function，切换深色/明亮主题。
  *
  * 返回值说明：
  * 返回导航 React 元素。
@@ -2060,7 +2123,7 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
  * 可能的异常/错误情况：
  * 无。
  */
-function Sidebar({ activeView, connected, mobileOpen, onNavigate, onClose, onPalette }) {
+function Sidebar({ activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
   return (
     <>
       <aside className={classNames("sidebar", mobileOpen && "open")}>
@@ -2074,6 +2137,14 @@ function Sidebar({ activeView, connected, mobileOpen, onNavigate, onClose, onPal
               </Button>
             </TooltipTrigger>
             <TooltipContent>命令菜单 · ⌘K</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="icon" variant="ghost" type="button" onClick={onToggleTheme} aria-label={theme === "light" ? "切换到深色模式" : "切换到明亮模式"}>
+                {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{theme === "light" ? "切换到深色模式" : "切换到明亮模式"}</TooltipContent>
           </Tooltip>
           <Button className="mobile-only nav-close" size="icon" variant="ghost" type="button" onClick={onClose} aria-label="关闭导航">
             <X size={18} aria-hidden="true" />
@@ -3945,6 +4016,14 @@ const SETTINGS_HELP = {
     ],
     note: "导入成功后必须重启 proxyd 才会整体生效，因为监听地址、状态目录和权限要求可能同时变化。",
   },
+  restart: {
+    heading: "重启会经历什么",
+    paragraphs: [
+      "重启会先让当前进程优雅退出（关闭监听、恢复系统代理等系统集成状态），再由独立子进程按当前配置文件重新拉起服务。",
+      "导入新配置后必须重启才会整体生效；其他设置页操作大多已经热更新，无需重启。",
+    ],
+    note: "重启期间代理入口与控制台会短暂中断；若新配置修改了 API 监听地址，恢复后需要访问新地址。",
+  },
 };
 
 /**
@@ -3955,6 +4034,7 @@ const SETTINGS_HELP = {
  * - overview: object，概览数据。
  * - onForm/onPost: Function，表单与提交回调。
  * - onImportConfig: Function，上传配置文件的回调。
+ * - onRestart: Function，确认并触发进程重启的回调。
  *
  * 返回值说明：
  * 返回设置页 React 元素。
@@ -3962,7 +4042,7 @@ const SETTINGS_HELP = {
  * 可能的异常/错误情况：
  * 端口格式错误本地拦截；后端校验错误由父组件展示。
  */
-function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
+function SettingsPage({ forms, overview, onForm, onImportConfig, onPost, onRestart }) {
   // 固定节点下拉必须包含全部节点（含失效）：只列可用节点时，已固定但暂时失效的节点
   // 会不在选项里，Select 无法回显出具体节点名。失效节点标记文案并禁止新选。
   const selectableNodes = [...overview.nodes].sort((a, b) => Number(b.alive) - Number(a.alive) || a.delay - b.delay || a.name.localeCompare(b.name));
@@ -4102,6 +4182,12 @@ function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
               <ButtonLink className="beui-link-button" href="/api/config/export" variant="outline" size="md" download><Download size={16} aria-hidden="true" />导出打码配置</ButtonLink>
               <ButtonLink className="beui-link-button" href="/api/config/export?mask_tokens=false" variant="outline" size="md" download><Download size={16} aria-hidden="true" />下载完整备份</ButtonLink>
               <label className="beui-link-button config-upload"><Upload size={16} aria-hidden="true" />导入配置<input accept=".yaml,.yml,application/yaml,text/yaml" type="file" onChange={(event) => { onImportConfig(event.target.files?.[0]); event.target.value = ""; }} /></label>
+            </div>
+          </section>
+          <section className="setting-row">
+            <SettingTitle title="重启应用" detail="导入配置或修改监听地址后，需要重启才能整体生效" help={SETTINGS_HELP.restart} />
+            <div className="setting-control">
+              <Button variant="outline" size="md" type="button" onClick={onRestart}><RotateCcw size={16} aria-hidden="true" />重启 proxyd</Button>
             </div>
           </section>
         </div>

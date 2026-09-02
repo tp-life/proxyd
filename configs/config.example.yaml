@@ -35,7 +35,7 @@ mixed-port: 41999              # 主端口：走全局规则模式（rule/global
 
 refresh-interval: 24h          # 订阅刷新周期（默认一天一次；可随时在 Web 控制台手动刷新）
 health-interval: 5m            # 节点可用性检测周期
-health-url: http://www.gstatic.com/generate_204
+health-url: https://www.gstatic.com/generate_204
 health-timeout: 5s
 check-updates: true            # 启动后异步检查官方 GitHub Releases；失败不影响代理，可设 false 关闭
 # include: "香港|日本"                    # 可选白名单：只保留名称匹配的节点

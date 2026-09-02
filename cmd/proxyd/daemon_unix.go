@@ -37,6 +37,35 @@ func spawnDaemon(exe, cfgPath, logPath string) (int, error) {
 	return pid, nil
 }
 
+// spawnRestarter 派生 detached 子进程执行 restart：由它向当前进程发 SIGTERM、
+// 等待退出后重新拉起 serve。停止与启动必须串行，因此放在独立进程里完成。
+func spawnRestarter(exe, cfgPath, logPath string) (int, error) {
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer devnull.Close()
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer logf.Close()
+
+	proc, err := os.StartProcess(exe, []string{exe, "restart", "-c", cfgPath}, &os.ProcAttr{
+		Env:   os.Environ(),
+		Files: []*os.File{devnull, logf, logf},
+		Sys:   &syscall.SysProcAttr{Setsid: true},
+	})
+	if err != nil {
+		return 0, err
+	}
+	pid := proc.Pid
+	if err := proc.Release(); err != nil {
+		return 0, err
+	}
+	return pid, nil
+}
+
 // pidAlive 用 kill(pid, 0) 探测进程是否存在（EPERM 也算存在）。
 func pidAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)

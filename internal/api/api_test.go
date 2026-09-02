@@ -1286,3 +1286,87 @@ func TestConnectionsAPIUpstreamErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestRestartEndpointTriggersRestarterOnce 验证 POST /api/restart 先返回受理响应、
+// 再异步调用注入的 restarter，且重复请求不会重复触发重启。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于启动随机端口 API 服务并断言响应与调用次数。
+//
+// 返回值：无；通过响应 JSON、restarter 调用记录与第二次请求的 already 标记断言表达结果。
+//
+// 错误情况：响应非 200、restarter 超时未被调用、重复请求再次触发重启，
+// 或未注入 restarter 时未返回 503 时测试失败。
+func TestRestartEndpointTriggersRestarterOnce(t *testing.T) {
+	a, err := app.New(&config.Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	called := make(chan struct{}, 2)
+	server.SetRestarter(func() error {
+		called <- struct{}{}
+		return nil
+	})
+	if err := server.Start(); err != nil {
+		t.Fatalf("启动 API 测试服务失败: %v", err)
+	}
+	t.Cleanup(func() { server.Shutdown(context.Background()) })
+
+	post := func() (int, map[string]any) {
+		t.Helper()
+		resp, err := http.Post("http://"+server.Addr()+"/api/restart", "", nil)
+		if err != nil {
+			t.Fatalf("POST /api/restart 失败: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("解析重启响应失败: %v", err)
+		}
+		return resp.StatusCode, body
+	}
+
+	code, body := post()
+	if code != http.StatusOK || body["restarting"] != true {
+		t.Fatalf("首次重启应返回 200 且 restarting=true，得到 %d %v", code, body)
+	}
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restarter 未在响应后被异步调用")
+	}
+
+	code, body = post()
+	if code != http.StatusOK || body["already"] != true {
+		t.Fatalf("重复重启应返回 200 且 already=true，得到 %d %v", code, body)
+	}
+	select {
+	case <-called:
+		t.Fatal("重复请求不应再次触发 restarter")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestRestartEndpointWithoutRestarter 验证未注入 restarter 时 POST /api/restart 返回 503，
+// 而不是静默成功让客户端误以为进程即将重启。
+func TestRestartEndpointWithoutRestarter(t *testing.T) {
+	a, err := app.New(&config.Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	if err := server.Start(); err != nil {
+		t.Fatalf("启动 API 测试服务失败: %v", err)
+	}
+	t.Cleanup(func() { server.Shutdown(context.Background()) })
+
+	resp, err := http.Post("http://"+server.Addr()+"/api/restart", "", nil)
+	if err != nil {
+		t.Fatalf("POST /api/restart 失败: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("未注入 restarter 时应返回 503，得到 %d", resp.StatusCode)
+	}
+}

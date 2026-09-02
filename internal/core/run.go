@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,9 +32,49 @@ func NewRunner(stateDir string) *Runner {
 	if stateDir != "" {
 		if err := os.MkdirAll(stateDir, 0o755); err == nil {
 			C.SetHomeDir(stateDir)
+			ensureStateDirWritable(stateDir)
 		}
 	}
 	return &Runner{stateDir: stateDir}
+}
+
+// geoFileNames 是 mihomo 会在 home 目录读写的 geo 数据文件（见 mihomo constant/path.go）。
+var geoFileNames = []string{"GeoSite.dat", "GeoIP.dat", "Country.mmdb", "geoip.metadb", "ASN.mmdb"}
+
+// ensureStateDirWritable 在启动时探测 state-dir 可写性，并尽量自动修复 geo 文件权限。
+//
+// 背景：用 sudo 或其他用户跑过 proxyd（常见于 TUN 授权）后，state-dir 或其中的 geo
+// 文件会变成 root 所有，普通用户再启动时 mihomo 下载 geo 数据会报 permission denied，
+// GEO 规则只能降级运行。这里分两级处理：
+//  1. 目录本身不可写：无法自动修复，输出带 chown 命令的明确指引；
+//  2. 目录可写但 geo 文件不可读：直接删除该文件（删除只看目录权限），让 mihomo 重新下载。
+func ensureStateDirWritable(stateDir string) {
+	probe, err := os.CreateTemp(stateDir, ".proxyd-write-probe-*")
+	if err != nil {
+		log.Printf("[core] state-dir %s 不可写（%v）：geo 数据、订阅缓存与端口快照都将无法持久化。"+
+			"通常是因为之前用 sudo 或其他用户运行过 proxyd；请执行 sudo chown -R $(id -un):$(id -gn) %s 后重启",
+			stateDir, err, stateDir)
+		return
+	}
+	_ = probe.Close()
+	_ = os.Remove(probe.Name())
+
+	for _, name := range geoFileNames {
+		path := filepath.Join(stateDir, name)
+		f, err := os.OpenFile(path, os.O_RDONLY, 0)
+		if err == nil {
+			_ = f.Close()
+			continue
+		}
+		if !errors.Is(err, os.ErrPermission) {
+			continue // 文件不存在等情况交给 mihomo 自行下载
+		}
+		if rmErr := os.Remove(path); rmErr != nil {
+			log.Printf("[core] geo 文件 %s 无读取权限且删除失败（%v）；请执行 sudo chown -R $(id -un):$(id -gn) %s 后重启", path, rmErr, stateDir)
+			continue
+		}
+		log.Printf("[core] geo 文件 %s 属主异常（曾以其他用户运行？），已删除，将由 mihomo 重新下载", path)
+	}
 }
 
 // Start 首次启动 mihomo 核心：整体应用配置。

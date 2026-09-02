@@ -2,9 +2,10 @@
  * Radix 数据表格适配层。
  *
  * 功能说明：
- * 使用 Radix ScrollArea 管理双向滚动条，并保留业务页面依赖的列声明、排序、空状态
- * 与列宽调整能力。HTML table 继续承担真正的行列语义，避免为了视觉效果破坏读屏
- * 软件对表头和单元格关系的识别。
+ * 使用 Radix ScrollArea 管理纵向滚动条，并保留业务页面依赖的列声明、排序、空状态
+ * 与列宽调整能力。表格固定布局（table-layout: fixed）+ 单元格截断，内容始终限制在
+ * 容器宽度内，不提供横向滚动。HTML table 继续承担真正的行列语义，避免为了视觉效果
+ * 破坏读屏软件对表头和单元格关系的识别。
  *
  * 可能的异常/错误情况：
  * 本表格不再执行虚拟化；如果未来单页出现数千行数据，应优先在 API 端分页，而不是
@@ -138,21 +139,34 @@ function Table({
   }
 
   /**
-   * startResize 记录拖拽起点与原列宽。
+   * startResize 记录拖拽起点、原列宽与允许的最大列宽。
    *
    * 参数说明：event 为 PointerEvent，column 为目标列，header 为实际表头元素。
    * 返回值说明：无；建立本次拖拽上下文并捕获指针。
    * 可能的异常/错误情况：浏览器不支持 pointer capture 时仍可拖拽，但指针离开手柄
-   * 后可能停止更新；现代桌面浏览器均支持该能力。
+   * 后可能停止更新；现代桌面浏览器均支持该能力。maxWidth 取「视口宽减去其他列当前宽」，
+   * 保证拖宽本列只会压缩后面的自适应列，表格总宽永远不会超出容器产生横向滚动。
    */
   function startResize(event, column, header) {
     event.preventDefault();
     event.currentTarget.setPointerCapture?.(event.pointerId);
+    const table = header.closest("table");
+    const viewport = table?.closest(".radix-data-table-viewport");
+    let othersWidth = 0;
+    if (table) {
+      for (const th of table.querySelectorAll("thead th")) {
+        if (th !== header) othersWidth += th.getBoundingClientRect().width;
+      }
+    }
+    const maxWidth = viewport
+      ? Math.max(minColumnWidth, Math.floor(viewport.clientWidth - othersWidth))
+      : Number.POSITIVE_INFINITY;
     resizeRef.current = {
       key: column.key,
       pointerId: event.pointerId,
       startX: event.clientX,
       startWidth: header.getBoundingClientRect().width,
+      maxWidth,
     };
   }
 
@@ -161,12 +175,16 @@ function Table({
    *
    * 参数说明：event 为 PointerEvent。
    * 返回值说明：无；没有活动拖拽时不更新状态。
-   * 可能的异常/错误情况：极端负向位移会被 minColumnWidth 截断，避免内容消失。
+   * 可能的异常/错误情况：极端负向位移会被 minColumnWidth 截断，避免内容消失；
+   * 正向位移被 startResize 记录的 maxWidth 截断，避免表格总宽超出容器。
    */
   function moveResize(event) {
     const current = resizeRef.current;
     if (!current || current.pointerId !== event.pointerId) return;
-    const nextWidth = Math.max(minColumnWidth, Math.round(current.startWidth + event.clientX - current.startX));
+    const nextWidth = Math.min(
+      current.maxWidth,
+      Math.max(minColumnWidth, Math.round(current.startWidth + event.clientX - current.startX)),
+    );
     setWidths((existing) => ({ ...existing, [current.key]: nextWidth }));
   }
 
@@ -196,12 +214,11 @@ function Table({
       : <ArrowDown size={13} aria-hidden="true" />;
   }
 
-  const tableMinWidth = columns.reduce((total, column) => total + (widths[column.key] || minColumnWidth), 0);
-
   return (
     <ScrollArea.Root className={cn("radix-data-table data-table", className)} style={{ height }}>
       <ScrollArea.Viewport className="radix-data-table-viewport">
-        <table style={{ minWidth: `max(100%, ${tableMinWidth}px)` }}>
+        {/* 拖拽列宽只改变列之间的分配比例，表格整体始终铺满容器宽度，不产生横向滚动。 */}
+        <table>
           <colgroup>
             {columns.map((column) => (
               <col key={column.key} style={{ width: normalizeWidth(widths[column.key] || column.width) }} />
@@ -252,10 +269,6 @@ function Table({
       <ScrollArea.Scrollbar className="radix-scrollbar" orientation="vertical">
         <ScrollArea.Thumb className="radix-scroll-thumb" />
       </ScrollArea.Scrollbar>
-      <ScrollArea.Scrollbar className="radix-scrollbar" orientation="horizontal">
-        <ScrollArea.Thumb className="radix-scroll-thumb" />
-      </ScrollArea.Scrollbar>
-      <ScrollArea.Corner className="radix-scroll-corner" />
     </ScrollArea.Root>
   );
 }

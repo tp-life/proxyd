@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"syscall"
 	"text/tabwriter"
@@ -271,8 +272,11 @@ func firstRunGuide(configPath string) error {
 //
 // 错误情况：版本检查通过应用层异步执行，GitHub 不可达不会阻塞 API、代理核心或退出清理。
 func cmdServe(args []string) error {
-	cfg, cfgPath, err := loadConfig(args, true)
+	cfg, cfgPath, err := loadConfigOrRepair(args, true)
 	if err != nil {
+		return err
+	}
+	if err := offerStateDirRepair(cfg); err != nil {
 		return err
 	}
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {
@@ -285,6 +289,21 @@ func cmdServe(args []string) error {
 	a.ConfigureUpdateCheck(version, updatecheck.New())
 
 	apiSrv := api.New(cfg.APIListen, a)
+	apiSrv.SetRestarter(func() error {
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if exe, err = filepath.Abs(exe); err != nil {
+			return err
+		}
+		cfgAbs, err := filepath.Abs(cfgPath)
+		if err != nil {
+			return err
+		}
+		_, err = spawnRestarter(exe, cfgAbs, logPathFor(cfg))
+		return err
+	})
 	if err := apiSrv.Start(); err != nil {
 		return fmt.Errorf("start api on %s: %w", cfg.APIListen, err)
 	}

@@ -55,8 +55,12 @@ func loadConfigFile(name string, args []string) (*config.Config, string, error) 
 
 // cmdStart 后台启动：派生 detached 子进程执行 serve，日志落 state-dir/proxyd.log。
 func cmdStart(args []string) error {
-	cfg, cfgPath, err := loadConfig(args, true)
+	cfg, cfgPath, err := loadConfigOrRepair(args, true)
 	if err != nil {
+		return err
+	}
+	// 子进程 detached 后无法交互，权限修复必须在父进程完成
+	if err := offerStateDirRepair(cfg); err != nil {
 		return err
 	}
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {

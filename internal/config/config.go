@@ -439,7 +439,7 @@ type Config struct {
 
 	RefreshInterval Duration `yaml:"refresh-interval"` // subscription refresh period, default 30m
 	HealthInterval  Duration `yaml:"health-interval"`  // health check period, default 5m
-	HealthURL       string   `yaml:"health-url"`       // default http://www.gstatic.com/generate_204
+	HealthURL       string   `yaml:"health-url"`       // default https://www.gstatic.com/generate_204
 	HealthTimeout   Duration `yaml:"health-timeout"`   // default 5s
 
 	Include string `yaml:"include,omitempty"` // regexp allow-list on node names; empty means allow all
@@ -494,12 +494,16 @@ const (
 	defaultListen             = "127.0.0.1"
 	defaultRefreshInterval    = 24 * time.Hour
 	defaultHealthInterval     = 5 * time.Minute
-	defaultHealthURL          = "http://www.gstatic.com/generate_204"
+	defaultHealthURL          = "https://www.gstatic.com/generate_204"
 	defaultHealthTimeout      = 5 * time.Second
 	defaultExternalController = "127.0.0.1:19090"
 	defaultAPIListen          = "127.0.0.1:19091"
 	defaultLogLevel           = "info"
 )
+
+// legacyHealthURL 是旧的默认 HTTP 探测地址。mihomo 提示部分机场会劫持 HTTP 探测
+// 且重复 HEAD 请求导致 “failed to get the second response”，因此迁移到 HTTPS 默认值。
+const legacyHealthURL = "http://www.gstatic.com/generate_204"
 
 const (
 	// DNSPresetOff 禁用 proxyd 生成的 DNS 段，沿用系统 DNS 或用户手写 dns 配置。
@@ -627,7 +631,8 @@ func Parse(raw []byte) (*Config, error) {
 	return cfg, nil
 }
 
-// migrate 兼容旧版本配置：mode: auto（已废弃的模式）迁移为 rule + 开启 auto-port。
+// migrate 兼容旧版本配置：mode: auto（已废弃的模式）迁移为 rule + 开启 auto-port；
+// 旧默认 HTTP 探测地址迁移为 HTTPS（用户显式自定义的其他地址不动）。
 func (c *Config) migrate() {
 	if c.Mode == "auto" {
 		log.Printf("[config] mode: auto 已改为独立端口：迁移为 mode: rule + auto-port: %d", DefaultAutoPort)
@@ -635,6 +640,10 @@ func (c *Config) migrate() {
 		if c.AutoPort == 0 {
 			c.AutoPort = DefaultAutoPort
 		}
+	}
+	if c.HealthURL == legacyHealthURL {
+		log.Printf("[config] health-url 旧默认值 %s 易被节点劫持导致探测失败，迁移为 %s", legacyHealthURL, defaultHealthURL)
+		c.HealthURL = defaultHealthURL
 	}
 }
 

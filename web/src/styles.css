@@ -3,8 +3,9 @@
  *
  * 功能说明：
  * 定义 Radix UI 组件所需的语义颜色，并为代理管理场景提供紧凑、清晰的桌面工作台布局。
- * 整体采用赛博朋克深色霓虹主题：深空蓝紫底色 + 霓虹青/品红强调色，辅以网格、
- * 扫描线与辉光装饰；所有颜色都收敛在 :root 变量中，便于整体调整。
+ * 默认采用赛博朋克深色霓虹主题：深空蓝紫底色 + 霓虹青/品红强调色，辅以网格、
+ * 扫描线与辉光装饰；另提供手动切换的明亮主题（:root[data-theme="light"] 覆盖变量，
+ * 文件末尾收敛深色专属装饰）。所有颜色都收敛在 CSS 变量中，便于整体调整。
  *
  * 参数说明：
  * 无；样式由 Vite 的 Tailwind 4 插件在构建阶段扫描并生成。
@@ -54,6 +55,44 @@
   --sidebar-accent: oklch(0.25 0.06 295);
   --neon: oklch(0.78 0.17 330);
   --radius: 0.5rem;
+}
+
+/*
+ * 明亮主题：通过侧边栏的主题按钮手动切换，选择持久化在 localStorage（见 main.jsx）。
+ * 只覆盖语义颜色变量；深色专属的扫描线/霓虹辉光装饰在文件末尾的覆盖块中单独收敛。
+ * 强调色沿用青/品红基因，但降低明度保证白底对比度。
+ */
+:root[data-theme="light"] {
+  --background: oklch(0.975 0.008 280);
+  --foreground: oklch(0.28 0.03 285);
+  --card: oklch(0.995 0.004 280);
+  --card-foreground: oklch(0.28 0.03 285);
+  --popover: oklch(0.995 0.004 280);
+  --popover-foreground: oklch(0.28 0.03 285);
+  --primary: oklch(0.6 0.13 215);
+  --primary-foreground: oklch(0.985 0.005 210);
+  --secondary: oklch(0.94 0.015 285);
+  --secondary-foreground: oklch(0.33 0.045 290);
+  --muted: oklch(0.945 0.012 285);
+  --muted-foreground: oklch(0.5 0.03 280);
+  --accent: oklch(0.935 0.025 300);
+  --accent-foreground: oklch(0.42 0.11 215);
+  --destructive: oklch(0.58 0.2 17);
+  --destructive-foreground: oklch(0.98 0.01 17);
+  --border: oklch(0.855 0.032 255);
+  --input: oklch(0.815 0.04 250);
+  --ring: oklch(0.6 0.13 215);
+  --success: oklch(0.58 0.13 165);
+  --success-soft: oklch(0.93 0.045 170);
+  --warning: oklch(0.6 0.12 75);
+  --warning-soft: oklch(0.945 0.05 90);
+  --info: oklch(0.5 0.11 290);
+  --info-soft: oklch(0.935 0.035 295);
+  --sidebar: oklch(0.955 0.012 285);
+  --sidebar-foreground: oklch(0.28 0.03 285);
+  --sidebar-muted: oklch(0.52 0.03 280);
+  --sidebar-accent: oklch(0.915 0.025 295);
+  --neon: oklch(0.58 0.14 330);
 }
 
 @theme inline {
@@ -385,11 +424,12 @@
   .radix-data-table-sort > svg {
     @apply shrink-0 text-muted-foreground;
   }
+  /* 手柄保持落在单元格内侧：向右探出会让表格 scrollWidth 超出容器，产生横向滚动。 */
   .radix-data-table-resizer {
-    @apply absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none;
+    @apply absolute right-0 top-0 z-10 h-full w-2 cursor-col-resize touch-none;
   }
   .radix-data-table-resizer::after {
-    @apply absolute bottom-2 right-1 top-2 w-px bg-border transition-colors;
+    @apply absolute bottom-2 right-0 top-2 w-px bg-border transition-colors;
     content: "";
   }
   .radix-data-table-resizer:hover::after {
@@ -404,14 +444,8 @@
   .radix-scrollbar[data-orientation="vertical"] {
     @apply w-2.5;
   }
-  .radix-scrollbar[data-orientation="horizontal"] {
-    @apply h-2.5 flex-col;
-  }
   .radix-scroll-thumb {
     @apply relative flex-1 rounded-full bg-muted-foreground/30;
-  }
-  .radix-scroll-corner {
-    @apply bg-muted;
   }
 
   /*
@@ -474,7 +508,11 @@
   }
 
   .brand {
-    @apply flex h-12 items-center gap-3 px-3;
+    @apply flex h-12 items-center gap-2 px-3;
+  }
+
+  .brand .btn-icon {
+    @apply size-8 shrink-0;
   }
 
   .brand-mark {
@@ -496,7 +534,7 @@
   }
 
   .brand-copy small {
-    @apply text-xs leading-4 text-sidebar-muted;
+    @apply whitespace-nowrap text-xs leading-4 text-sidebar-muted;
   }
 
   .nav-close {
@@ -2588,5 +2626,104 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+/*
+ * 明亮主题装饰覆盖：深色主题的扫描线、霓虹辉光与发光文字在白底上会显得脏，
+ * 这里统一替换为柔和网格、细阴影或无阴影。颜色本体已通过 :root[data-theme="light"]
+ * 变量切换，无需在各组件重复覆盖。
+ */
+@layer base {
+  [data-theme="light"] body {
+    background-image: radial-gradient(
+        1100px 560px at 88% -12%,
+        oklch(0.7 0.12 210 / 0.1),
+        transparent 62%
+      ),
+      radial-gradient(
+        1000px 640px at -8% 112%,
+        oklch(0.66 0.14 330 / 0.08),
+        transparent 62%
+      ),
+      linear-gradient(oklch(0.72 0.055 235 / 0.3) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(0.72 0.055 235 / 0.3) 1px, transparent 1px);
+  }
+
+  /* 扫描线是深色终端质感专属，亮主题下去掉。 */
+  [data-theme="light"] body::before {
+    background: none;
+  }
+}
+
+@layer components {
+  /* 主按钮沿用品牌渐变（霓虹青 → 品红），配柔和青色环境阴影。 */
+  [data-theme="light"] .btn-primary {
+    background-image: linear-gradient(135deg, var(--primary), var(--neon));
+    box-shadow:
+      0 2px 6px -2px oklch(0.6 0.13 215 / 0.45),
+      0 10px 24px -10px oklch(0.6 0.13 215 / 0.4);
+  }
+  [data-theme="light"] .btn-primary:hover {
+    background-image: linear-gradient(135deg, oklch(0.55 0.135 215), oklch(0.53 0.15 330));
+    box-shadow:
+      0 3px 10px -2px oklch(0.6 0.13 215 / 0.5),
+      0 14px 28px -10px oklch(0.6 0.13 215 / 0.45);
+  }
+
+  [data-theme="light"] .brand-mark {
+    box-shadow:
+      0 1px 3px oklch(0.4 0.05 285 / 0.25),
+      0 6px 16px -6px oklch(0.6 0.13 215 / 0.45);
+  }
+
+  /* 区块边框：渐变描边（青 → 品红 → 青）替代灰边框，是亮主题赛博朋克的核心识别。 */
+  [data-theme="light"] .panel,
+  [data-theme="light"] .traffic-panel {
+    border: 1px solid transparent;
+    background:
+      linear-gradient(var(--card), var(--card)) padding-box,
+      linear-gradient(
+          135deg,
+          color-mix(in oklab, var(--primary) 42%, transparent),
+          color-mix(in oklab, var(--neon) 26%, transparent) 55%,
+          color-mix(in oklab, var(--primary) 16%, transparent)
+        )
+        border-box;
+    box-shadow:
+      0 1px 2px oklch(0.4 0.05 285 / 0.06),
+      0 16px 36px -20px oklch(0.6 0.13 215 / 0.35);
+  }
+
+  [data-theme="light"] .nav-item.active {
+    background: color-mix(in oklab, var(--primary) 10%, var(--sidebar));
+    box-shadow:
+      inset 2px 0 0 var(--primary),
+      0 0 0 1px color-mix(in oklab, var(--primary) 22%, transparent);
+    text-shadow: none;
+  }
+
+  [data-theme="light"] .nav-close:hover {
+    @apply text-sidebar-foreground;
+  }
+
+  [data-theme="light"] .sidebar-status i,
+  [data-theme="light"] .sidebar-status.pending i,
+  [data-theme="light"] .top-status i,
+  [data-theme="light"] .top-status.working i,
+  [data-theme="light"] .group-node > i.on {
+    box-shadow: none;
+  }
+
+  /* 关键数字用品牌渐变文字承载霓虹感；kicker 只去发光、保留主色。 */
+  [data-theme="light"] .metric > strong {
+    text-shadow: none;
+    background: linear-gradient(100deg, var(--primary), var(--neon));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  [data-theme="light"] .page-kicker {
+    text-shadow: none;
   }
 }

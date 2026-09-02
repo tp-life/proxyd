@@ -7,8 +7,14 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="description" content="proxyd 本机代理管理控制台" />
     <title>proxyd · 代理控制台</title>
-    <script type="module" crossorigin src="/assets/index-DHrRttST.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-B0AKwp4R.css">
+    <script>
+      // 首屏前恢复手动选择的主题，避免明亮模式用户看到深色闪烁；默认保持深色。
+      try {
+        if (localStorage.getItem("proxyd-theme") === "light") document.documentElement.dataset.theme = "light";
+      } catch {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-DGZFVneO.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DFilj8Bt.css">
   </head>
   <body>
     <div id="root"></div>

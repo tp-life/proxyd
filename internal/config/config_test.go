@@ -451,6 +451,35 @@ rules:
 	}
 }
 
+func TestMigrateLegacyHealthURL(t *testing.T) {
+	// 旧默认 HTTP 探测地址迁移为 HTTPS；用户自定义的其他地址保持不变
+	body := `
+subscriptions:
+  - name: a
+    url: https://example.com/sub
+port-range: [42000, 42010]
+health-url: http://www.gstatic.com/generate_204
+rules:
+  - MATCH,PROXY
+`
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HealthURL != defaultHealthURL {
+		t.Errorf("HealthURL = %q, want 迁移后的默认值 %q", cfg.HealthURL, defaultHealthURL)
+	}
+
+	custom := strings.Replace(body, "health-url: http://www.gstatic.com/generate_204", "health-url: http://cp.cloudflare.com/generate_204", 1)
+	cfg, err = Load(writeTemp(t, custom))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HealthURL != "http://cp.cloudflare.com/generate_204" {
+		t.Errorf("自定义 health-url 不应被迁移，得到 %q", cfg.HealthURL)
+	}
+}
+
 func TestCheckAutoPort(t *testing.T) {
 	cfg := &Config{
 		Listen:             "127.0.0.1",

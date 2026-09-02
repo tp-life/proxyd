@@ -7,6 +7,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -133,6 +134,11 @@ type Server struct {
 	// `/memory` 是一秒一跳的常驻流，不能在请求路径上同步解码，否则每次轮询都会被阻塞一拍。
 	memoryBytes atomic.Uint64
 	memCancel   context.CancelFunc
+
+	// restartFn 由进程入口注入，负责派生重启子进程；nil 表示当前运行方式不支持 API 重启。
+	restartFn func() error
+	// restartInFlight 保证重启只触发一次；重启后进程退出，无需复位。
+	restartInFlight atomic.Bool
 }
 
 // New 创建 API 服务及惰性启动的刷新任务合并器。
@@ -153,6 +159,19 @@ func New(addr string, a *app.App) *Server {
 		triggerWake: make(chan struct{}, 1),
 		runRefresh:  a.Refresh,
 	}
+}
+
+// SetRestarter 注入进程重启回调，供 POST /api/restart 使用。
+//
+// 参数：
+//   - fn: func() error，由进程入口实现，负责派生执行 restart 的 detached 子进程；
+//     传入 nil 或不调用时，重启接口返回 503。
+//
+// 返回值：无。
+//
+// 错误情况：无；该 setter 只保存引用，真正的错误延迟到重启请求时由 fn 返回并记日志。
+func (s *Server) SetRestarter(fn func() error) {
+	s.restartFn = fn
 }
 
 // Start 在后台启动 API 与内嵌 Web 控制台监听。
@@ -201,6 +220,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /api/config/export", s.handleExportConfig)
 	mux.HandleFunc("POST /api/config/import/preview", s.handlePreviewImportConfig)
 	mux.HandleFunc("POST /api/config/import", s.handleImportConfig)
+	mux.HandleFunc("POST /api/restart", s.handleRestart)
 	mux.HandleFunc("POST /api/autostart", s.handleSetAutostart)
 	mux.HandleFunc("GET /api/rule-urls", s.handleListRuleURLs)
 	mux.HandleFunc("POST /api/rule-urls", s.handleAddRuleURL)
@@ -369,7 +389,11 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 		if readErr != nil {
-			if readErr != io.EOF && r.Context().Err() == nil {
+			// proxyd 每次热应用配置都会经 hub.Parse → ApplyConfig 重建 mihomo 的
+			// REST API（见 core.Runner.Reload），在途的 /traffic 长连接会被上游主动
+			// 掐断，读取侧得到 io.ErrUnexpectedEOF。这是正常生命周期事件，前端会自动
+			// 重连，不应记为错误；其余读错误才需要排查。
+			if readErr != io.EOF && !errors.Is(readErr, io.ErrUnexpectedEOF) && r.Context().Err() == nil {
 				log.Printf("[api] traffic stream interrupted: %v", readErr)
 			}
 			return
@@ -1517,6 +1541,38 @@ func (s *Server) handlePreviewImportConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, preview)
+}
+
+// handleRestart 触发进程级重启：先返回响应，再异步派生 restart 子进程完成 stop→start。
+//
+// 参数：
+//   - w: http.ResponseWriter，写出重启受理结果。
+//   - r: *http.Request，无请求体。
+//
+// 返回值：无；成功返回 `{ "restarting": true }`，已触发过的重复请求附带 `"already": true`。
+//
+// 错误情况：未注入 restarter（例如测试实例）返回 503。restarter 的错误发生在响应之后，
+// 无法回传给客户端，只记入日志；调用方应通过轮询 /healthz 判断重启是否成功。
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if s.restartFn == nil {
+		http.Error(w, "当前运行方式不支持 API 重启", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.restartInFlight.CompareAndSwap(false, true) {
+		writeJSON(w, map[string]any{"restarting": true, "already": true})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"restarting": true,
+		"message":    "proxyd 正在重启，请稍候",
+	})
+	// 延迟触发，确保上面的响应完整送达客户端后进程才开始退出。
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if err := s.restartFn(); err != nil {
+			log.Printf("[api] 重启失败: %v", err)
+		}
+	}()
 }
 
 // handleSetAutostart 注册/移除开机自启项。
