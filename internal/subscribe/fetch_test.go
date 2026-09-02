@@ -49,6 +49,57 @@ func TestFetchCacheFallback(t *testing.T) {
 	}
 }
 
+// TestFetchWithInfoCachesSubscriptionUserInfo 验证订阅拉取会解析并缓存 subscription-userinfo。
+//
+// 首次请求从 HTTP header 读取用量信息；上游关闭后再次拉取应走 body 缓存，
+// 同时读取 userinfo sidecar，避免网络抖动时 UI/CLI 的流量信息突然消失。
+func TestFetchWithInfoCachesSubscriptionUserInfo(t *testing.T) {
+	stateDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Subscription-Userinfo", "upload=1024; download=2048; total=4096; expire=1893456000")
+		w.Write([]byte(clashFixture))
+	}))
+	sub := config.Subscription{Name: "带用量", URL: srv.URL, Type: "clash"}
+
+	nodes, info, err := FetchWithInfo(context.Background(), sub, stateDir)
+	if err != nil {
+		t.Fatalf("FetchWithInfo 失败: %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("期望 3 个节点，得到 %d", len(nodes))
+	}
+	if info.Upload != 1024 || info.Download != 2048 || info.Total != 4096 || info.Expire != 1893456000 {
+		t.Fatalf("userinfo 解析异常: %+v", info)
+	}
+
+	srv.Close()
+	nodes, info, err = FetchWithInfo(context.Background(), sub, stateDir)
+	var w *FetchWarning
+	if !errors.As(err, &w) {
+		t.Fatalf("缓存降级期望 FetchWarning，得到 %v", err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("缓存降级期望 3 个节点，得到 %d", len(nodes))
+	}
+	if info.Upload != 1024 || info.Download != 2048 || info.Total != 4096 || info.Expire != 1893456000 {
+		t.Fatalf("缓存 userinfo 读取异常: %+v", info)
+	}
+}
+
+// TestParseUserInfo 验证 subscription-userinfo 的宽松解析规则。
+//
+// 订阅服务端经常返回部分字段或混入无效字段；解析器应保留有效字段，
+// 跳过非法值，避免因为展示字段异常影响节点订阅主体流程。
+func TestParseUserInfo(t *testing.T) {
+	info := ParseUserInfo("upload=1; download=2; total=3; expire=4; ignored=x; upload=-1")
+	if info.Upload != 1 || info.Download != 2 || info.Total != 3 || info.Expire != 4 {
+		t.Fatalf("ParseUserInfo = %+v", info)
+	}
+	if !ParseUserInfo("").IsZero() {
+		t.Fatal("空 header 应解析为空 userinfo")
+	}
+}
+
 func TestFetchNoCache(t *testing.T) {
 	stateDir := t.TempDir()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -171,3 +171,40 @@ func TestContent(t *testing.T) {
 		t.Error("无缓存且拉取失败时应返回错误")
 	}
 }
+
+// TestContentDecodesGFWListForDisplay 验证内容查看链路会把整体 Base64 编码的
+// AutoProxy/gfwlist 转换为人类可读原文，同时不改变普通规则源的既有行为。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建隔离缓存目录并报告断言失败。
+//
+// 返回值：无；通过 testing 断言表达验证结果。
+//
+// 错误情况：现场拉取失败、返回值仍为 Base64，或解码后内容与上游原文不一致时测试失败。
+// 该测试直接覆盖 Web 内容接口调用的 ruleurl.Content seam，防止解析规则正常但展示仍泄漏编码文本。
+func TestContentDecodesGFWListForDisplay(t *testing.T) {
+	stateDir := t.TempDir()
+	gfw := "[AutoProxy 0.2.9]\n! display fixture\n||example.com\n@@||direct.example\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(gfw))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintln(w, encoded)
+	}))
+	defer server.Close()
+
+	body, err := Content(context.Background(), config.RuleURL{Name: "gfwlist", URL: server.URL}, stateDir)
+	if err != nil {
+		t.Fatalf("Content(gfwlist): %v", err)
+	}
+	if string(body) != gfw {
+		t.Fatalf("Content(gfwlist) = %q, want decoded %q", body, gfw)
+	}
+
+	server.Close()
+	cachedBody, err := Content(context.Background(), config.RuleURL{Name: "gfwlist", URL: server.URL}, stateDir)
+	if err != nil {
+		t.Fatalf("Content(gfwlist cache): %v", err)
+	}
+	if string(cachedBody) != gfw {
+		t.Fatalf("Content(gfwlist cache) = %q, want decoded %q", cachedBody, gfw)
+	}
+}

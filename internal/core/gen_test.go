@@ -41,6 +41,13 @@ func fakeSocks5(name, server string, port int) *node.Node {
 	}
 }
 
+// fakeSubNode 构造带订阅来源的测试节点。
+func fakeSubNode(name, sub string, port int) *node.Node {
+	n := fakeSocks5(name, fmt.Sprintf("10.0.0.%d", port%255), port)
+	n.Subscription = sub
+	return n
+}
+
 // parseYAML 把生成的 YAML 解回 map 便于断言。
 func parseYAML(t *testing.T, buf []byte) map[string]any {
 	t.Helper()
@@ -128,6 +135,246 @@ func TestGenerate(t *testing.T) {
 	rules, ok := m["rules"].([]any)
 	if !ok || len(rules) != 2 || rules[0] != "DOMAIN-SUFFIX,example.com,DIRECT" || rules[1] != "MATCH,PROXY" {
 		t.Errorf("rules = %v, 未原样透传", m["rules"])
+	}
+}
+
+// TestGeneratePortMappingDisabledKeepsRoutingNodesAndOtherListeners 验证关闭端口映射后，
+// 仅移除“健康节点一对一端口”入口，同时继续保留节点出站、PROXY/AUTO 组、自动优选
+// 端口和自定义策略组端口。这样开关不会误伤主代理链路或其它显式入口。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于隔离 mihomo 主目录并报告断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：生成失败、被关闭的映射端口仍存在、其它入口被错误删除，或路由节点从
+// PROXY 组中丢失时测试失败。
+func TestGeneratePortMappingDisabledKeepsRoutingNodesAndOtherListeners(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	disabled := false
+	cfg.PortMapping = &disabled
+	cfg.AutoPort = 41998
+	cfg.HealthURL = "http://www.gstatic.com/generate_204"
+	cfg.Groups = []config.NodeGroup{{
+		Name:  "低延迟",
+		Port:  43000,
+		Type:  config.GroupTypeURLTest,
+		Nodes: []string{"节点A"},
+	}}
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)},
+		{Port: 42002, Node: fakeSocks5("节点B", "5.6.7.8", 10002)},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("关闭端口映射后生成配置失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	listeners, ok := m["listeners"].([]any)
+	if !ok {
+		t.Fatalf("关闭节点映射后仍应保留自动端口和分组端口: %#v", m["listeners"])
+	}
+	ports := make(map[int]bool, len(listeners))
+	for index, raw := range listeners {
+		listener, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("listeners[%d] 类型异常: %#v", index, raw)
+		}
+		port, ok := listener["port"].(int)
+		if !ok {
+			t.Fatalf("listeners[%d].port 类型异常: %#v", index, listener["port"])
+		}
+		ports[port] = true
+	}
+	if ports[42001] || ports[42002] {
+		t.Fatalf("关闭端口映射后仍生成一对一入口: %#v", ports)
+	}
+	if !ports[41998] || !ports[43000] {
+		t.Fatalf("关闭端口映射不应删除自动端口或分组端口: %#v", ports)
+	}
+
+	groups, ok := m["proxy-groups"].([]any)
+	if !ok || len(groups) < 1 {
+		t.Fatalf("关闭端口映射后缺少 PROXY 组: %#v", m["proxy-groups"])
+	}
+	proxyGroup, ok := groups[0].(map[string]any)
+	if !ok {
+		t.Fatalf("PROXY 组类型异常: %#v", groups[0])
+	}
+	members, ok := proxyGroup["proxies"].([]any)
+	if !ok || len(members) != 3 || members[0] != "节点A" || members[1] != "节点B" || members[2] != "DIRECT" {
+		t.Fatalf("关闭端口映射不应移除路由节点，实际成员: %#v", proxyGroup["proxies"])
+	}
+}
+
+// TestGenerateWithDialerProxyDependencies 验证链式入口即使是唯一获得本地端口的节点，
+// 其上游节点仍会作为 proxy-only 出站进入配置，并通过 mihomo 的引用与循环自检。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：依赖节点被端口容量截断、额外生成 listener、dialer-proxy 字段丢失，
+// 或 mihomo 无法解析最终配置时测试失败。
+func TestGenerateWithDialerProxyDependencies(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	exit := fakeSocks5("链路出口", "1.2.3.4", 10001)
+	exit.Alive = true
+	entry := fakeSocks5("链路入口", "5.6.7.8", 10002)
+	entry.Mapping["dialer-proxy"] = exit.Name
+	entry.Alive = true
+
+	buf, err := GenerateWithNodes(cfg, []Assignment{{Port: 42001, Node: entry}}, []*node.Node{entry, exit}, nil)
+	if err != nil {
+		t.Fatalf("GenerateWithNodes 生成链式代理失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo 无法解析 dialer-proxy 配置: %v", err)
+	}
+	m := parseYAML(t, buf)
+	proxies, ok := m["proxies"].([]any)
+	if !ok || len(proxies) != 2 {
+		t.Fatalf("链路依赖未作为额外出站生成: %#v", m["proxies"])
+	}
+	if got := proxies[0].(map[string]any)["dialer-proxy"]; got != exit.Name {
+		t.Fatalf("dialer-proxy 字段未透传: %v", got)
+	}
+	listeners, ok := m["listeners"].([]any)
+	if !ok || len(listeners) != 1 {
+		t.Fatalf("proxy-only 依赖不应占用本地端口: %#v", m["listeners"])
+	}
+}
+
+// TestGenerateDialerProxyTargetsGroup 验证现代 mihomo 推荐的“节点 dialer-proxy 指向
+// 代理组”链式方式可用，以替代已经从核心移除的 relay 组类型。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：未分配端口的组成员被丢弃、代理组未生成或 mihomo 引用校验失败时测试失败。
+func TestGenerateDialerProxyTargetsGroup(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	cfg.Groups = []config.NodeGroup{{
+		Name: "链路上游组", Port: 43000, Type: config.GroupTypeFallback, Nodes: []string{"上游 A", "上游 B"},
+	}}
+	upstreamA := fakeSocks5("上游 A", "1.2.3.4", 10001)
+	upstreamA.Alive = true
+	upstreamB := fakeSocks5("上游 B", "2.3.4.5", 10002)
+	upstreamB.Alive = true
+	entry := fakeSocks5("链路入口", "5.6.7.8", 10003)
+	entry.Mapping["dialer-proxy"] = "链路上游组"
+	entry.Alive = true
+
+	buf, err := GenerateWithNodes(
+		cfg,
+		[]Assignment{{Port: 42001, Node: entry}},
+		[]*node.Node{entry, upstreamA, upstreamB},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("生成指向代理组的 dialer-proxy 失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo 无法解析代理组链路: %v", err)
+	}
+	m := parseYAML(t, buf)
+	proxies, ok := m["proxies"].([]any)
+	if !ok || len(proxies) != 3 {
+		t.Fatalf("代理组成员未注册为 proxy-only 出站: %#v", m["proxies"])
+	}
+}
+
+// TestGenerateTUN 验证 proxyd 的默认 TUN 字段和高级透传字段会进入 mihomo 配置。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：生成失败、mihomo 无法解析或字段丢失时测试失败；本测试只解析配置，
+// 不启动 TUN 设备，因此不要求测试进程具备 root/CAP_NET_ADMIN 权限。
+func TestGenerateTUN(t *testing.T) {
+	cfg := fakeConfig()
+	cfg.TUN = config.DefaultTUNConfig()
+	cfg.TUN.Enable = true
+	cfg.TUN.Extra = map[string]any{"strict-route": true}
+
+	buf, err := Generate(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("Generate(TUN) 失败: %v", err)
+	}
+	tunSection, ok := parseYAML(t, buf)["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("生成配置缺少 tun 段: %s", buf)
+	}
+	if tunSection["enable"] != true || tunSection["stack"] != "system" ||
+		tunSection["auto-route"] != true || tunSection["auto-detect-interface"] != true ||
+		tunSection["strict-route"] != true {
+		t.Errorf("tun 段字段异常: %#v", tunSection)
+	}
+	dnsHijack, ok := tunSection["dns-hijack"].([]any)
+	if !ok || len(dnsHijack) != 1 || dnsHijack[0] != "0.0.0.0:53" {
+		t.Errorf("tun.dns-hijack = %#v", tunSection["dns-hijack"])
+	}
+}
+
+// TestGenerateDNSPresets 验证 fake-ip/redir-host 预设，以及手写 dns 的最高优先级。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：预设生成的 DNS 段无法被 mihomo 解析、增强模式错误，或手写配置被
+// dns-preset 覆盖时测试失败。
+func TestGenerateDNSPresets(t *testing.T) {
+	for _, preset := range []string{config.DNSPresetFakeIP, config.DNSPresetRedirHost} {
+		t.Run(preset, func(t *testing.T) {
+			cfg := fakeConfig()
+			cfg.DNSPreset = preset
+			buf, err := Generate(cfg, nil, nil)
+			if err != nil {
+				t.Fatalf("Generate(%s) 失败: %v", preset, err)
+			}
+			dnsSection, ok := parseYAML(t, buf)["dns"].(map[string]any)
+			if !ok || dnsSection["enable"] != true || dnsSection["enhanced-mode"] != preset {
+				t.Fatalf("dns preset %s 生成异常: %#v", preset, dnsSection)
+			}
+			_, hasRange := dnsSection["fake-ip-range"]
+			if hasRange != (preset == config.DNSPresetFakeIP) {
+				t.Errorf("preset=%s fake-ip-range presence=%t", preset, hasRange)
+			}
+		})
+	}
+
+	cfg := fakeConfig()
+	cfg.DNSPreset = config.DNSPresetFakeIP
+	cfg.DNS = map[string]any{"enable": true, "enhanced-mode": "redir-host", "nameserver": []string{"9.9.9.9"}}
+	buf, err := Generate(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("Generate(custom DNS) 失败: %v", err)
+	}
+	dnsSection := parseYAML(t, buf)["dns"].(map[string]any)
+	if dnsSection["enhanced-mode"] != "redir-host" {
+		t.Fatalf("手写 dns 未优先于 preset: %#v", dnsSection)
+	}
+
+	// YAML 中显式的 dns: {} 不包含任何策略，不能意外压掉用户选择的预设。
+	cfg.DNS = map[string]any{}
+	buf, err = Generate(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("Generate(empty custom DNS) 失败: %v", err)
+	}
+	dnsSection = parseYAML(t, buf)["dns"].(map[string]any)
+	if dnsSection["enhanced-mode"] != config.DNSPresetFakeIP {
+		t.Fatalf("空 dns map 不应覆盖 preset: %#v", dnsSection)
 	}
 }
 
@@ -615,6 +862,48 @@ func TestGenerateGroups(t *testing.T) {
 	}
 	if gl["name"] != "L43000" || gl["type"] != "mixed" || gl["proxy"] != "g1" {
 		t.Errorf("g1 listener 异常: %v", gl)
+	}
+}
+
+// TestGenerateGroupTypeAndSubscriptionMembers 验证 A2 分组演进的核心生成规则。
+//
+// 分组 type 必须原样传给 mihomo；subscription 非空时，成员不再来自静态 nodes，
+// 而是从当前可用 assignment 中按节点订阅来源动态收集，这样订阅刷新后组成员会自动跟随。
+func TestGenerateGroupTypeAndSubscriptionMembers(t *testing.T) {
+	cfg := fakeConfig()
+	cfg.Groups = []config.NodeGroup{
+		{Name: "机场A", Port: 43000, Type: config.GroupTypeFallback, Subscription: "sub-a"},
+		{Name: "轮询B", Port: 43001, Type: config.GroupTypeLoadBalance, Subscription: "sub-b"},
+	}
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSubNode("A1", "sub-a", 10001)},
+		{Port: 42002, Node: fakeSubNode("A2", "sub-a", 10002)},
+		{Port: 42003, Node: fakeSubNode("B1", "sub-b", 10003)},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("Generate 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	groups := map[string]map[string]any{}
+	for _, raw := range m["proxy-groups"].([]any) {
+		g := raw.(map[string]any)
+		groups[g["name"].(string)] = g
+	}
+	if groups["机场A"]["type"] != config.GroupTypeFallback {
+		t.Fatalf("机场A type = %v", groups["机场A"]["type"])
+	}
+	aMembers := groups["机场A"]["proxies"].([]any)
+	if len(aMembers) != 2 || aMembers[0] != "A1" || aMembers[1] != "A2" {
+		t.Fatalf("机场A 成员 = %v", aMembers)
+	}
+	if groups["轮询B"]["type"] != config.GroupTypeLoadBalance {
+		t.Fatalf("轮询B type = %v", groups["轮询B"]["type"])
+	}
+	bMembers := groups["轮询B"]["proxies"].([]any)
+	if len(bMembers) != 1 || bMembers[0] != "B1" {
+		t.Fatalf("轮询B 成员 = %v", bMembers)
 	}
 }
 

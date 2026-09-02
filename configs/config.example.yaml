@@ -1,5 +1,6 @@
 # proxyd 配置示例
-# 订阅列表：可同时配置多个机场，type 默认 auto（自动嗅探内容格式）
+# 订阅列表：可同时配置多个机场，type 默认 auto（自动嗅探内容格式）。
+# Clash YAML 节点里的 dialer-proxy 会原样保留，可引用同订阅节点或下方 groups 的名称。
 subscriptions:
   - name: airport-a
     url: https://example.com/api/v1/client/subscribe?token=xxx
@@ -14,6 +15,7 @@ subscriptions:
 
 listen: 127.0.0.1              # 映射端口监听地址
 port-range: [42000, 42100]     # 每个可用节点占一个端口（闭区间）
+# port-mapping: true           # 是否启动逐节点端口监听；关闭后保留稳定分配关系，但不再暴露这些监听端口
 mixed-port: 41999              # 主端口：走全局规则模式（rule/global/direct），默认区间前一位
 # main-auto: false             # true 时主端口跳过规则、固定走最优节点（AUTO url-test 组）；
                                # 与 auto-port 并存互不影响；无可用节点时回退规则模式
@@ -23,17 +25,27 @@ mixed-port: 41999              # 主端口：走全局规则模式（rule/global
 # auto-port: 41998             # 自动选优端口：固定走全部可用节点中延迟最低者（url-test）；0/不填=关闭
 # system-proxy: false          # true 时 serve 启动后把系统代理指向主端口，退出时自动恢复
 
+# tun:                         # TUN 接管系统 TCP/UDP 流量；其余 mihomo 高级字段会原样透传
+#   enable: false              # Web / proxyd tun on|off 可热切换并持久化
+#   stack: system              # system 无额外构建标签；gvisor/mixed 需 with_gvisor 构建
+#   auto-route: true           # 自动配置系统路由
+#   auto-detect-interface: true # 自动识别出口网卡
+#   dns-hijack:
+#     - 0.0.0.0:53             # 劫持 IPv4 DNS；启用时建议同时配置 dns 或 DNS 预设
+
 refresh-interval: 24h          # 订阅刷新周期（默认一天一次；可随时在 Web 控制台手动刷新）
 health-interval: 5m            # 节点可用性检测周期
 health-url: http://www.gstatic.com/generate_204
 health-timeout: 5s
-exclude: "到期|剩余流量|套餐|官网|订阅"   # 按节点名过滤机场信息节点
+check-updates: true            # 启动后异步检查官方 GitHub Releases；失败不影响代理，可设 false 关闭
+# include: "香港|日本"                    # 可选白名单：只保留名称匹配的节点
+exclude: "到期|剩余流量|套餐|官网|订阅"   # 黑名单：在 include 之后剔除匹配节点
 
 # ---- 以下为 Clash 语义的全局配置，作用于主端口 ----
 mode: rule                     # rule | global | direct
 log-level: info
 external-controller: 127.0.0.1:19090   # mihomo REST API（兼容 metacubexd/yacd 面板）
-api-listen: 127.0.0.1:19091            # proxyd 自有 API：GET /ports 查看端口映射表
+api-listen: 127.0.0.1:19091            # proxyd 自有 API + 内嵌 React Web 控制台
 # secret: change-me
 # external-ui: ui              # 可放 metacubexd 静态文件目录
 
@@ -45,12 +57,18 @@ api-listen: 127.0.0.1:19091            # proxyd 自有 API：GET /ports 查看�
 #   - name: gfwlist            # 支持 mihomo 规则文本（每行 类型,内容,策略）
 #     url: https://example.com/gfwlist.txt   # 和 gfwlist/AutoProxy（base64）两种格式，自动识别
 
-# groups:                      # 节点分组端口：组内节点 url-test 自动选优，占用独立端口
+# groups:                      # 节点分组端口，也可作为订阅节点 dialer-proxy 的上游目标
 #   - name: hk                 # 组名（不能与节点名/AUTO/PROXY 等保留名冲突）
 #     port: 43000              # 不能与主端口、api 端口、port-range 区间、auto-port 冲突
+#     type: fallback           # url-test | fallback | load-balance；旧配置缺省为 url-test
 #     nodes: ["香港 01", "香港 02"]   # 节点名列表，与当前可用节点取交集
+#   - name: airport-a-auto
+#     port: 43001
+#     type: url-test
+#     subscription: airport-a  # 成员动态取该订阅当前可用节点；manual 表示手动节点来源
 
-# dns:                         # 可选，透传 mihomo dns 配置
+# dns-preset: off              # off | fake-ip | redir-host；TUN 建议 fake-ip
+# dns:                         # 可选，透传 mihomo dns 配置；存在时优先于 dns-preset
 #   enable: true
 #   enhanced-mode: fake-ip
 
@@ -60,4 +78,5 @@ rules:
   - MATCH,PROXY
 
 # state-dir: ~/.local/state/proxyd   # 状态目录：端口映射快照 mapping.json、节点快照 nodes.json、
-                                     # 订阅/规则缓存 cache/、geo 数据、proxyd.pid、proxyd.log
+                                     # 订阅/规则缓存 cache/（含 *.userinfo.json 用量缓存）、
+                                     # geo 数据、proxyd.pid、proxyd.log

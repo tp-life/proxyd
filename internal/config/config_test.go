@@ -49,6 +49,20 @@ func TestLoadValid(t *testing.T) {
 	if cfg.Capacity() != 11 {
 		t.Errorf("Capacity = %d", cfg.Capacity())
 	}
+	if cfg.DNSPreset != DNSPresetOff {
+		t.Errorf("DNSPreset default = %q", cfg.DNSPreset)
+	}
+	if !cfg.UpdateCheckEnabled() || cfg.CheckUpdates == nil {
+		t.Errorf("CheckUpdates 默认值异常: %#v", cfg.CheckUpdates)
+	}
+	if !cfg.PortMappingEnabled() || cfg.PortMapping == nil {
+		t.Errorf("PortMapping 默认值异常: %#v", cfg.PortMapping)
+	}
+	if cfg.TUN.Enable || cfg.TUN.Stack != "system" || cfg.TUN.AutoRoute == nil || !*cfg.TUN.AutoRoute ||
+		cfg.TUN.AutoDetectInterface == nil || !*cfg.TUN.AutoDetectInterface ||
+		len(cfg.TUN.DNSHijack) != 1 || cfg.TUN.DNSHijack[0] != "0.0.0.0:53" {
+		t.Errorf("TUN 默认值异常: %+v", cfg.TUN)
+	}
 }
 
 func TestLoadFull(t *testing.T) {
@@ -70,6 +84,8 @@ exclude: "到期|官网"
 mode: global
 external-controller: 127.0.0.1:9090
 secret: s3cret
+check-updates: false
+port-mapping: false
 rules:
   - GEOIP,CN,DIRECT
   - MATCH,PROXY
@@ -86,6 +102,33 @@ rules:
 	}
 	if len(cfg.Subscriptions) != 2 || cfg.Subscriptions[1].Type != "share" {
 		t.Errorf("subscriptions = %+v", cfg.Subscriptions)
+	}
+	if cfg.UpdateCheckEnabled() {
+		t.Error("check-updates: false 被默认值覆盖")
+	}
+	if cfg.PortMappingEnabled() {
+		t.Error("port-mapping: false 被默认值覆盖")
+	}
+}
+
+// TestSubscriptionEnabledDefaultsAndExplicitDisable 验证订阅启用状态的向后兼容语义：
+// 旧配置没有 enabled 字段时默认启用，用户显式写 false 时必须保持关闭。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于报告状态断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：字段缺失被误判为关闭，或显式 false 被默认值覆盖时测试失败。
+func TestSubscriptionEnabledDefaultsAndExplicitDisable(t *testing.T) {
+	legacy := Subscription{Name: "legacy", URL: "https://example.com/sub", Type: "auto"}
+	if !legacy.IsEnabled() {
+		t.Fatal("旧订阅缺少 enabled 字段时应默认启用")
+	}
+	disabled := false
+	explicit := Subscription{Name: "disabled", URL: "https://example.com/sub", Type: "auto", Enabled: &disabled}
+	if explicit.IsEnabled() {
+		t.Fatal("显式 enabled=false 的订阅不应被默认值重新开启")
 	}
 }
 
@@ -131,13 +174,39 @@ func TestLoadInvalid(t *testing.T) {
 		"dup sub name":       "subscriptions: [{name: a, url: x},{name: a, url: y}]\nport-range: [1,2]\nrules: [MATCH,PROXY]\n",
 		"bad sub type":       "subscriptions: [{name: a, url: x, type: wat}]\nport-range: [1,2]\nrules: [MATCH,PROXY]\n",
 		"bad mode":           "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\nmode: wat\nrules: [MATCH,PROXY]\n",
+		"bad dns preset":     "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\ndns-preset: wat\nrules: [MATCH,PROXY]\n",
 		"bad exclude":        "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\nexclude: '['\nrules: [MATCH,PROXY]\n",
+		"bad include":        "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\ninclude: '['\nrules: [MATCH,PROXY]\n",
 		"bad duration":       "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\nrefresh-interval: someday\nrules: [MATCH,PROXY]\n",
 	}
 	for name, body := range cases {
 		if _, err := Load(writeTemp(t, body)); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
+	}
+}
+
+// TestValidateAllowsZeroValueOptionalDefaults 验证直接构造 Config 时可省略有默认值的可选字段。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：空 dns-preset 或空 TUN 段被当成非法值时测试失败；这会破坏嵌入调用方
+// 和 e2e 直接构造配置的既有入口。
+func TestValidateAllowsZeroValueOptionalDefaults(t *testing.T) {
+	cfg := &Config{
+		Subscriptions: []Subscription{{Name: "a", URL: "https://example.com/sub"}},
+		Listen:        "127.0.0.1",
+		PortRange:     [2]int{42000, 42010},
+		MixedPort:     41999,
+		Mode:          "rule",
+		Rules:         []string{"MATCH,PROXY"},
+		APIListen:     "127.0.0.1:19091",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate zero-value optional defaults: %v", err)
 	}
 }
 
@@ -157,6 +226,8 @@ rule-urls:
 groups:
   - name: hk
     port: 43000
+    type: fallback
+    subscription: a
     nodes: ["香港 01", "香港 02"]
 rules:
   - MATCH,PROXY
@@ -178,8 +249,142 @@ rules:
 		t.Errorf("RuleURLs = %+v", cfg.RuleURLs)
 	}
 	if len(cfg.Groups) != 1 || cfg.Groups[0].Name != "hk" || cfg.Groups[0].Port != 43000 ||
+		cfg.Groups[0].Type != GroupTypeFallback || cfg.Groups[0].Subscription != "a" ||
 		len(cfg.Groups[0].Nodes) != 2 {
 		t.Errorf("Groups = %+v", cfg.Groups)
+	}
+}
+
+// TestExportYAMLRedactsCredentials 验证默认分享用导出不会泄露已知凭据，同时完整备份保持可恢复性。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：secret、URL 用户信息、敏感查询参数或编码型分享链接出现在打码结果中，
+// 或完整备份丢失原始值时测试失败。
+func TestExportYAMLRedactsCredentials(t *testing.T) {
+	cfg, err := Parse([]byte(`
+subscriptions:
+  - name: private
+    url: https://alice:password@example.com/api/path-secret?token=sub-secret&region=hk
+manual-nodes:
+  - ss://encoded-node-secret
+rule-urls:
+  - name: private-rules
+    url: https://rules.example.com/list?api_key=rules-secret
+rule-providers:
+  private:
+    type: http
+    url: https://provider.example.com/list?auth=provider-secret
+    authorization: bearer-secret
+dns:
+  nameserver:
+    - quic://dns.example.com:853?token=quic-secret
+secret: controller-secret
+port-range: [42000, 42010]
+rules:
+  - MATCH,PROXY
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	masked, err := cfg.ExportYAML(true)
+	if err != nil {
+		t.Fatalf("ExportYAML(masked): %v", err)
+	}
+	maskedText := string(masked)
+	for _, leaked := range []string{"alice", "password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret"} {
+		if strings.Contains(maskedText, leaked) {
+			t.Errorf("打码导出泄露 %q:\n%s", leaked, maskedText)
+		}
+	}
+	if !strings.Contains(maskedText, redactValue) {
+		t.Fatalf("打码导出未包含替代标记:\n%s", maskedText)
+	}
+
+	backup, err := cfg.ExportYAML(false)
+	if err != nil {
+		t.Fatalf("ExportYAML(backup): %v", err)
+	}
+	backupText := string(backup)
+	for _, original := range []string{"alice:password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret"} {
+		if !strings.Contains(backupText, original) {
+			t.Errorf("完整备份缺少 %q:\n%s", original, backupText)
+		}
+	}
+}
+
+// TestTUNConfigPassThrough 验证 TUN 常用字段、显式 false 和未知高级字段可完整落盘回读。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：默认值覆盖显式 false、inline 字段丢失或 Save/Load 改变语义时测试失败。
+func TestTUNConfigPassThrough(t *testing.T) {
+	body := validYAML + `
+tun:
+  enable: false
+  stack: system
+  dns-hijack: []
+  auto-route: false
+  auto-detect-interface: false
+  strict-route: true
+`
+	path := writeTemp(t, body)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TUN.Stack != "system" || cfg.TUN.AutoRoute == nil || *cfg.TUN.AutoRoute ||
+		cfg.TUN.AutoDetectInterface == nil || *cfg.TUN.AutoDetectInterface {
+		t.Fatalf("TUN 显式配置被默认值覆盖: %+v", cfg.TUN)
+	}
+	if cfg.TUN.DNSHijack == nil || len(cfg.TUN.DNSHijack) != 0 {
+		t.Fatalf("空 dns-hijack 应保持为空切片: %#v", cfg.TUN.DNSHijack)
+	}
+	if strictRoute, ok := cfg.TUN.Extra["strict-route"].(bool); !ok || !strictRoute {
+		t.Fatalf("strict-route 未进入透传字段: %#v", cfg.TUN.Extra)
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if strictRoute, ok := reloaded.TUN.Extra["strict-route"].(bool); !ok || !strictRoute {
+		t.Fatalf("Save/Load 后 strict-route 丢失: %#v", reloaded.TUN.Extra)
+	}
+}
+
+// TestGroupDefaultType 验证旧配置的节点分组会默认迁移为 url-test。
+//
+// 这是 A2 的向后兼容边界：旧版本只支持 url-test，缺省 type 必须保持原行为，
+// 否则用户升级后分组选择策略会被静默改变。
+func TestGroupDefaultType(t *testing.T) {
+	body := `
+subscriptions:
+  - name: a
+    url: https://example.com/sub
+port-range: [42000, 42010]
+groups:
+  - name: hk
+    port: 43000
+    nodes: ["香港 01"]
+rules:
+  - MATCH,PROXY
+`
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Groups[0].Type != GroupTypeURLTest {
+		t.Fatalf("旧分组缺省 type 应迁移为 url-test，得到 %q", cfg.Groups[0].Type)
 	}
 }
 
@@ -344,7 +549,11 @@ func TestCheckGroup(t *testing.T) {
 		"external port": {Name: "g", Port: 19090},
 		"dup name":      {Name: "hk", Port: 43001},
 		"dup port":      {Name: "g2", Port: 43000},
+		"no members":    {Name: "g3", Port: 43003},
+		"bad type":      {Name: "g3", Port: 43003, Type: "select"},
+		"bad sub":       {Name: "g4", Port: 43004, Subscription: "missing"},
 	}
+	cfg.Subscriptions = []Subscription{{Name: "a", URL: "https://example.com/sub"}}
 	cfg.Groups = []NodeGroup{ok}
 	for name, g := range cases {
 		if err := cfg.CheckGroup(g); err == nil {

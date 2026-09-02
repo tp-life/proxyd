@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -19,16 +20,19 @@ import (
 	"proxyd/internal/api"
 	"proxyd/internal/app"
 	"proxyd/internal/config"
+	"proxyd/internal/logbuf"
 	"proxyd/internal/node"
 	"proxyd/internal/pool"
 	"proxyd/internal/subscribe"
 	"proxyd/internal/sysproxy"
+	"proxyd/internal/updatecheck"
 )
 
 var version = "dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
+	log.SetOutput(io.MultiWriter(os.Stderr, logbuf.NewWriter(logbuf.Default)))
 	var err error
 	switch {
 	case len(os.Args) < 2:
@@ -50,6 +54,8 @@ func main() {
 			err = cmdCheck(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
+		case "tun":
+			err = cmdTun(os.Args[2:])
 		case "autostart":
 			err = cmdAutostart(os.Args[2:])
 		case "mode":
@@ -68,8 +74,12 @@ func main() {
 			err = cmdRuleURLs(os.Args[2:])
 		case "groups":
 			err = cmdGroups(os.Args[2:])
+		case "logs":
+			err = cmdLogs(os.Args[2:])
 		case "port-range":
 			err = cmdPortRange(os.Args[2:])
+		case "port-mapping":
+			err = cmdPortMapping(os.Args[2:])
 		case "auto-port":
 			err = cmdAutoPort(os.Args[2:])
 		case "main-auto":
@@ -110,6 +120,7 @@ usage:
   proxyd start|stop|restart|status [flags]   后台守护模式（日志落 state-dir/proxyd.log）
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
+  proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式（需系统权限）
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
@@ -125,7 +136,9 @@ usage:
   proxyd rules list|add "<规则>"|del <下标>        自定义规则
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
+  proxyd logs [--tail N] [--level info|warning|error|debug]   查看最近日志
   proxyd port-range <起-止>             修改节点映射端口区间
+  proxyd port-mapping [on|off|status]   开关/查看节点一对一端口映射
   proxyd auto-port <端口|off>           设置自动选优端口
   proxyd main-auto [on|off]             主端口固定走最优节点（跳过规则）；无参查看
   proxyd main-node [节点key|off]        主端口固定走指定节点（跳过规则）；无参查看
@@ -161,7 +174,7 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 	if _, err := os.Stat(*cfgFile); err != nil {
 		// 配置文件不存在
 		if len(urls) == 0 {
-			return nil, "", fmt.Errorf("未找到配置文件 %q，也未给出订阅地址；用法见 proxyd（不带参数）", *cfgFile)
+			return nil, "", firstRunGuide(*cfgFile)
 		}
 		cfg, err := config.Quick(urls, *portRange)
 		if err != nil {
@@ -211,6 +224,32 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 	return cfg, *cfgFile, nil
 }
 
+// firstRunGuide 构造无配置、无订阅参数时的三行首次运行引导。
+//
+// 参数：
+//   - configPath: string，当前尝试读取的配置文件路径。
+//
+// 返回值：
+//   - error：包含现状、快捷启动命令和配置文件启动命令三行文本。
+//
+// 错误情况：该函数只构造展示错误，不访问文件系统；路径中的特殊字符通过 %q 转义。
+func firstRunGuide(configPath string) error {
+	return fmt.Errorf(
+		"首次运行：未找到配置文件 %q，也未给出订阅地址\n快捷启动：proxyd serve <订阅地址>\n配置启动：复制 configs/config.example.yaml 到该路径后执行 proxyd serve -c %q",
+		configPath,
+		configPath,
+	)
+}
+
+// cmdServe 加载配置、启动本地 API 与 mihomo 调度器，并管理系统集成生命周期。
+//
+// 参数：
+//   - args: []string，serve 子命令参数，支持 -c、-range 和追加订阅 URL。
+//
+// 返回值：
+//   - error：配置、重复实例、API 监听或 TUN 首次应用失败时返回错误；正常退出返回 nil。
+//
+// 错误情况：版本检查通过应用层异步执行，GitHub 不可达不会阻塞 API、代理核心或退出清理。
 func cmdServe(args []string) error {
 	cfg, cfgPath, err := loadConfig(args, true)
 	if err != nil {
@@ -223,6 +262,7 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	a.ConfigureUpdateCheck(version, updatecheck.New())
 
 	apiSrv := api.New(cfg.APIListen, a)
 	if err := apiSrv.Start(); err != nil {
@@ -304,14 +344,20 @@ func cmdCheck(args []string) error {
 		return err
 	}
 	var excludeRe *regexp.Regexp
+	var includeRe *regexp.Regexp
 	if cfg.Exclude != "" {
 		if excludeRe, err = regexp.Compile(cfg.Exclude); err != nil {
 			return err
 		}
 	}
+	if cfg.Include != "" {
+		if includeRe, err = regexp.Compile(cfg.Include); err != nil {
+			return err
+		}
+	}
 
 	ctx := context.Background()
-	nodes, errs := subscribe.FetchAll(ctx, cfg.Subscriptions, cfg.StateDir, excludeRe)
+	nodes, errs := subscribe.FetchAllFiltered(ctx, cfg.Subscriptions, cfg.StateDir, includeRe, excludeRe)
 	for _, e := range errs {
 		if e != nil {
 			log.Printf("[subscribe] %v", e)

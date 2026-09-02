@@ -76,18 +76,51 @@ func Fetch(ctx context.Context, ru config.RuleURL, stateDir string) Result {
 	return res
 }
 
-// Content 返回规则源的原始文本（未解析）：优先读本地缓存；
-// 缓存不存在时现场拉取一次（成功则写缓存）。供 API 展示原始内容用。
+// Content 返回适合管理界面阅读的规则源内容。
+//
+// 参数：
+//   - ctx: context.Context，控制无缓存时现场拉取的取消与超时生命周期。
+//   - ru: config.RuleURL，包含规则源名称和上游 URL。
+//   - stateDir: string，规则源原始响应缓存所在的状态目录。
+//
+// 返回值：
+//   - []byte：普通规则源保持上游原文；整体 Base64 编码且可识别为 AutoProxy/gfwlist
+//     时返回解码后的原文，方便 Web 和 CLI 直接展示。
+//   - error：缓存不存在且现场拉取失败时返回包含规则源名称的错误。
+//
+// 错误情况：
+// 缓存读取失败会降级为现场拉取；拉取成功后的缓存写入失败不阻断展示。缓存始终保留
+// 上游原始字节，避免改变 Parse 的输入契约；解码只发生在返回展示内容的最后一步。
 func Content(ctx context.Context, ru config.RuleURL, stateDir string) ([]byte, error) {
 	if body, err := os.ReadFile(cachePath(stateDir, ru.Name)); err == nil {
-		return body, nil
+		return normalizeContentForDisplay(body), nil
 	}
 	body, err := httpGet(ctx, ru.URL)
 	if err != nil {
 		return nil, fmt.Errorf("尚未拉取过规则源 %s，现场拉取也失败: %w", ru.Name, err)
 	}
 	_ = writeCache(stateDir, ru.Name, body)
-	return body, nil
+	return normalizeContentForDisplay(body), nil
+}
+
+// normalizeContentForDisplay 把可确认的整体 Base64 gfwlist 转换为可读原文。
+//
+// 参数：
+//   - body: []byte，从上游或缓存读取的原始响应字节。
+//
+// 返回值：
+//   - []byte：识别为 AutoProxy/gfwlist 时返回解码结果，否则原样返回 body。
+//
+// 错误情况：
+// Base64 无效、解码内容不像 gfwlist 或普通规则文本时不报错并保持原文。这样既不会
+// 把普通规则源误改写，也能让展示识别与 Parse 使用完全相同的格式判定规则。
+func normalizeContentForDisplay(body []byte) []byte {
+	text := strings.TrimSpace(string(body))
+	decoded, ok := tryBase64(text)
+	if !ok || !looksLikeGFWList(decoded) {
+		return body
+	}
+	return []byte(decoded)
 }
 
 // Parse 按内容自动识别格式并解析为 mihomo 规则行（去重、保序）。

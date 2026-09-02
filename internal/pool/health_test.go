@@ -177,3 +177,62 @@ func TestCheckConcurrencyDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckBuildsDialerProxyCandidates 验证首次加载前不会直接拨测链式节点，而是
+// 根据已完成测速的上游节点建立候选状态，供应用层加载完整 mihomo 代理表。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：上游可用时链式节点未进入候选、上游不可用时仍被放行，或循环引用
+// 未被拒绝时测试失败。
+func TestCheckBuildsDialerProxyCandidates(t *testing.T) {
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	exit := socksNode("出口", startSocks5Server(t))
+	entry := socksNode("入口", 2)
+	entry.Mapping["dialer-proxy"] = "出口"
+	Check(context.Background(), []*node.Node{entry, exit}, httpSrv.URL, 5*time.Second, 2)
+	if !exit.Alive || !entry.Alive {
+		t.Fatalf("有效链路应进入候选状态: entry=%+v exit=%+v", entry, exit)
+	}
+	if entry.Delay != exit.Delay {
+		t.Fatalf("链式候选应继承上游延迟: entry=%d exit=%d", entry.Delay, exit.Delay)
+	}
+
+	deadExit := socksNode("失效出口", 1)
+	deadEntry := socksNode("失效入口", 2)
+	deadEntry.Mapping["dialer-proxy"] = "失效出口"
+	Check(context.Background(), []*node.Node{deadEntry, deadExit}, httpSrv.URL, time.Second, 2)
+	if deadEntry.Alive || deadEntry.FailReason == "" {
+		t.Fatalf("上游失效时链式节点必须不可用并给出原因: %+v", deadEntry)
+	}
+
+	cycleA := socksNode("循环 A", 2)
+	cycleB := socksNode("循环 B", 3)
+	cycleA.Mapping["dialer-proxy"] = "循环 B"
+	cycleB.Mapping["dialer-proxy"] = "循环 A"
+	Check(context.Background(), []*node.Node{cycleA, cycleB}, httpSrv.URL, time.Second, 2)
+	if cycleA.Alive || cycleB.Alive {
+		t.Fatalf("循环 dialer-proxy 不得进入候选: A=%+v B=%+v", cycleA, cycleB)
+	}
+
+	missing := socksNode("缺少依赖", 2)
+	missing.Mapping["dialer-proxy"] = "不存在的节点"
+	Check(context.Background(), []*node.Node{missing}, httpSrv.URL, time.Second, 2)
+	if missing.Alive || missing.FailReason == "" {
+		t.Fatalf("未知链路目标不得进入候选: %+v", missing)
+	}
+
+	groupEntry := socksNode("分组入口", 2)
+	groupEntry.Mapping["dialer-proxy"] = "上游策略组"
+	Check(context.Background(), []*node.Node{groupEntry}, httpSrv.URL, time.Second, 2, "上游策略组")
+	if !groupEntry.Alive {
+		t.Fatalf("已配置策略组应允许进入候选: %+v", groupEntry)
+	}
+}

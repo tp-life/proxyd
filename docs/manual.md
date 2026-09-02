@@ -22,7 +22,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
         └──────────────────────────────────────────────────────────────────────┘
 
   管理面：
-    http://127.0.0.1:19091/   Web 控制台 + proxyd 自有 API（订阅管理、映射表、模式切换）
+    http://127.0.0.1:19091/   React Web 控制台 + proxyd 自有 API（订阅管理、映射表、模式切换）
     http://127.0.0.1:19090    mihomo external-controller（兼容 metacubexd / yacd 面板）
 ```
 
@@ -53,7 +53,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 **去重与过滤**：
 
 - 多订阅的节点按"协议+地址+端口+凭证"去重；同名节点自动改名（追加订阅名）
-- `exclude` 配置项按节点名正则过滤机场信息节点（如"到期""剩余流量"），默认建议：`到期|剩余流量|套餐|官网|订阅`
+- `include` / `exclude` 按节点名正则过滤：非空 include 先保留匹配节点，再由 exclude 剔除匹配项；exclude 默认建议 `到期|剩余流量|套餐|官网|订阅`
 
 ## 三、入门（快速开始）
 
@@ -62,7 +62,10 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 从 Release 下载对应平台压缩包解压，或源码编译：
 
 ```sh
+make            # 一次性完整构建：Web → internal/api/dist → bin/proxyd
+make all        # 与 make 等价，适合显式写入构建脚本或 CI
 make build      # 产出 bin/proxyd（单文件，无外部依赖）
+make web        # 仅重建 Web 控制台 embed 产物（internal/api/dist）
 ```
 
 ### 最快启动
@@ -112,6 +115,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd status` | 运行中显示 pid、主端口/映射区间/auto-port、Web 地址与 API 健康状态 |
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
+| `proxyd tun [-c 配置] on\|off\|status` | 开关/查看 TUN 模式及当前进程权限（操作运行中实例） |
 | `proxyd autostart [-c 配置] on\|off\|status` | 开关/查看开机自启（flag 需放在操作前） |
 
 ### 本地管理命令（CLI ↔ Web 对齐）
@@ -128,12 +132,15 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
 | `proxyd rules list\|add "<规则>"\|del <下标>` | 自定义规则 |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
-| `proxyd groups list\|add <名> <端口> <节点名...>\|del <名>` | 节点分组 |
+| `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组 |
+| `proxyd logs [--tail N] [--level debug\|info\|warning\|error]` | 查看运行中实例的内存日志尾部 |
+| `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听 |
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
 | `proxyd auto-port <端口\|off>` | 设置/关闭自动选优端口；无参查看 |
 | `proxyd main-auto [on\|off]` | 开关「主端口使用最优节点」（跳过规则）；无参查看 |
 | `proxyd main-node [节点key\|off]` | 设置主端口固定节点（跳过规则、直达该节点）；无参查看，`off` 清除 |
 | `proxyd main-port <端口>` | 修改主端口（热更新；系统代理开启时自动重绑）；无参查看 |
+| `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令 |
 
 ### 开机自启
 
@@ -145,48 +152,81 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 `off` 移除对应项（不停止当前运行中的实例）；`status` 检测自启项是否存在。不支持的平台返回明确错误。
 
+### 配置备份与恢复
+
+Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `secret`、订阅/规则 URL 的用户信息和敏感查询参数，并整体隐藏编码型分享链接，适合排障分享；“完整备份”保留全部凭据，只应存放在可信位置。导入只接受不超过 1 MiB 的 YAML，并复用启动时的迁移、默认值和完整配置校验。前端会先调用预览接口展示新增、删除和变化项；用户确认时携带预览摘要，后端只有在文件内容与预览完全一致时才通过临时文件加 rename 原子替换当前配置文件，避免“预览后文件被替换”的竞态。
+
+导入不会在当前 HTTP 请求中热替换运行配置。备份可能同时改变 `api-listen`、`state-dir`、监听端口和 TUN 权限要求，局部热更新会造成磁盘配置与运行状态不一致，因此接口明确返回 `restart_required: true`，必须重启 proxyd 后整份配置才生效。校验或写入失败时原配置保持不变。
+
+### 版本检查
+
+`check-updates` 默认 `true`。proxyd 启动后在后台请求官方 GitHub 仓库的 latest release，使用八秒 HTTP 超时并把结果缓存在应用内存；Web 的 overview 轮询只读取缓存，不会重复访问 GitHub。发现高于当前构建版本的稳定版时，概览页显示 Release 链接；请求失败、限流或 JSON 异常只记录状态和日志，不影响 API、代理核心或订阅刷新。
+
+当前版本由构建时 `ldflags` 注入。正式 `vX.Y.Z` tag 和 `git describe` 版本可比较；`dev` 或裸提交哈希没有可靠版本基线，会显示“当前构建版本不可比较”并跳过请求，避免字符串比较误报。可在配置写 `check-updates: false`，也可在 Web 设置页关闭。
+
 ## 五、日常管理（Web 控制台）
 
-浏览器打开 **http://127.0.0.1:19091/**，顶部导航切换五个面板（扁平化设计，内容居中限宽，窄屏自动换行、表格横向可滚动）：
+浏览器打开 **http://127.0.0.1:19091/**，React 控制台使用按任务分组的侧边栏信息架构（窄屏自动收起，数据表在手机上转换为带字段标签的纵向条目）：
 
-- **概览**：状态摘要（主端口/auto-port/节点/映射统计）+ 已映射端口 chip 网格（节点映射端口折叠为区间如 `42000-42051`，主端口/优选/分组端口逐个展示，按端口升序）+ 全部设置——规则 / 全局 / 直连 模式切换（即时生效并写入配置文件）；主端口修改（热更新，系统代理开启时自动重绑）；「主端口使用最优节点」开关；「固定节点」下拉（主端口直达指定节点，main-auto 开启时禁用；所选节点失效时提示已回退规则模式）；节点映射端口区间（保存后立即重新分配并热更新，不重新测速）；自动选优端口开关与端口号；系统代理开关；开机自启开关（布尔项均为 toggle 开关样式）
-- **订阅与节点**：面板顶部是「手动测速」「刷新订阅」操作区（带 loading 状态，自动轮询结果）；其下是「手动节点」管理区（添加/删除自有代理节点并展示健康状态）；再往下是一排订阅快捷导航标签（名称 + 可用/总数，含「手动节点」一项），点击标签平滑滚动定位并展开对应订阅（短暂高亮，「全部」恢复）；再往下可添加/删除订阅（增删自动写入配置文件并触发后台刷新；不允许删除最后一个来源）；每个订阅可展开/折叠查看其节点（名称、类型、端口、延迟按快慢着色、状态与失败原因，失效节点置灰但可见），标题行右侧有针对该订阅的「测速」（只检测该订阅节点）与「刷新」（只重新拉取该订阅）按钮（同步等待结果并 toast 提示）；每个订阅（含手动节点表）有独立排序控件（默认/延迟升序/延迟降序，失效/未测速排最后，仅显示顺序、内存态不持久化）；节点表「操作」列可一键「设为主端口」（等价 `main-node`，失效或未分配端口的节点按钮置灰，当前主端口行显示标识）
-- **端口映射**：端口 → 节点 → 延迟 → 状态；点击端口号复制代理地址（`http://127.0.0.1:端口`）；左上角排序控件可在默认/按延迟排序间切换（仅显示顺序，内存态）
-- **自定义规则**：追加式规则逐条增删（前置到内置规则之前，格式 `类型,内容,策略`，策略可填 DIRECT / REJECT / 节点名 / 分组名）；规则 URL 管理（添加/删除、显示条目数与拉取状态；「查看内容」可折叠查看原始文本，优先读本地缓存、无缓存时现场拉取一次）
-- **节点分组**：勾选节点（失效节点也可勾选，恢复后自动加入；已被其他分组占用的节点右侧显示组名 tag）+ 填名称/端口即可添加分组；待选列表可用上方排序控件按延迟排序（仅显示顺序，内存态）；该端口固定走组内 url-test 自动选优出口
-- 页面每 10 秒自动刷新数据
+- **概览**：实时上下行速率条 + 状态摘要（主端口/auto-port/节点/映射统计）+ 入口端口 chip（主端口、auto-port、分组端口、节点映射区间）+ 规则 / 全局 / 直连 模式切换 + 系统代理快捷开关；发现新版时显示 GitHub Release 链接
+- **代理节点**：全局搜索并按来源、协议、状态筛选节点；表格展示名称、来源、协议、稳定分配端口、延迟与失败原因，可添加/删除手动节点并设置主端口固定节点
+- **订阅管理**：以卡片管理订阅的新增、编辑、启停、单独刷新与测速；禁用订阅时保留本地缓存，重新启用后可继续刷新
+- **代理入口**：集中展示主端口、自动选优端口、分组端口与逐节点稳定分配；支持一键复制地址，并独立热开关 `port-mapping`
+- **策略分组**：展示健康摘要、复制分组端口、新增/编辑/删除分组；可选择类型（url-test/fallback/load-balance）并按手选节点或订阅来源配置成员
+- **访问规则**：搜索、新增、编辑、删除和调整自定义规则顺序；规则 URL 保持只读内容视图并可展开查看可读原文（优先缓存，无缓存时现场拉取；整体 Base64 gfwlist 自动解码）
+- **运行日志**：查看进程内约 1000 条环形缓冲日志，支持搜索、暂停刷新、复制和下载
+- **活动连接**：仅在页面打开且未暂停时每 2 秒读取 mihomo 连接快照；按域名/IP/进程/出口链搜索，查看入口端口、累计流量与开始时间，并可关闭单条或全部连接
+- **系统设置**：使用页内分区导航管理主端口、`main-auto`、`main-node`、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN、系统代理、开机自启，以及带差异预览的配置导入
+- 页面每 10 秒自动刷新数据；`⌘K` / `Ctrl+K` 命令面板支持跳页、刷新、测速和模式切换
 
 ### 自有 API（`api-listen`，默认 19091）
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合、手动节点、端口映射、全部节点（含类型/失败原因）、自定义规则、节点分组、系统代理与开机自启状态 |
+| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因）、自定义规则、节点分组、TUN 权限、系统代理与开机自启状态 |
+| `GET /api/traffic` | 代理 mihomo `/traffic` 流，返回 NDJSON 实时速率；后端自动附加 `secret` 鉴权 |
+| `GET /api/connections` | 代理 mihomo `/connections` 快照，返回活动连接、累计上下行和内存占用；后端自动附加 `secret` 鉴权 |
+| `DELETE /api/connections/{id}` | 关闭指定活动连接；连接 ID 作为单个安全路径段转发 |
+| `DELETE /api/connections` | 关闭全部活动连接 |
 | `POST /api/mode` `{"mode":"global"}` | 切换代理模式（rule/global/direct，持久化） |
 | `POST /api/refresh` | 触发一轮完整刷新：拉订阅 + 规则源 + 测速（异步，返回 202） |
 | `POST /api/test` | 手动测速：只对现有节点做延迟/可用性检测，不拉订阅（异步，返回 202） |
 | `POST /api/subscriptions` `{"url":"..."}` | 添加订阅（name 可选，默认按域名命名） |
+| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式或启用状态；改名时同步修正引用该订阅的策略分组 |
 | `DELETE /api/subscriptions/{name}` | 删除订阅 |
 | `POST /api/subscriptions/{name}/refresh` | 只刷新该订阅：重新拉取 + 只检测其节点 + 热更新（同步，最长 3 分钟，失败直接返回原因） |
 | `POST /api/subscriptions/{name}/test` | 只对该订阅的现有节点测速（同步，不拉订阅） |
 | `GET /api/manual-nodes` | 列出手动节点（index/url/解析出的名称） |
 | `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台刷新） |
 | `DELETE /api/manual-nodes/{index}` | 按下标删除手动节点 |
+| `POST /api/port-mapping` `{"enabled":false}` | 热开关逐节点端口映射；关闭时保留稳定分配，核心不再生成对应 listener |
 | `POST /api/port-range` `{"range":"43000-43200"}` | 修改节点映射端口区间（同步：重新分配端口 + 热更新，不重新测速） |
 | `POST /api/auto-port` `{"port":41998}` | 开启自动选优端口；`{"port":0}` 关闭（持久化 + 热更新） |
 | `POST /api/main-auto` `{"enabled":true}` | 开关「主端口使用最优节点」（主端口跳过规则、固定走 AUTO 组；持久化 + 热更新） |
 | `POST /api/main-node` `{"node":"<节点key>"}` | 设置主端口固定节点（跳过规则、直达该节点；空串清除；持久化 + 热更新） |
 | `POST /api/main-port` `{"port":42999}` | 修改主端口（校验 1-65535 且不与 api 端口/节点区间/分组/auto-port 冲突；持久化 + 热更新；系统代理开启时自动重绑） |
 | `POST /api/system-proxy` `{"enabled":true}` | 开关系统代理（指向主端口，持久化） |
+| `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限以及修复指引 |
+| `POST /api/tun` `{"enabled":true}` | 权限检查后热开关 TUN；失败恢复旧配置，成功后持久化 |
+| `POST /api/dns-preset` `{"preset":"fake-ip"}` | 切换 `off/fake-ip/redir-host` 预设并热更新；手写 `dns:` 存在时仍优先生效 |
+| `POST /api/update-check` `{"enabled":false}` | 开关启动版本检查并持久化；重新开启时立即异步检查一次 |
+| `GET /api/config/export` | 下载默认打码的 YAML；加 `?mask_tokens=false` 下载含真实凭据的完整备份 |
+| `POST /api/config/import/preview` | 上传不超过 1 MiB 的 YAML，仅校验并返回变更摘要、警告与内容摘要，不写磁盘 |
+| `POST /api/config/import` | 携带预览返回的 `X-Proxyd-Config-Digest` 确认导入；摘要一致后原子替换配置文件，返回 `restart_required: true` |
 | `POST /api/autostart` `{"enabled":true}` | 注册/移除开机自启项（OS 级状态，不写配置文件；overview 实时反映） |
 | `GET /api/rules` | 列出自定义规则 |
 | `POST /api/rules` `{"rule":"DOMAIN-SUFFIX,example.com,DIRECT"}` | 追加自定义规则（前置到内置规则之前） |
+| `PUT /api/rules/{index}` `{"rule":"..."}` | 编辑指定自定义规则并热更新 |
+| `POST /api/rules/reorder` `{"from":2,"to":0}` | 调整自定义规则优先级并热更新 |
 | `DELETE /api/rules/{index}` | 按下标删除自定义规则 |
 | `GET /api/rule-urls` | 列出规则源（含条目数与拉取状态） |
 | `POST /api/rule-urls` `{"name":"gfwlist","url":"https://..."}` | 新增规则源（持久化 + 立即拉取 + 热更新） |
 | `DELETE /api/rule-urls/{name}` | 删除规则源 |
-| `GET /api/rule-urls/{name}/content` | 规则源原始文本（text/plain；优先缓存，无缓存现场拉取一次并写缓存；源不存在/拉取失败返回 404） |
+| `GET /api/rule-urls/{name}/content` | 规则源可读文本（text/plain；整体 Base64 gfwlist 自动解码；优先缓存，无缓存现场拉取一次并写缓存；源不存在/拉取失败返回 404） |
 | `GET /api/groups` | 列出节点分组 |
-| `POST /api/groups` `{"name":"hk","port":43000,"nodes":["香港 01"]}` | 新增节点分组（组内 url-test 自动选优） |
+| `GET /api/logs?tail=200&level=error` | 返回内存日志尾部；`level` 可选 `debug/info/warning/error` |
+| `POST /api/groups` `{"name":"hk","port":43000,"type":"fallback","subscription":"airport-a"}` | 新增节点分组；`type` 支持 `url-test/fallback/load-balance`，成员可来自 `nodes` 或 `subscription` |
+| `PUT /api/groups/{name}` | 编辑分组端口、类型与成员来源；为保护 `dialer-proxy` 引用，暂不支持在线改名 |
 | `DELETE /api/groups/{name}` | 删除节点分组 |
 | `GET /ports` | 端口映射表（兼容旧接口） |
 
@@ -203,6 +243,29 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 - **配置**：`system-proxy: true` 时 `serve` 启动即自动应用，**进程退出（SIGINT/SIGTERM）时自动恢复关闭**；异常退出（kill -9 等）时用 `proxyd sysproxy off` 手动恢复
 
 实现：macOS 用 `networksetup`（遍历所有活动网络服务）；Linux 用 gsettings（GNOME，best-effort）；Windows 改注册表 `HKCU\...\Internet Settings`（best-effort）。不支持的平台返回明确错误。
+
+### TUN 模式
+
+TUN 由 mihomo 创建虚拟网卡并配置系统路由，可接管不支持 HTTP/SOCKS 代理设置的应用以及 UDP 流量。它与系统代理是两个独立入口：`system-proxy` 只修改操作系统的 HTTP/HTTPS/SOCKS 代理设置，TUN 则在网络层接管流量；通常开启 TUN 后无需再开系统代理，同时开启也不会改变规则模式与节点选择逻辑。
+
+```yaml
+tun:
+  enable: false
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack:
+    - 0.0.0.0:53
+  # strict-route: true        # 其余 mihomo TUN 字段会原样保留并透传
+```
+
+使用 Web 设置页或 `proxyd tun [-c 配置] on|off|status` 热切换。开启流程先检查权限，再让 mihomo 热更新，并读取实际 listener 状态二次确认；生成、应用或实际启用失败会恢复旧 TUN 配置。配置文件启动时已经是 `enable: true` 但权限不足，proxyd 会在启动 API 和修改路由之前退出并打印修复指引。
+
+- **macOS**：进程必须以 root 运行。停止普通实例后用 `sudo proxyd serve -c <配置文件>` 或 `sudo proxyd start -c <配置文件>` 启动。
+- **Linux**：可直接以 root 运行，或对当前二进制执行 `sudo setcap cap_net_admin=+ep /path/to/proxyd` 后重启。替换/升级二进制会丢失 capability，需要重新执行 `setcap`。
+- **Windows**：必须从“以管理员身份运行”的 PowerShell/终端启动 proxyd；普通登录启动项不会自动提升权限。
+
+`dns-hijack` 只负责把指定 DNS 流量交给 mihomo，实际解析策略由顶层 DNS 配置决定。`dns-preset` 提供 `off|fake-ip|redir-host` 三档，TUN 开启且未配置 DNS 时 Web 会建议 `fake-ip`；手写 `dns:` 会完整透传并拥有最高优先级。`off` 且没有手写 DNS 时沿用系统 DNS，是否劫持以及解析效果取决于系统和 mihomo 当前配置。
 
 ## 六、规则与代理模式
 
@@ -237,16 +300,40 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 合并顺序：custom-rules 最前 → 规则 URL 导入规则 → 内置规则。全部来源合并去重后上限 10000 条，超出截断打日志。
 
-**节点分组端口**（`groups`）：把若干节点聚合成一个 url-test 组并绑定到指定端口，该端口固定走组内延迟最低的成员：
+**节点分组端口**（`groups`）：把若干节点聚合成一个 mihomo proxy-group 并绑定到指定端口，该端口固定走该组；`type` 可选 `url-test`（自动测速择优）、`fallback`（按顺序故障转移）、`load-balance`（负载均衡）。旧配置没有 `type` 时默认迁移为 `url-test`，新 UI 默认推荐 `fallback`：
 
 ```yaml
 groups:
   - name: hk                # 组名（不能与节点名或 AUTO/PROXY/DIRECT 等保留名冲突）
     port: 43000             # 不能与主端口、api 端口、port-range 区间、auto-port 或其他分组冲突
+    type: fallback          # url-test | fallback | load-balance；旧配置缺省为 url-test
     nodes: ["香港 01", "香港 02"]  # 节点名列表，与当前可用节点取交集
+
+  - name: airport-a-auto
+    port: 43001
+    type: url-test
+    subscription: airport-a # 成员动态取该订阅当前可用节点，刷新后自动跟随
 ```
 
-成员取 `nodes` 与当前可用节点的交集——刷新后节点集合变化时分组自动收缩，交集为空则该组本轮跳过（日志有提示）。分组与按节点映射端口完全并存、互不影响。
+成员来源二选一：配置 `nodes` 时取节点名与当前可用节点的交集；配置 `subscription` 时取该订阅当前可用节点，`manual` 表示手动节点来源。刷新后节点集合变化时分组自动收缩，成员为空则该组本轮跳过（日志有提示）。分组与按节点映射端口完全并存、互不影响。
+
+**链式代理**（订阅 Clash YAML 节点的 `dialer-proxy`）：proxyd 保留节点映射中的 mihomo 标准字段，可让一个代理节点通过另一个节点或 proxyd 策略组建立连接。订阅合并发生同名重命名时会同步修正同订阅内的引用；被引用的健康节点即使因端口范围容量限制没有独立本地入口，也会作为 proxy-only 出站进入 mihomo 配置。
+
+```yaml
+# 以下片段位于订阅返回的 Clash YAML `proxies:` 中，而不是 proxyd 顶层配置。
+proxies:
+  - name: 链路出口
+    type: socks5
+    server: 1.2.3.4
+    port: 1080
+  - name: 链路入口
+    type: socks5
+    server: 5.6.7.8
+    port: 1080
+    dialer-proxy: 链路出口
+```
+
+链式节点采用两阶段健康检查：先验证普通上游与依赖关系，加载完整 mihomo 代理表后再对链式节点执行端到端 URLTest；完整链路失败时不会保留最终映射端口。`dialer-proxy` 也可以填写 proxyd `groups[].name`，用于通过 `fallback`、`url-test` 或 `load-balance` 上游组拨号。mihomo 已移除旧 `relay` 组，因此 proxyd 不再生成该类型，使用节点级 `dialer-proxy` 是当前替代方案。
 
 **规则配置**（配置文件中，Clash 语法原样支持）：
 
@@ -294,7 +381,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 手动节点（自有代理 URL/分享链接） | `manual-nodes` |
 | 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `main-auto` / `main-node` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
-| 系统代理开关、排除正则、周期等 | `system-proxy` / `exclude` / `refresh-interval` / ... |
+| 系统代理开关、节点正则过滤、周期等 | `system-proxy` / `include` / `exclude` / `refresh-interval` / ... |
 
 **状态目录**（`state-dir`，默认 `~/.local/state/proxyd`）——运行时状态，删了只会丢缓存/快照，不影响配置：
 
@@ -332,7 +419,8 @@ refresh-interval: 24h
 health-interval: 5m
 health-url: http://www.gstatic.com/generate_204
 health-timeout: 5s
-exclude: "到期|剩余流量"
+include: "香港|日本"          # 可选：只保留匹配节点
+exclude: "到期|剩余流量"     # include 之后再排除
 
 mode: rule                  # rule | global | direct
 rules: [...]
@@ -341,10 +429,15 @@ custom-rules:               # 可选，追加式自定义规则，前置到 rule
 rule-urls:                  # 可选，远程规则源（mihomo 文本 / gfwlist），内容不写回配置
   - name: gfwlist
     url: https://...
-groups:                     # 可选，节点分组端口（组内 url-test 自动选优）
+groups:                     # 可选，节点分组端口（支持 url-test/fallback/load-balance）
   - name: hk
     port: 43000
+    type: fallback
     nodes: ["香港 01"]
+  - name: airport-a-auto
+    port: 43001
+    type: url-test
+    subscription: airport-a
 external-controller: 127.0.0.1:19090   # mihomo API
 api-listen: 127.0.0.1:19091            # Web 控制台
 # secret: ...             # mihomo API 鉴权

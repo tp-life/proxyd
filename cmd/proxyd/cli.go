@@ -20,6 +20,7 @@ import (
 	"proxyd/internal/api"
 	"proxyd/internal/app"
 	"proxyd/internal/config"
+	"proxyd/internal/subscribe"
 )
 
 // parseCFlag 解析通用的 -c 配置文件 flag（flag 需放在位置参数之前）。
@@ -175,9 +176,10 @@ func cmdSubs(args []string) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tURL\tNODES(alive/total)")
+		fmt.Fprintln(tw, "NAME\tURL\tNODES(alive/total)\tUSAGE\tEXPIRE")
 		for _, s := range ov.Subs {
-			fmt.Fprintf(tw, "%s\t%s\t%d/%d\n", s.Name, s.URL, s.Alive, s.Total)
+			usage, expire := formatSubUserInfo(s.UserInfo)
+			fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%s\t%s\n", s.Name, s.URL, s.Alive, s.Total, usage, expire)
 		}
 		_ = tw.Flush()
 		return nil
@@ -203,6 +205,65 @@ func cmdSubs(args []string) error {
 	default:
 		return fmt.Errorf("未知操作 %q，用法: proxyd subs list|add <name> <url>|del <name>", sub)
 	}
+}
+
+// formatSubUserInfo 把订阅用量信息格式化为 CLI 列表字段。
+//
+// 参数：
+//   - info: *subscribe.UserInfo，API overview 返回的订阅用量；nil 表示暂无数据。
+//
+// 返回值：
+//   - usage: string，`已用/总量` 或 `-`。
+//   - expire: string，到期日期（本地时区 YYYY-MM-DD）或 `-`。
+//
+// 错误情况：
+//   - expire 为 0 或非法时返回 `-`；字节数缺失时尽量展示已知字段。
+func formatSubUserInfo(info *subscribe.UserInfo) (usage, expire string) {
+	if info == nil {
+		return "-", "-"
+	}
+	used := info.Used()
+	switch {
+	case info.Total > 0:
+		usage = fmt.Sprintf("%s/%s", formatBytes(used), formatBytes(info.Total))
+	case used > 0:
+		usage = formatBytes(used)
+	default:
+		usage = "-"
+	}
+	if info.Expire > 0 {
+		expire = time.Unix(info.Expire, 0).Format("2006-01-02")
+	} else {
+		expire = "-"
+	}
+	return usage, expire
+}
+
+// formatBytes 把字节数格式化为适合命令行阅读的二进制单位。
+//
+// 参数：
+//   - n: int64，字节数。
+//
+// 返回值：
+//   - string，格式化后的容量文本。
+//
+// 错误情况：
+//   - 负数按 0B 展示，避免上游异常值污染输出。
+func formatBytes(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	v := float64(n)
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%dB", n)
+	}
+	return fmt.Sprintf("%.1f%s", v, units[i])
 }
 
 func cmdNodes(args []string) error {
@@ -434,9 +495,17 @@ func cmdGroups(args []string) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tPORT\tNODES")
+		fmt.Fprintln(tw, "NAME\tPORT\tTYPE\tSUBSCRIPTION\tNODES")
 		for _, g := range groups {
-			fmt.Fprintf(tw, "%s\t%d\t%s\n", g.Name, g.Port, strings.Join(g.Nodes, ","))
+			subscription := g.Subscription
+			if subscription == "" {
+				subscription = "-"
+			}
+			nodes := strings.Join(g.Nodes, ",")
+			if nodes == "" {
+				nodes = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", g.Name, g.Port, g.Type, subscription, nodes)
 		}
 		_ = tw.Flush()
 		if len(groups) == 0 {
@@ -444,18 +513,23 @@ func cmdGroups(args []string) error {
 		}
 		return nil
 	case "add":
-		if len(rest) < 4 {
-			return fmt.Errorf("用法: proxyd groups add [-c 配置] <name> <port> <节点名...>")
+		addFS := flag.NewFlagSet("groups add", flag.ExitOnError)
+		groupType := addFS.String("type", config.GroupTypeFallback, "分组类型（url-test|fallback|load-balance）")
+		subscription := addFS.String("subscription", "", "按订阅名动态生成分组成员")
+		_ = addFS.Parse(rest[1:])
+		items := addFS.Args()
+		if len(items) < 2 || (*subscription == "" && len(items) < 3) {
+			return fmt.Errorf("用法: proxyd groups add [-c 配置] [--type fallback|url-test|load-balance] [--subscription 订阅名] <name> <port> [节点名...]")
 		}
-		port, err := strconv.Atoi(rest[2])
+		port, err := strconv.Atoi(items[1])
 		if err != nil {
-			return fmt.Errorf("端口必须是整数: %q", rest[2])
+			return fmt.Errorf("端口必须是整数: %q", items[1])
 		}
 		if err := c.do(http.MethodPost, "/api/groups",
-			config.NodeGroup{Name: rest[1], Port: port, Nodes: rest[3:]}, nil); err != nil {
+			config.NodeGroup{Name: items[0], Port: port, Type: *groupType, Subscription: *subscription, Nodes: items[2:]}, nil); err != nil {
 			return err
 		}
-		fmt.Printf("分组 %q 已添加（端口 %d）\n", rest[1], port)
+		fmt.Printf("分组 %q 已添加（端口 %d）\n", items[0], port)
 		return nil
 	case "del":
 		if len(rest) != 2 {
@@ -467,8 +541,43 @@ func cmdGroups(args []string) error {
 		fmt.Printf("分组 %q 已删除\n", rest[1])
 		return nil
 	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd groups list|add <name> <port> <节点...>|del <name>", sub)
+		return fmt.Errorf("未知操作 %q，用法: proxyd groups list|add [--type 类型] [--subscription 订阅名] <name> <port> [节点...]|del <name>", sub)
 	}
+}
+
+// cmdLogs 查看运行中实例的内存日志尾部。
+//
+// 参数：
+//   - args: []string，支持 `-c`、`--tail`、`--level`。
+//
+// 返回值：
+//   - error，API 不可达或后端返回错误时返回。
+//
+// 错误情况：
+//   - 实例未运行时 newAPIClient/do 会给出“请先 proxyd start/serve”的提示。
+//   - level 未知不会本地拦截，交给后端过滤为空结果。
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	cfgFile := fs.String("c", config.DefaultPath(), "配置文件路径")
+	tail := fs.Int("tail", 200, "返回最近 N 条日志")
+	level := fs.String("level", "", "按日志等级过滤（debug|info|warning|error）")
+	_ = fs.Parse(args)
+	c, err := newAPIClient(*cfgFile)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/api/logs?tail=%d", *tail)
+	if *level != "" {
+		path += "&level=" + url.QueryEscape(*level)
+	}
+	var out api.LogsResponse
+	if err := c.do(http.MethodGet, path, nil, &out); err != nil {
+		return err
+	}
+	for _, entry := range out.Entries {
+		fmt.Println(entry.Line)
+	}
+	return nil
 }
 
 func cmdPortRange(args []string) error {
@@ -544,6 +653,107 @@ func parseOnOff(s string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("无效参数 %q（on|off）", s)
+}
+
+// cmdTun 通过运行中实例的 API 查看或切换 TUN 模式。
+//
+// 参数：
+//   - args: []string，支持 `-c <配置文件>` 和一个 `on|off|status` 位置参数。
+//
+// 返回值：
+//   - error：参数无效、实例未运行、权限不足或热更新失败时返回错误。
+//
+// 错误情况：开启 TUN 需要运行中的 proxyd 进程具备平台权限；服务端返回的 sudo、
+// setcap 或管理员指引会由 apiClient 原样传递到终端。
+func cmdTun(args []string) error {
+	cfgFile, rest := parseCFlag("tun", args)
+	if len(rest) != 1 {
+		return fmt.Errorf("用法: proxyd tun [-c 配置] on|off|status")
+	}
+	c, err := newAPIClient(cfgFile)
+	if err != nil {
+		return err
+	}
+
+	var status app.TUNStatus
+	if strings.EqualFold(rest[0], "status") {
+		if err := c.do(http.MethodGet, "/api/tun", nil, &status); err != nil {
+			return err
+		}
+		state := "关闭"
+		if status.Enabled && status.Active {
+			state = "开启（已生效）"
+		} else if status.Enabled {
+			state = "配置已开启，但实际未生效（请检查日志）"
+		}
+		fmt.Printf("TUN：%s（平台 %s）\n", state, status.Platform)
+		if !status.Allowed && status.Permission != "" {
+			fmt.Printf("权限：不足\n指引：%s\n", status.Permission)
+		} else {
+			fmt.Println("权限：可用")
+		}
+		return nil
+	}
+
+	enabled, err := parseOnOff(rest[0])
+	if err != nil {
+		return err
+	}
+	if err := c.do(http.MethodPost, "/api/tun", map[string]bool{"enabled": enabled}, &status); err != nil {
+		return err
+	}
+	if enabled {
+		fmt.Printf("TUN 已开启并确认生效（%s，系统流量由 mihomo 接管）\n", status.Platform)
+	} else {
+		fmt.Println("TUN 已关闭（系统路由已由 mihomo 恢复）")
+	}
+	return nil
+}
+
+// cmdPortMapping 通过运行中实例的 API 查看或切换健康节点一对一端口映射。
+//
+// 参数：
+//   - args: []string，支持 `-c <配置文件>` 和一个可选的 `on|off|status` 位置参数；
+//     未提供位置参数时等价于 status。
+//
+// 返回值：
+//   - error：参数无效、实例未运行、mihomo 热更新或配置持久化失败时返回。
+//
+// 错误情况：服务端事务回滚失败会作为组合错误原样输出，提醒用户检查配置与实际监听。
+func cmdPortMapping(args []string) error {
+	cfgFile, rest := parseCFlag("port-mapping", args)
+	if len(rest) > 1 {
+		return fmt.Errorf("用法: proxyd port-mapping [-c 配置] [on|off|status]")
+	}
+	c, err := newAPIClient(cfgFile)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 || strings.EqualFold(rest[0], "status") {
+		ov, err := c.overview()
+		if err != nil {
+			return err
+		}
+		state := "关闭"
+		if ov.PortMappingEnabled {
+			state = "开启"
+		}
+		fmt.Printf("节点端口映射: %s（稳定分配 %d 个，当前监听 %d 个）\n", state, len(ov.PortAssignments), len(ov.Ports))
+		return nil
+	}
+	enabled, err := parseOnOff(rest[0])
+	if err != nil {
+		return err
+	}
+	if err := c.do(http.MethodPost, "/api/port-mapping", map[string]bool{"enabled": enabled}, nil); err != nil {
+		return err
+	}
+	if enabled {
+		fmt.Println("节点端口映射已开启，稳定分配的一对一监听已恢复")
+	} else {
+		fmt.Println("节点端口映射已关闭；主端口、自动端口、分组端口和稳定分配快照保持不变")
+	}
+	return nil
 }
 
 func cmdMainAuto(args []string) error {

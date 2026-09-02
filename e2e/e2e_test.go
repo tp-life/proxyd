@@ -347,14 +347,16 @@ func TestEndToEnd(t *testing.T) {
 	defer apiSrv.Shutdown(context.Background())
 	base := "http://" + cfg.APIListen
 
-	// GET / 返回内嵌控制台页面
+	// GET / 返回内嵌控制台页面。
+	// React/Vite 版入口 HTML 很薄，不能再用旧单文件 UI 的正文文案或页面体积
+	// 作为契约；这里检查 React 挂载点、ES module 和构建资源引用，确保 embed 入口完整。
 	resp, err := http.Get(base + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), "proxyd") || !strings.Contains(string(body), "/api/overview") {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `id="root"`) || !strings.Contains(string(body), `type="module"`) || !strings.Contains(string(body), "/assets/") {
 		t.Errorf("UI page looks wrong (%d bytes)", len(body))
 	}
 

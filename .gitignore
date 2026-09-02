@@ -1,3 +1,5 @@
 bin/
-dist/
+/dist/
+.gocache/
 proxyd.yaml
+web/node_modules/
