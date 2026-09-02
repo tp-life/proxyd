@@ -818,7 +818,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 				ov.Subs[i].Alive++
 			}
 		}
-		if cfg.MainNode != "" && !cfg.MainAuto && n.Alive && n.Key() == cfg.MainNode && portOf[n.Name] != 0 {
+		// main-node 生效与否只取决于节点可用且 main-auto 未开（与内核 resolveMainInbound 一致）；
+		// 节点是否有独立端口监听（portOf）受端口映射开关影响，与主端口固定 listener 无关，
+		// 不能作为生效条件，否则关闭映射时概览会误报「固定节点不可用/已回退」。
+		if cfg.MainNode != "" && !cfg.MainAuto && n.Alive && n.Key() == cfg.MainNode {
 			ov.MainNodeUp = true
 		}
 	}

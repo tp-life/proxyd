@@ -368,6 +368,17 @@
   .radix-data-table tbody tr {
     @apply transition-colors hover:bg-muted/45;
   }
+  /* 主端口固定节点行：主色描边 + 浅底色高亮，和整表 hover 共存 */
+  .radix-data-table tbody tr.main-node-row {
+    @apply bg-primary/10;
+    box-shadow: inset 3px 0 0 var(--primary);
+  }
+  .radix-data-table tbody tr.main-node-row:hover {
+    @apply bg-primary/15;
+  }
+  .radix-data-table tbody tr.main-node-row td:first-child {
+    @apply pl-3;
+  }
   .radix-data-table-sort {
     @apply flex size-full items-center gap-1.5 border-0 bg-transparent p-0 text-left text-inherit outline-none disabled:cursor-default;
   }
@@ -1039,6 +1050,14 @@
     @apply inline-flex items-center gap-1 border-0 bg-transparent p-0 font-mono text-sm font-semibold text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring;
   }
 
+  .copy-link:disabled {
+    @apply cursor-not-allowed text-muted-foreground no-underline;
+  }
+
+  .port-cell {
+    @apply inline-flex items-center gap-2;
+  }
+
   .subscription {
     @apply overflow-hidden rounded-xl border bg-card transition-all duration-300;
   }
@@ -1192,7 +1211,7 @@
   }
 
   .node-name {
-    @apply inline-block max-w-[360px] overflow-hidden text-ellipsis align-bottom font-medium text-foreground;
+    @apply inline-flex max-w-[360px] items-center gap-1.5 overflow-hidden text-ellipsis font-medium text-foreground;
   }
 
   .muted-row {

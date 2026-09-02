@@ -87,6 +87,7 @@ function normalizeWidth(width) {
  * - minColumnWidth: number，用户拖拽时允许的最小列宽。
  * - resizable: boolean，是否显示列宽拖拽手柄。
  * - className: string，容器附加样式。
+ * - getRowClassName: (row) => string，可选行附加 class（如主端口节点高亮）。
  *
  * 返回值说明：
  * 返回 Radix ScrollArea 包裹的语义化 table。
@@ -104,6 +105,7 @@ function Table({
   minColumnWidth = 80,
   resizable = false,
   className,
+  getRowClassName,
 }) {
   const [sort, setSort] = useState(null);
   const [widths, setWidths] = useState({});
@@ -238,7 +240,7 @@ function Table({
                 <td className="radix-data-table-empty" colSpan={Math.max(1, columns.length)}>{emptyState}</td>
               </tr>
             ) : rows.map((row, index) => (
-              <tr key={getRowId ? getRowId(row, index) : String(index)}>
+              <tr key={getRowId ? getRowId(row, index) : String(index)} className={getRowClassName?.(row) || undefined}>
                 {columns.map((column) => (
                   <td key={column.key} style={{ textAlign: column.align || "left" }}>{readCell(row, column)}</td>
                 ))}

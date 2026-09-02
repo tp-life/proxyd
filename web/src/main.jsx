@@ -375,6 +375,29 @@ function proxyURL(listen, port) {
 }
 
 /**
+ * proxyEnvCommands 生成指向指定端口的 shell 代理环境变量文本。
+ *
+ * 参数说明：
+ * - listen: string，监听地址；缺省按 127.0.0.1。
+ * - port: number，目标端口。
+ *
+ * 返回值说明：
+ * 返回多行 export 命令，可直接粘贴到终端。
+ *
+ * 可能的异常/错误情况：
+ * 无；纯字符串拼接。mixed 端口同时支持 HTTP 与 SOCKS5，http(s)_proxy 用 http scheme、
+ * all_proxy 用 socks5 scheme，覆盖常见 CLI 工具的读取习惯。
+ */
+function proxyEnvCommands(listen, port) {
+  const host = listen || "127.0.0.1";
+  return [
+    `export http_proxy=http://${host}:${port}`,
+    `export https_proxy=http://${host}:${port}`,
+    `export all_proxy=socks5://${host}:${port}`,
+  ].join("\n");
+}
+
+/**
  * pickFiniteNumber 从候选值中挑出第一个可用数字。
  *
  * 功能说明：
@@ -1340,21 +1363,27 @@ function App() {
    * - body: object，要发送的 JSON 请求体。
    * - message: string，成功后的提示。
    * - method: string，HTTP 方法，默认 POST；编辑资源时传 PUT。
+   * - signal: AbortSignal | undefined，可选取消信号；订阅保存等长耗时请求由调用方传入，
+   *   用户点击取消时中断等待（后端事务可能仍在收尾，但 UI 立即解锁）。
    *
    * 返回值说明：
-   * 成功返回 true，失败返回 false。
+   * 成功返回 true，失败或被取消返回 false。
    *
    * 可能的异常/错误情况：
-   * 后端校验失败、网络失败或 JSON 解析失败时 toast 错误并返回 false。
+   * 后端校验失败、网络失败或 JSON 解析失败时 toast 错误并返回 false；AbortError 视为用户主动取消，toast 提示「已取消」。
    */
   const postJSON = useCallback(
-    async (url, body, message, method = "POST") => {
+    async (url, body, message, method = "POST", signal) => {
       try {
-        await requestJSON(url, { method, body: JSON.stringify(body) });
+        await requestJSON(url, { method, body: JSON.stringify(body), signal });
         if (message) showToast(message);
         await load(true);
         return true;
       } catch (error) {
+        if (error?.name === "AbortError") {
+          showToast("已取消本次操作", "err");
+          return false;
+        }
         showToast(`操作失败：${error.message}`, "err");
         return false;
       }
@@ -1665,6 +1694,25 @@ function App() {
   }
 
   /**
+   * copyProxyEnv 复制指定端口的 shell 代理环境变量。
+   *
+   * 参数说明：
+   * - port: number，目标端口。
+   *
+   * 返回值说明：返回 Promise<void>。
+   *
+   * 可能的异常/错误情况：浏览器剪贴板权限被拒绝时展示错误。
+   */
+  async function copyProxyEnv(port) {
+    try {
+      await navigator.clipboard.writeText(proxyEnvCommands(overview?.listen, port));
+      showToast(`已复制端口 ${port} 的环境变量（http_proxy/https_proxy/all_proxy）`);
+    } catch (error) {
+      showToast(`复制失败：${error.message}`, "err");
+    }
+  }
+
+  /**
    * applyMainPolicy 把界面中的互斥“主入口策略”翻译为现有后端配置。
    *
    * 功能说明：
@@ -1804,6 +1852,7 @@ function App() {
                 overview={overview}
                 traffic={traffic}
                 onCopy={copyProxyURL}
+                onCopyEnv={copyProxyEnv}
                 onMenu={() => setMobileOpen(true)}
                 onMode={(mode) => postJSON("/api/mode", { mode }, `已切换到${MODE_LABELS[mode]}模式`)}
                 onNavigate={setActiveView}
@@ -1847,6 +1896,7 @@ function App() {
                 overview={overview}
                 portSort={portSort}
                 onCopy={copyProxyURL}
+                onCopyEnv={copyProxyEnv}
                 onSort={setPortSort}
                 onToggle={(enabled) => postJSON("/api/port-mapping", { enabled }, enabled ? "节点端口映射已开启" : "节点端口映射已关闭")}
               />
@@ -2140,6 +2190,7 @@ function OverviewPage({
   loading,
   traffic,
   onCopy,
+  onCopyEnv,
   onMenu,
   onMode,
   onNavigate,
@@ -2221,6 +2272,7 @@ function OverviewPage({
         <footer className="policy-pane-footer">
           <span>主入口</span>
           <button className="copy-link" type="button" onClick={() => onCopy(overview.mixed_port)}>127.0.0.1:{overview.mixed_port}<Copy size={14} aria-hidden="true" /></button>
+          <button className="copy-link" title="复制 http_proxy/https_proxy/all_proxy 环境变量" type="button" onClick={() => onCopyEnv(overview.mixed_port)}>环境变量<Terminal size={14} aria-hidden="true" /></button>
           <small>{aliveCount}/{overview.nodes.length} 个节点可用</small>
         </footer>
       </aside>
@@ -2805,6 +2857,9 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [saving, setSaving] = useState(false);
+  // 保存请求的取消控制器：订阅保存可能触发同步拉取（最长 3 分钟），
+  // 期间「取消」/关闭对话框必须能立即中断等待，而不是卡到请求结束。
+  const saveAbortRef = useRef(null);
   // 单个订阅的同步/测速是同步接口（最长 3 分钟），期间必须给行内按钮明确的加载态，
   // 否则点击后到完成 toast 之间页面毫无反馈。key 形如 `${name}:${action}`。
   const [pendingAction, setPendingAction] = useState("");
@@ -2880,16 +2935,36 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
   async function submitSubscription(event) {
     event.preventDefault();
     if (!draft.name.trim() || !draft.url.trim() || saving || !editor) return;
+    const controller = new AbortController();
+    saveAbortRef.current = controller;
     setSaving(true);
     try {
       const payload = { ...draft, name: draft.name.trim(), url: draft.url.trim() };
       const editing = editor.mode === "edit";
       const url = editing ? `/api/subscriptions/${encodeURIComponent(editor.originalName)}` : "/api/subscriptions";
-      const saved = await onWrite(url, payload, editing ? "订阅已更新" : "订阅已添加", editing ? "PUT" : "POST");
+      const saved = await onWrite(url, payload, editing ? "订阅已更新" : "订阅已添加", editing ? "PUT" : "POST", controller.signal);
       if (saved) setEditor(null);
     } finally {
+      saveAbortRef.current = null;
       setSaving(false);
     }
+  }
+
+  /**
+   * cancelEditor 取消编辑：保存进行中先中断请求，再关闭对话框。
+   *
+   * 参数说明：
+   * - close: boolean，是否同时关闭对话框（「取消」按钮保持打开以便修改后重试，X/遮罩关闭则直接收起）。
+   *
+   * 返回值说明：无。
+   *
+   * 可能的异常/错误情况：无；中断由 AbortController 完成，失败静默忽略。
+   */
+  function cancelEditor(close) {
+    if (saving && saveAbortRef.current) {
+      saveAbortRef.current.abort();
+    }
+    if (close || !saving) setEditor(null);
   }
 
   /**
@@ -2952,13 +3027,13 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
       </div>
       {(overview.subscriptions || []).length === 0 && <EmptyState title="还没有订阅" detail="添加订阅后，节点会自动出现在代理节点页面。" />}
 
-      <Dialog open={Boolean(editor)} onOpenChange={(open) => { if (!open && !saving) setEditor(null); }}>
+      <Dialog open={Boolean(editor)} onOpenChange={(open) => { if (!open) cancelEditor(true); }}>
         <DialogContent>
           <DialogClose className="dialog-close" aria-label="关闭订阅对话框"><X size={16} aria-hidden="true" /></DialogClose>
           <form onSubmit={submitSubscription}>
             <DialogHeader>
               <DialogTitle>{editor?.mode === "edit" ? "编辑订阅" : "添加订阅"}</DialogTitle>
-              <DialogDescription>启用订阅时会立即拉取并校验；失败且无缓存时不会提交。</DialogDescription>
+              <DialogDescription>仅改名会立即保存；修改地址或启用订阅时会立即拉取并校验，耗时取决于订阅响应速度，可随时取消。</DialogDescription>
             </DialogHeader>
             <div className="dialog-form">
               <Field label="订阅名称"><Input autoFocus value={draft.name} placeholder="例如：主力机场" onChange={(event) => updateDraft("name", event.target.value)} /></Field>
@@ -2974,7 +3049,7 @@ function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, o
               <UISwitch checked={draft.enabled} label="保存后启用此订阅" onCheckedChange={(enabled) => updateDraft("enabled", enabled)} />
             </div>
             <DialogFooter>
-              <Button disabled={saving} variant="outline" type="button" onClick={() => setEditor(null)}>取消</Button>
+              <Button variant="outline" type="button" onClick={() => cancelEditor(false)}>{saving ? "取消等待" : "取消"}</Button>
               <Button disabled={!draft.name.trim() || !draft.url.trim()} loading={saving} type="submit">{editor?.mode === "edit" ? "保存修改" : "添加订阅"}</Button>
             </DialogFooter>
           </form>
@@ -3008,7 +3083,12 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
         header: "节点",
         sortable: true,
         width: "34%",
-        cell: (node) => <span className={classNames("node-name", !node.alive && "text-muted-foreground")} title={node.name}>{node.name}</span>,
+        cell: (node) => (
+          <span className={classNames("node-name", !node.alive && "text-muted-foreground")} title={node.name}>
+            {node.name}
+            {mainNode && node.key === mainNode && <Badge variant="outline">主端口</Badge>}
+          </span>
+        ),
       },
       { key: "type", header: "类型", sortable: true, width: "100px", cell: (node) => node.type || "-" },
       { key: "subscription", header: "来源", sortable: true, width: "18%", cell: (node) => node.subscription === "manual" ? "手动节点" : node.subscription },
@@ -3059,6 +3139,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
       columns={columns}
       data={nodes}
       emptyState="暂无节点"
+      getRowClassName={(node) => (mainNode && node.key === mainNode ? "main-node-row" : "")}
       getRowId={(node, index) => node.key || `${node.subscription}:${node.name}:${index}`}
       height={tableViewportHeight(nodes.length, 880)}
       minColumnWidth={84}
@@ -3081,7 +3162,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
  * 可能的异常/错误情况：
  * 剪贴板错误由父组件处理。
  */
-function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
+function PortsPage({ overview, portSort, onCopy, onCopyEnv, onSort, onToggle }) {
   const sourcePorts = overview.port_mapping_enabled ? overview.ports : (overview.port_assignments || []);
   const ports = portSort === "delay" ? sortByDelay(sourcePorts, "delay") : sourcePorts;
   const columns = useMemo(
@@ -3090,11 +3171,23 @@ function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
         key: "port",
         header: "端口",
         sortable: true,
-        width: "130px",
+        width: "180px",
         cell: (port) => (
-          <button className="copy-link" disabled={!overview.port_mapping_enabled} type="button" onClick={() => onCopy(port.port)}>
-            {port.port}<Copy size={14} aria-hidden="true" />
-          </button>
+          <span className="port-cell">
+            <button className="copy-link" disabled={!overview.port_mapping_enabled} type="button" onClick={() => onCopy(port.port)}>
+              {port.port}<Copy size={14} aria-hidden="true" />
+            </button>
+            <button
+              aria-label={`复制端口 ${port.port} 的环境变量`}
+              className="copy-link"
+              disabled={!overview.port_mapping_enabled}
+              title="复制 http_proxy/https_proxy/all_proxy 环境变量"
+              type="button"
+              onClick={() => onCopyEnv(port.port)}
+            >
+              <Terminal size={14} aria-hidden="true" />
+            </button>
+          </span>
         ),
       },
       { key: "node", header: "节点", sortable: true, width: "36%", cell: (port) => <span className="node-name" title={port.node}>{port.node}</span> },
@@ -3116,7 +3209,7 @@ function PortsPage({ overview, portSort, onCopy, onSort, onToggle }) {
         sortValue: (port) => port.alive ? 1 : 0,
       },
     ],
-    [onCopy, overview.port_mapping_enabled],
+    [onCopy, onCopyEnv, overview.port_mapping_enabled],
   );
   return (
     <div className="stack">
@@ -3870,7 +3963,18 @@ const SETTINGS_HELP = {
  * 端口格式错误本地拦截；后端校验错误由父组件展示。
  */
 function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
-  const availableNodes = overview.nodes.filter((node) => node.alive).sort((a, b) => a.delay - b.delay || a.name.localeCompare(b.name));
+  // 固定节点下拉必须包含全部节点（含失效）：只列可用节点时，已固定但暂时失效的节点
+  // 会不在选项里，Select 无法回显出具体节点名。失效节点标记文案并禁止新选。
+  const selectableNodes = [...overview.nodes].sort((a, b) => Number(b.alive) - Number(a.alive) || a.delay - b.delay || a.name.localeCompare(b.name));
+  const nodeOptions = selectableNodes.map((node) => ({
+    value: node.key,
+    label: node.alive ? `${node.name} · ${formatDelay(node)}` : `${node.name} · 失效`,
+    disabled: !node.alive,
+  }));
+  // 已配置的固定节点不在当前列表（订阅刷新后消失）时补一个兜底项，让当前值仍可回显
+  if (overview.main_node && !selectableNodes.some((node) => node.key === overview.main_node)) {
+    nodeOptions.push({ value: overview.main_node, label: "已配置的节点（当前不在节点列表）", disabled: true });
+  }
   return (
     <div className="settings-layout">
       <PageHeader eyebrow="系统配置" title="系统设置" detail="集中管理代理入口、本机网络接管以及配置维护。" />
@@ -3906,7 +4010,7 @@ function SettingsPage({ forms, overview, onForm, onImportConfig, onPost }) {
                   onValueChange={(node) => onPost("/api/main-node", { node }, node ? "主端口已固定到所选节点" : "主端口已恢复规则模式")}
                   options={[
                     { value: "", label: "跟随规则与模式" },
-                    ...availableNodes.map((node) => ({ value: node.key, label: `${node.name} · ${formatDelay(node)}` })),
+                    ...nodeOptions,
                   ]}
                 />
               </Field>

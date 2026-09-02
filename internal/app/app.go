@@ -1597,9 +1597,19 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		}
 	}
 
+	// 来源未变化（URL/类型未改且保持启用）时无需重新拉取：复用现有节点及其健康状态，
+	// 只更新订阅归属标签。改名/原样保存因此立即完成，不再阻塞在订阅网络 I/O 上。
+	// 旧配置可能缺省 type（等价 auto），比较前先归一化，避免误判为来源变化。
+	currentType := current.Type
+	if currentType == "" {
+		currentType = "auto"
+	}
+	sourceChanged := current.URL != next.URL || currentType != next.Type
+	needFetch := next.IsEnabled() && (!current.IsEnabled() || sourceChanged)
+
 	var freshNodes []*node.Node
 	var freshInfo subscribe.UserInfo
-	if next.IsEnabled() {
+	if needFetch {
 		var fetchErr error
 		freshNodes, freshInfo, fetchErr = subscribe.FetchWithInfo(ctx, next, stateDir)
 		if fetchErr != nil {
@@ -1611,6 +1621,19 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		}
 		if len(freshNodes) == 0 {
 			return config.Subscription{}, fmt.Errorf("订阅 %q 没有可用的节点内容，未提交启用", next.Name)
+		}
+	} else if next.IsEnabled() {
+		for _, existing := range oldNodes {
+			if existing == nil || existing.Subscription != current.Name {
+				continue
+			}
+			cloned := *existing
+			cloned.Subscription = next.Name
+			freshNodes = append(freshNodes, &cloned)
+		}
+		// 用量缓存跟随改名迁移，避免概览页的流量/到期信息在改名后丢失
+		if info, ok := oldInfos[current.Name]; ok {
+			freshInfo = info
 		}
 	}
 
@@ -1639,7 +1662,7 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		nodesBySource[next.Name] = freshNodes
 	}
 	nextNodes := subscribe.MergeFiltered(nodesBySource, a.includeRe, a.excludeRe)
-	if next.IsEnabled() {
+	if needFetch {
 		checkList := make([]*node.Node, 0, len(freshNodes))
 		for _, candidate := range nextNodes {
 			if candidate.Subscription == next.Name {
@@ -1655,7 +1678,9 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 			alive = append(alive, candidate)
 		}
 	}
-	if len(nextNodes) > 0 && len(alive) == 0 {
+	// 健康节点保护只约束真正改变来源的提交（换 URL/重新启用）；纯改名不会降低可用性，
+	// 不应因为节点此刻全部失效而被拒绝。
+	if needFetch && len(nextNodes) > 0 && len(alive) == 0 {
 		return config.Subscription{}, fmt.Errorf("订阅设置未提交：当前没有任何健康节点可维持代理运行")
 	}
 	previousSnapshot, snapshotErr := pool.LoadSnapshot(a.snapshotPath())
