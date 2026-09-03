@@ -239,7 +239,8 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
    * saveAllow 整体替换客户端公钥白名单（空列表恢复放行所有客户端）。
    *
    * 参数说明：
-   * - keys: string[]，目标公钥列表；添加与删除都先由页面算出新列表再整体提交。
+   * - entries: Array<{name?: string, key: string}>，目标条目列表（name 为可选管理别名）；
+   *   添加与删除都先由页面算出新列表再整体提交。
    *
    * 返回值说明：
    * 返回 Promise<boolean>；成功为 `true`。
@@ -248,14 +249,14 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
    * 后端校验失败或网络失败时 toast 错误并返回 false。
    */
   const saveAllow = useCallback(
-    async (keys) => {
+    async (entries) => {
       try {
         const payload = await requestJSON("/api/remote/allow", {
           method: "POST",
-          body: JSON.stringify({ keys }),
+          body: JSON.stringify({ entries }),
         });
         if (payload) setStatus(payload);
-        showToast(keys.length > 0 ? "客户端白名单已更新" : "白名单已清空，恢复放行所有客户端");
+        showToast(entries.length > 0 ? "客户端白名单已更新" : "白名单已清空，恢复放行所有客户端");
         return true;
       } catch (saveError) {
         showToast(`操作失败：${saveError.message}`, "err");

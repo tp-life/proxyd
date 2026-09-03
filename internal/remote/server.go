@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,6 +45,27 @@ func expandHome(p string) string {
 	return p
 }
 
+// autoRegionLocked 返回自动就近模式下的 DERP 区域：首次调用经 Expand 探测并缓存，
+// 之后（含配置变更引发的重建）沿用缓存，保证 token 中的区域信息在进程生命周期内稳定。
+// DERPMapURL 变化时缓存失效、重新探测。调用方需持有 m.mu。
+func (m *Manager) autoRegionLocked(cfg config.RemoteConfig) (*tailcfg.DERPRegion, error) {
+	if m.autoRegion != nil && m.autoRegionMapURL == cfg.DERPMapURL {
+		return m.autoRegion, nil
+	}
+	ci := &tailcat.ConnInfo{RegionID: -1} // -1 = 自动探测最近区域
+	opts := []any{tailcat.ExpandForServer}
+	if cfg.DERPMapURL != "" {
+		opts = append(opts, tailcat.DERPMapURL(cfg.DERPMapURL))
+	}
+	if err := ci.Expand(context.Background(), opts...); err != nil {
+		return nil, fmt.Errorf("探测 DERP 区域失败: %w", err)
+	}
+	m.autoRegion = ci.Region[0]
+	m.autoRegionMapURL = cfg.DERPMapURL
+	m.logf("[remote] 自动选定 DERP 区域 %d（%s），进程内保持不变", m.autoRegion.RegionID, m.autoRegion.RegionName)
+	return m.autoRegion, nil
+}
+
 // startServerLocked 按配置启动隧道服务端并刷新 token；调用方需持有 m.mu。
 func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	priv, err := loadOrCreateNodeKey(m.serverKeyPath(cfg))
@@ -64,7 +86,7 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	// 客户端公钥白名单：非空时只有列表内的客户端能完成握手，空则放行所有。
 	// 临时身份公钥（temp-key）与白名单叠加生效，去重后统一登记。
 	seenKey := map[string]bool{}
-	for _, text := range append(append([]string(nil), cfg.Allow...), cfg.TempKey) {
+	for _, text := range append(allowKeys(cfg.Allow), cfg.TempKey) {
 		text = strings.TrimSpace(text)
 		if text == "" || seenKey[text] {
 			continue
@@ -84,8 +106,18 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 			region.Nodes = append(region.Nodes, &tailcfg.DERPNode{HostName: h})
 		}
 		s.Region = region
-	} else {
+	} else if regionID > 0 {
 		s.RegionID = tailcfg.DERPRegionID(regionID)
+	} else {
+		// 自动就近：进程内粘性。区域探测结果随网络抖动可能在相邻区域间摇摆，
+		// 而 token 嵌入了区域信息——若每次重建都重新探测，任何配置变更（白名单/
+		// 端口/内嵌 SSH）都可能让已分发的 token 指向旧区域而失效。因此首次探测后
+		// 缓存区域对象，重建时沿用（DERPMapURL 变化时重新探测）。
+		region, err := m.autoRegionLocked(cfg)
+		if err != nil {
+			return err
+		}
+		s.Region = region
 	}
 
 	servePorts := map[uint16]bool{}
@@ -179,6 +211,15 @@ func (m *Manager) withClientTracking(h func(net.Conn)) func(net.Conn) {
 	}
 }
 
+// allowKeys 提取白名单条目的公钥列表（别名只用于管理展示，不参与握手判定）。
+func allowKeys(entries []config.RemoteAllowEntry) []string {
+	keys := make([]string, 0, len(entries))
+	for _, e := range entries {
+		keys = append(keys, e.Key)
+	}
+	return keys
+}
+
 // attributeClient 把入站连接的远端隧道地址归属到已知客户端公钥
 // （白名单+临时身份）；开放模式下的陌生客户端无法反推公钥，返回空串。
 func (m *Manager) attributeClient(remoteAddr net.Addr) string {
@@ -192,7 +233,7 @@ func (m *Manager) attributeClient(remoteAddr net.Addr) string {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	known := knownClientAddrs(m.cfg.Allow, m.cfg.TempKey)
+	known := knownClientAddrs(allowKeys(m.cfg.Allow), m.cfg.TempKey)
 	return known[addr]
 }
 

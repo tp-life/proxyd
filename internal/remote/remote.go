@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
 	"proxyd/internal/config"
@@ -27,7 +28,7 @@ type Status struct {
 	ClientKey string          `json:"client_key,omitempty"` // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
 	Region    string          `json:"region,omitempty"`    // 配置的 region 原值
 	Serve     []int           `json:"serve"`               // 经隧道暴露的本机端口
-	Allow     []string        `json:"allow"`               // 客户端公钥白名单（空=放行所有）
+	Allow     []config.RemoteAllowEntry `json:"allow"`        // 客户端公钥白名单（含可选别名；空=放行所有）
 	TempKey   string          `json:"temp_key,omitempty"`  // 临时身份公钥（应急 nodekey）
 	KeyFile   string          `json:"key_file"`            // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
 	CustomKeyFile string      `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
@@ -65,6 +66,8 @@ type Manager struct {
 	clientLoaded bool             // 是否已尝试加载客户端身份密钥
 	clientPriv   key.NodePrivate  // 持久客户端身份（对端 --allow 白名单用）
 	clientErr    error            // 客户端密钥加载失败原因（惰性加载只尝试一次）
+	autoRegion      *tailcfg.DERPRegion // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
+	autoRegionMapURL string             // 产生缓存时的 DERPMapURL
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥
@@ -140,11 +143,11 @@ func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 		}
 	}
 	allowed := map[string]bool{}
-	for _, k := range old.Allow {
-		allowed[k] = true
+	for _, e := range old.Allow {
+		allowed[e.Key] = true
 	}
-	for _, k := range cfg.Allow {
-		if !allowed[k] {
+	for _, e := range cfg.Allow {
+		if !allowed[e.Key] {
 			return false
 		}
 	}
@@ -163,7 +166,7 @@ func (m *Manager) Status() Status {
 		Token:   m.token,
 		Region:  m.cfg.Region,
 		Serve:   append([]int(nil), m.cfg.Serve...),
-		Allow:   append([]string(nil), m.cfg.Allow...),
+		Allow:   append([]config.RemoteAllowEntry(nil), m.cfg.Allow...),
 		TempKey: m.cfg.TempKey,
 		KeyFile: m.serverKeyPath(m.cfg),
 		CustomKeyFile: strings.TrimSpace(m.cfg.KeyFile),
@@ -184,7 +187,7 @@ func (m *Manager) Status() Status {
 		st.Serve = []int{}
 	}
 	if st.Allow == nil {
-		st.Allow = []string{}
+		st.Allow = []config.RemoteAllowEntry{}
 	}
 	st.Forwards = make([]ForwardStatus, 0, len(m.cfg.Forwards))
 	for _, f := range m.cfg.Forwards {

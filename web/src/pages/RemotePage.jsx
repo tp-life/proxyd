@@ -17,9 +17,10 @@ import { classNames, maskRemoteSecret, tableViewportHeight } from "@/lib/format"
  * RemotePage 渲染远程连接页。
  *
  * 功能说明：
- * 该页管理基于 tailcat 隧道的远程访问模块，与代理功能相互独立。自上而下依次是
- * 服务状态卡（开关、运行状态、本机 token、DERP 区域、暴露端口）、暴露端口管理、
- * 远程设备列表与本地转发列表。token 一律以摘要展示，完整值只在点击复制时显式
+ * 该页管理基于 tailcat 隧道的远程访问模块，与代理功能相互独立。内容按角色分两组：
+ * 「服务端」（让别人连入本机：服务状态卡——开关、运行状态、本机 token、DERP 区域、
+ * 客户端公钥白名单、临时身份——以及暴露端口管理）与「客户端」（从本机连到别的机器：
+ * 远程设备列表与本地转发列表）。token 一律以摘要展示，完整值只在点击复制时显式
  * 从 `/api/remote/token` 获取。
  *
  * 参数说明：
@@ -78,6 +79,7 @@ export function RemotePage({
 }) {
   const [serveInput, setServeInput] = useState("");
   const [allowInput, setAllowInput] = useState("");
+  const [allowNameInput, setAllowNameInput] = useState("");
   const [keyFileInput, setKeyFileInput] = useState("");
   const [remoteForm, setRemoteForm] = useState({ name: "", token: "" });
   const [forwardForm, setForwardForm] = useState({ name: "", listen: "", remoteSource: "", remoteToken: "", remotePort: "" });
@@ -242,23 +244,28 @@ export function RemotePage({
   async function submitAllowKey(event) {
     event.preventDefault();
     const key = allowInput.trim();
-    if (!key.startsWith("nodekey:") || allow.includes(key)) {
+    const name = allowNameInput.trim();
+    if (!key.startsWith("nodekey:") || allow.some((entry) => entry.key === key)) {
       return;
     }
-    if (await saveAllow([...allow, key])) {
+    if (name && allow.some((entry) => entry.name === name)) {
+      return;
+    }
+    if (await saveAllow([...allow, { name, key }])) {
       setAllowInput("");
+      setAllowNameInput("");
     }
   }
 
   /**
-   * removeAllowKey 从白名单移除公钥并整体提交；删空后恢复放行所有客户端。
+   * removeAllowKey 从白名单移除条目并整体提交；删空后恢复放行所有客户端。
    *
-   * 参数说明：key 为待移除的公钥。
+   * 参数说明：key 为待移除条目的公钥。
    * 返回值说明：返回 Promise<void>。
    * 可能的异常/错误情况：后端校验失败由 saveAllow toast。
    */
   async function removeAllowKey(key) {
-    await saveAllow(allow.filter((item) => item !== key));
+    await saveAllow(allow.filter((item) => item.key !== key));
   }
 
   /**
@@ -349,10 +356,10 @@ export function RemotePage({
       )}
 
       <section className="panel">
-        <PanelTitle title="快速上手" detail="两台机器之间互访 SSH/scp 只需两步" />
+        <PanelTitle title="快速上手" detail="两台机器之间互访 SSH/scp 只需两步：对端配置「服务端」，本机配置「客户端」" />
         <ol className="m-0 grid list-decimal gap-1 pl-5 text-sm text-muted-foreground">
-          <li>在对端机器启用远程连接并开放 SSH（22 端口），复制其 token。</li>
-          <li>把 token 添加为下方「远程设备」，点击「连接」即可生成 ssh/scp 命令；文件传输直接走 scp。</li>
+          <li>在对端机器的「服务端」区启用远程连接并开放 SSH（22 端口），复制其 token。</li>
+          <li>在本机「客户端」区把 token 添加为「远程设备」，点击「连接」即可生成 ssh/scp 命令；文件传输直接走 scp。</li>
         </ol>
       </section>
 
@@ -360,6 +367,11 @@ export function RemotePage({
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
         <>
+          <div className="remote-group">
+            <h2>服务端</h2>
+            <p>让别人连入本机：开启隧道服务、暴露本机端口、管理允许连入的客户端</p>
+          </div>
+
           <section className="panel">
             <PanelTitle
               title="服务状态"
@@ -372,7 +384,7 @@ export function RemotePage({
                   "客户端公钥：本机连接别人时的身份；对端用 tailcat serve --allow=<此公钥> 可配置白名单，只放行本机",
                   "密钥文件：决定 token 的服务端私钥；默认内置托管。若对端客户端是 tailcat 命令行，可填 tailcat genkey --key=default 生成的密钥文件路径（macOS 通常在 ~/Library/Application Support/tailcat/keys/default.private.json），两边用同一把密钥，token 即一致",
                   "内嵌免密 SSH：开启后隧道 22 端口由 proxyd 进程内 SSH 服务直接处理（与 tailcat serve no-auth-ssh 同模型），对端 proxyd ssh / tailcat ssh 即可登录本机——无需系统 sshd（macOS 远程登录）、无需账号密码，隧道密钥握手本身就是认证；注意安全：持有 token 即可获得本机 shell，建议配合「允许的客户端」白名单使用",
-                  "允许的客户端：添加对端的客户端公钥后，只有列表内的机器能连入本机（token+私钥双重校验）；清空则恢复放行所有",
+                  "允许的客户端：添加对端的客户端公钥后，只有列表内的机器能连入本机（token+私钥双重校验）；清空则恢复放行所有。可给每个公钥起别名方便管理（CLI：proxyd remote allow add <公钥> [别名]，del 按别名或公钥删除）",
                   "临时身份：给「客户端」使用的应急 nodekey（本机是服务端，它不是本机 token，不要填进远程设备）。公钥自动叠加进白名单；私钥复制后存密码管理器，没带电脑时在别的机器用 PROXYD_CLIENT_KEY=<私钥> 连入本机；重置只换这一对，不影响手动添加的白名单",
                 ],
                 note: "token 即连接凭据，泄露等于端口暴露，请只发给可信对端。",
@@ -427,38 +439,43 @@ export function RemotePage({
                 </div>
               )}
             </dl>
-            <div className="mt-3 grid gap-2 rounded-md border bg-muted/40 px-3 py-2">
-              <span className="text-xs font-medium text-muted-foreground">
-                服务端密钥文件（决定 token）{!status?.custom_key_file && "：当前使用内置托管密钥"}
-              </span>
-              {status?.key_file && (
-                <code className="min-w-0 break-all font-mono text-xs text-muted-foreground">{status.key_file}</code>
-              )}
-              <form className="flex flex-wrap items-center gap-2" onSubmit={submitKeyFile}>
-                <input
-                  aria-label="自定义服务端密钥文件路径"
-                  className="mono-input min-w-0 flex-1"
-                  value={keyFileInput}
-                  onChange={(event) => setKeyFileInput(event.target.value)}
-                  placeholder="tailcat 密钥文件路径（~/ 开头亦可），留空保存即恢复内置托管"
-                />
-                <Button size="sm" variant="outline" type="submit"><span>保存</span></Button>
-                {status?.custom_key_file && (
+            {status?.custom_key_file && (
+              <div className="mt-3 grid gap-2 rounded-md border bg-muted/40 px-3 py-2">
+                <span className="text-xs font-medium text-muted-foreground">服务端密钥文件（决定 token）：当前使用自定义密钥</span>
+                {status?.key_file && (
+                  <code className="min-w-0 break-all font-mono text-xs text-muted-foreground">{status.key_file}</code>
+                )}
+                <form className="flex flex-wrap items-center gap-2" onSubmit={submitKeyFile}>
+                  <input
+                    aria-label="自定义服务端密钥文件路径"
+                    className="mono-input min-w-0 flex-1"
+                    value={keyFileInput}
+                    onChange={(event) => setKeyFileInput(event.target.value)}
+                    placeholder="tailcat 密钥文件路径（~/ 开头亦可），留空保存即恢复内置托管"
+                  />
+                  <Button size="sm" variant="outline" type="submit"><span>保存</span></Button>
                   <Button size="sm" variant="outline" type="button" onClick={() => saveKeyFile("")}>
                     <span>恢复默认</span>
                   </Button>
-                )}
-              </form>
-              <span className="text-xs text-muted-foreground">
-                填 tailcat genkey --key=default 生成的密钥文件可让 tailcat 命令行与本服务 token 一致；切换密钥即更换身份，旧 token 立即失效。
-              </span>
-            </div>
+                </form>
+                <span className="text-xs text-muted-foreground">
+                  填 tailcat genkey --key=default 生成的密钥文件可让 tailcat 命令行与本服务 token 一致；切换密钥即更换身份，旧 token 立即失效。也可用 CLI：proxyd remote keyfile。
+                </span>
+              </div>
+            )}
             <div className="mt-3 grid gap-2 rounded-md border bg-muted/40 px-3 py-2">
               <span className="text-xs font-medium text-muted-foreground">
                 允许的客户端（公钥白名单）{allow.length === 0 && !status?.temp_key && "：当前放行所有持有 token 的客户端"}
                 {allow.length === 0 && status?.temp_key && "：未手动添加，但下方临时身份已生效（仅临时身份可连入）"}
               </span>
               <form className="flex flex-wrap items-center gap-2" onSubmit={submitAllowKey}>
+                <input
+                  aria-label="允许的客户端别名（可选）"
+                  className="w-28 shrink-0"
+                  value={allowNameInput}
+                  onChange={(event) => setAllowNameInput(event.target.value)}
+                  placeholder="别名（可选）"
+                />
                 <input
                   aria-label="添加允许的客户端公钥"
                   className="mono-input min-w-0 flex-1"
@@ -470,11 +487,12 @@ export function RemotePage({
               </form>
               {allow.length > 0 && (
                 <ul className="m-0 grid list-none gap-1.5 p-0">
-                  {allow.map((key) => (
-                    <li key={key} className="flex items-center gap-2">
-                      <code className="min-w-0 flex-1 break-all font-mono text-xs">{key}</code>
-                      {(activity[key] || 0) > 0 && <Badge variant="secondary">活动连接 {activity[key]}</Badge>}
-                      <button aria-label={`移出白名单 ${key.slice(0, 20)}...`} className="inline-flex shrink-0 items-center text-muted-foreground hover:text-destructive" type="button" onClick={() => removeAllowKey(key)}>
+                  {allow.map((entry) => (
+                    <li key={entry.key} className="flex items-center gap-2">
+                      {entry.name && <Badge variant="secondary" className="shrink-0">{entry.name}</Badge>}
+                      <code className="min-w-0 flex-1 break-all font-mono text-xs">{entry.key}</code>
+                      {(activity[entry.key] || 0) > 0 && <Badge variant="secondary">活动连接 {activity[entry.key]}</Badge>}
+                      <button aria-label={`移出白名单 ${entry.name || entry.key.slice(0, 20)}`} className="inline-flex shrink-0 items-center text-muted-foreground hover:text-destructive" type="button" onClick={() => removeAllowKey(entry.key)}>
                         <X size={13} aria-hidden="true" />
                       </button>
                     </li>
@@ -563,6 +581,11 @@ export function RemotePage({
               </ul>
             )}
           </section>
+
+          <div className="remote-group">
+            <h2>客户端</h2>
+            <p>从本机连到别的机器：保存对端 token、建立本地转发、复制 SSH/scp 命令</p>
+          </div>
 
           <section className="panel">
             <PanelTitle

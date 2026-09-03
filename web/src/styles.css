@@ -2279,6 +2279,22 @@
     grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
   }
 
+  /*
+   * 远程连接页按「服务端/客户端」两个角色分组；分组带与页头一样只用底线
+   * 建立层级，不引入额外卡片，保持连续扫读。
+   */
+  .remote-group {
+    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b pb-3;
+  }
+
+  .remote-group h2 {
+    @apply m-0 text-base font-semibold leading-6 text-foreground;
+  }
+
+  .remote-group p {
+    @apply m-0 text-xs leading-5 text-muted-foreground;
+  }
+
   .forward-form {
     grid-template-columns: repeat(3, minmax(170px, 1fr));
   }

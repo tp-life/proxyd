@@ -20,6 +20,12 @@ import (
 	"proxyd/internal/remote"
 )
 
+// allowEntryJSON 对应白名单条目的 API 形态：key 为客户端公钥，name 为可选管理别名。
+type allowEntryJSON struct {
+	Name string `json:"name,omitempty"`
+	Key  string `json:"key"`
+}
+
 // remoteStatusJSON 对应 GET /api/remote 的响应（token 为打码摘要）。
 type remoteStatusJSON struct {
 	Enabled   bool     `json:"enabled"`
@@ -29,7 +35,7 @@ type remoteStatusJSON struct {
 	ClientKey string   `json:"client_key,omitempty"`
 	Region    string   `json:"region,omitempty"`
 	Serve     []int    `json:"serve"`
-	Allow     []string `json:"allow"`
+	Allow     []allowEntryJSON `json:"allow"`
 	TempKey   string   `json:"temp_key,omitempty"`
 	KeyFile   string   `json:"key_file"`
 	BuiltinSSH bool    `json:"builtin_ssh"`
@@ -140,7 +146,17 @@ func remotePrintStatus(c *apiClient) error {
 		fmt.Printf("客户端公钥：%s（对端 tailcat serve --allow 白名单用）\n", st.ClientKey)
 	}
 	if len(st.Allow) > 0 {
-		fmt.Printf("客户端白名单：%d 个（仅列表内客户端可连接，proxyd remote allow 管理）\n", len(st.Allow))
+		names := make([]string, 0, len(st.Allow))
+		for _, e := range st.Allow {
+			if e.Name != "" {
+				names = append(names, e.Name)
+			}
+		}
+		if len(names) > 0 {
+			fmt.Printf("客户端白名单：%d 个（%s；仅列表内客户端可连接，proxyd remote allow 管理）\n", len(st.Allow), strings.Join(names, "、"))
+		} else {
+			fmt.Printf("客户端白名单：%d 个（仅列表内客户端可连接，proxyd remote allow 管理）\n", len(st.Allow))
+		}
 	}
 	if st.TempKey != "" {
 		active := st.ClientActivity[st.TempKey]
@@ -213,18 +229,19 @@ func cmdRemoteServe(c *apiClient, args []string) error {
 }
 
 // cmdRemoteAllow 查看或增删客户端公钥白名单；空列表表示放行所有持有 token 的客户端。
-// 后端是整体替换语义，add/del 先读当前列表再改后整体提交。
+// 条目由公钥+可选别名组成；del 按别名或公钥匹配。后端是整体替换语义，
+// add/del 先读当前列表再改后整体提交。
 func cmdRemoteAllow(c *apiClient, args []string) error {
-	load := func() ([]string, error) {
+	load := func() ([]allowEntryJSON, error) {
 		var st remoteStatusJSON
 		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
 			return nil, err
 		}
 		return st.Allow, nil
 	}
-	save := func(keys []string) error {
+	save := func(entries []allowEntryJSON) error {
 		var st remoteStatusJSON
-		return c.do(http.MethodPost, "/api/remote/allow", map[string]any{"keys": keys}, &st)
+		return c.do(http.MethodPost, "/api/remote/allow", map[string]any{"entries": entries}, &st)
 	}
 
 	sub := "list"
@@ -233,11 +250,11 @@ func cmdRemoteAllow(c *apiClient, args []string) error {
 	}
 	switch sub {
 	case "list":
-		keys, err := load()
+		entries, err := load()
 		if err != nil {
 			return err
 		}
-		if len(keys) == 0 {
+		if len(entries) == 0 {
 			var st remoteStatusJSON
 			if err := c.do(http.MethodGet, "/api/remote", nil, &st); err == nil && st.TempKey != "" {
 				fmt.Println("白名单为空，但临时身份已生效：仅临时身份可连接")
@@ -246,48 +263,67 @@ func cmdRemoteAllow(c *apiClient, args []string) error {
 			fmt.Println("白名单为空：放行所有持有 token 的客户端")
 			return nil
 		}
-		for _, k := range keys {
-			fmt.Println(k)
+		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tKEY")
+		for _, e := range entries {
+			name := e.Name
+			if name == "" {
+				name = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%s\n", name, e.Key)
 		}
+		tw.Flush()
 		return nil
 	case "add":
-		if len(args) != 2 {
-			return fmt.Errorf("用法: proxyd remote allow add <nodekey:... 客户端公钥>")
+		if len(args) != 2 && len(args) != 3 {
+			return fmt.Errorf("用法: proxyd remote allow add <nodekey:... 客户端公钥> [别名]")
 		}
-		keys, err := load()
+		keyText := args[1]
+		name := ""
+		if len(args) == 3 {
+			name = args[2]
+		}
+		entries, err := load()
 		if err != nil {
 			return err
 		}
-		for _, k := range keys {
-			if k == args[1] {
+		for _, e := range entries {
+			if e.Key == keyText {
 				fmt.Println("该公钥已在白名单中")
 				return nil
 			}
+			if name != "" && e.Name == name {
+				return fmt.Errorf("别名 %q 已被占用", name)
+			}
 		}
-		if err := save(append(keys, args[1])); err != nil {
+		if err := save(append(entries, allowEntryJSON{Name: name, Key: keyText})); err != nil {
 			return err
 		}
-		fmt.Println("已加入白名单（当前为白名单模式，仅列表内客户端可连接）")
+		if name != "" {
+			fmt.Printf("已加入白名单：%s（当前为白名单模式，仅列表内客户端可连接）\n", name)
+		} else {
+			fmt.Println("已加入白名单（当前为白名单模式，仅列表内客户端可连接）")
+		}
 		return nil
 	case "del":
 		if len(args) != 2 {
-			return fmt.Errorf("用法: proxyd remote allow del <nodekey:... 客户端公钥>")
+			return fmt.Errorf("用法: proxyd remote allow del <别名|nodekey:... 公钥>")
 		}
-		keys, err := load()
+		entries, err := load()
 		if err != nil {
 			return err
 		}
-		next := make([]string, 0, len(keys))
+		next := make([]allowEntryJSON, 0, len(entries))
 		found := false
-		for _, k := range keys {
-			if k == args[1] {
+		for _, e := range entries {
+			if e.Name == args[1] || e.Key == args[1] {
 				found = true
 				continue
 			}
-			next = append(next, k)
+			next = append(next, e)
 		}
 		if !found {
-			return fmt.Errorf("公钥不在白名单中")
+			return fmt.Errorf("白名单中没有别名或公钥为 %q 的条目", args[1])
 		}
 		if err := save(next); err != nil {
 			return err

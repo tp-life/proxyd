@@ -528,6 +528,34 @@ func TestCheckMixedPort(t *testing.T) {
 	}
 }
 
+// TestRemoteAllowLegacyScalar 验证白名单旧格式（纯字符串列表）兼容解析为条目。
+func TestRemoteAllowLegacyScalar(t *testing.T) {
+	cfg, err := Parse([]byte(`
+manual-nodes:
+  - socks5://127.0.0.1:1080#x
+port-range: [42000, 42010]
+rules:
+  - MATCH,PROXY
+remote:
+  allow:
+    - nodekey:aaa
+    - name: 家里
+      key: nodekey:bbb
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Remote.Allow) != 2 {
+		t.Fatalf("allow 条目数 = %d", len(cfg.Remote.Allow))
+	}
+	if cfg.Remote.Allow[0].Key != "nodekey:aaa" || cfg.Remote.Allow[0].Name != "" {
+		t.Fatalf("旧格式字符串条目解析错误: %+v", cfg.Remote.Allow[0])
+	}
+	if cfg.Remote.Allow[1].Key != "nodekey:bbb" || cfg.Remote.Allow[1].Name != "家里" {
+		t.Fatalf("新格式条目解析错误: %+v", cfg.Remote.Allow[1])
+	}
+}
+
 func TestParsePortRange(t *testing.T) {
 	if r, err := ParsePortRange("43000-43200"); err != nil || r != [2]int{43000, 43200} {
 		t.Errorf("ParsePortRange = %v, %v", r, err)
@@ -621,8 +649,9 @@ func TestRemoteConfigValidate(t *testing.T) {
 	bad := []RemoteConfig{
 		{Serve: []int{0}},      // 端口越界
 		{Serve: []int{22, 22}}, // 端口重复
-		{Allow: []string{"not-a-nodekey"}},              // 公钥缺 nodekey: 前缀
-		{Allow: []string{"nodekey:abc", "nodekey:abc"}}, // 公钥重复
+		{Allow: []RemoteAllowEntry{{Key: "not-a-nodekey"}}},              // 公钥缺 nodekey: 前缀
+		{Allow: []RemoteAllowEntry{{Key: "nodekey:abc"}, {Key: "nodekey:abc"}}}, // 公钥重复
+		{Allow: []RemoteAllowEntry{{Name: "x", Key: "nodekey:a"}, {Name: "x", Key: "nodekey:b"}}}, // 别名重复
 		{TempKey: "not-a-nodekey"},                      // 临时身份公钥缺 nodekey: 前缀
 		{Remotes: []RemotePeer{{Name: "", Token: "tcA"}}},                                              // 空名称
 		{Remotes: []RemotePeer{{Name: "a", Token: ""}}},                                                // 空 token

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
 	"proxyd/internal/config"
@@ -312,31 +313,47 @@ func TestManagerForwardBadListen(t *testing.T) {
 
 func TestServerConfigEqual(t *testing.T) {
 	m := NewManager(t.TempDir(), nil)
-	m.cfg = config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}
+	m.cfg = config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}
 
-	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{8022, 22}, Allow: []string{"nodekey:a"}}) {
+	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{8022, 22}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
 		t.Fatal("same ports/allow in different order should be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}, Allow: []string{"nodekey:a"}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
 		t.Fatal("port removed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
 		t.Fatal("region changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
 		t.Fatal("derpmap changed should not be equal")
 	}
 	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}}) {
 		t.Fatal("allow removed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:b"}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:b"}}}) {
 		t.Fatal("allow key changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}, KeyFile: "/tmp/x.private.json"}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, KeyFile: "/tmp/x.private.json"}) {
 		t.Fatal("key-file changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}, BuiltinSSH: true}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, BuiltinSSH: true}) {
 		t.Fatal("builtin-ssh changed should not be equal")
+	}
+}
+
+func TestAutoRegionSticky(t *testing.T) {
+	m := NewManager(t.TempDir(), nil)
+	cached := &tailcfg.DERPRegion{RegionID: 302, RegionCode: "sfo"}
+	m.autoRegion = cached
+	m.autoRegionMapURL = ""
+
+	// 缓存命中：直接返回缓存对象，不再触发网络探测（无网环境也能通过即证明）
+	r, err := m.autoRegionLocked(config.RemoteConfig{})
+	if err != nil {
+		t.Fatalf("cached region rejected: %v", err)
+	}
+	if r != cached {
+		t.Fatal("expected cached region to be reused (sticky), got a different object")
 	}
 }
 

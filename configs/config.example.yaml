@@ -97,6 +97,9 @@ rules:
 #   builtin-ssh: false         # true=内嵌免密 SSH：隧道 22 端口由进程内 SSH 服务直接处理
 #                              #（隧道即认证，无需系统 sshd/账号密码，同 tailcat no-auth-ssh）；
 #                              # 注意：持有 token 即获得本机 shell，建议配合 allow 白名单
+#   allow:                     # 客户端公钥白名单：非空时仅列表内客户端可连，空=放行所有持有 token 者
+#     - name: 家里             # 别名（可选，便于 list/del 管理）
+#       key: nodekey:...       # 客户端公钥；也兼容旧写法 allow: ["nodekey:..."]（纯字符串，无别名）
 #   remotes:                   # 保存的远端（给 token 起名字，供 CLI/转发引用）
 #     - name: nas
 #       token: tc...

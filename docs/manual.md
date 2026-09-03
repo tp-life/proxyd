@@ -475,6 +475,8 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
                             # 缺省用内置托管密钥 state-dir/remote/server.private.json
   # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
                             # 无需系统 sshd；持有 token 即可登录，建议配合白名单
+  # allow: [{name: 家里, key: nodekey:...}]  # 客户端公钥白名单（name 可省）；
+                            # 非空时仅列表内可连，兼容旧写法 ["nodekey:..."]
   remotes: []               # 保存的远端：name + token
   forwards: []              # 本地常驻转发：listen → remote:remote-port；listen 可留空或填 "auto" 自动分配端口
 ```
@@ -489,7 +491,7 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
 
 - **token（连接凭据）**：服务端启动后生成 `tc...` 字符串，由服务端 WireGuard 公钥 + DERP 区域信息派生。谁拿到 token 谁就能连到服务端的暴露端口——**像密码一样保管**（Web/CLI 默认只显示摘要，配置导出默认打码）。
 - **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。配置 `remote.key-file` 可改用自定义密钥文件（如 tailcat 的 default key），此时内置文件不再使用。
-- **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。可在 `remote.region` 填自建 derper 主机名脱离公共中继。
+- **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。`remote.region` 留空时自动就近选择，且**进程内保持粘性**——配置变更（白名单/端口等）引发的隧道重建沿用首次探测结果，已分发的 token 不会因区域漂移而失效；彻底固定可显式填区域 ID（如 `302`）。跨区域迁移或脱离公共中继时可填自建 derper 主机名。
 
 ### 服务端：暴露本机端口
 
@@ -502,6 +504,16 @@ proxyd remote token           # 打印完整 token，发给要连接的人
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
 
 **内嵌免密 SSH**（`proxyd remote builtin-ssh on`，或 Web 服务状态卡开关）：隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
+
+**客户端白名单**（`remote allow`，Web 服务状态卡同样可管理）：按客户端 WireGuard 公钥（`nodekey:...`）限制谁能连入——非空时仅列表内客户端可建立隧道，空列表放行所有持有 token 的客户端。每条可带一个别名便于管理：
+
+```sh
+proxyd remote allow add nodekey:... 家里   # 添加（别名可省略）
+proxyd remote allow list                   # 列表：NAME / KEY 两列
+proxyd remote allow del 家里               # 按别名删除，也可直接填完整公钥
+```
+
+客户端公钥在客户端机器上查看：`proxyd remote status`（或 Web 状态卡）里的「本机公钥」。配置文件中写作 `allow: [{name: 家里, key: nodekey:...}]`，兼容旧格式纯字符串列表（无别名）。
 
 ### 客户端：连接远端
 

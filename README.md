@@ -28,6 +28,7 @@
 - 配置备份与恢复：Web 设置页默认导出打码 YAML，也可显式导出含凭据的完整备份；导入通过完整校验并原子落盘，重启后生效
 - 新版本提示：启动后异步检查官方 GitHub Releases，概览页仅在发现更新时提示；可用 `check-updates: false` 或设置页开关关闭
 - 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
+- 现代化只读 TUI：`proxyd ls` 复用 Web 控制台的本地 API，集中展示概览、节点、订阅、入口、规则、连接、远程隧道与日志；不会调用任何写接口，来源地址和凭据仅显示安全摘要
 - 远程连接（周边功能，与代理独立）：内嵌 [tailcat](https://github.com/tailscale/tailcat) 隧道（WireGuard 端到端加密 + DERP 中继，无需 Tailscale 账号/客户端），把本机端口（如 SSH 22）暴露给持有 token 的对端；`proxyd ssh <远端>` 一键经隧道连接，`proxyd scp` 直接经隧道传文件，支持本地常驻转发（listen 可留空自动分配端口），详见 [手册](docs/manual.md#十远程连接tailcat-隧道)
 - REST API 与 Web 控制台：
   - `http://127.0.0.1:19091/` 内嵌 React 19 + Tailwind 4 Web 控制台（通过官方 Registry 集成 beUI Button、Switch、Tabs 与 Table 源码，不依赖 Radix UI；概览含实时速率条，节点页显示订阅流量/到期信息，活动连接页展示域名、入口、进程与出口链路）
@@ -92,6 +93,7 @@ proxyd main-auto [on|off]        proxyd main-port 42999   # 主端口最优节�
 proxyd main-node <节点名|key|off>                         # 主端口固定节点（可按名称）/ 清除
 proxyd conn list | proxyd conn close <id|all>             # 活动连接查看/关闭
 proxyd traffic                                            # 实时上/下行速率
+proxyd ls                                                 # 打开现代化只读 TUI（h/l 切页、j/k 滚动、q 退出）
 proxyd dns-preset [off|fake-ip|redir-host]   proxyd update-check [on|off]
 proxyd config export [--full] -o 备份.yaml | proxyd config import 备份.yaml
 proxyd refresh                   proxyd test
@@ -105,6 +107,8 @@ proxyd scp ./file nas:/tmp/    # 经隧道 scp 传文件（对端需 serve 22）
 ```
 
 启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：侧边栏以 Clash Verge 风格拆分为 运行概况 / 代理节点 / 订阅管理 / 代理入口 / 策略分组 / 访问规则 / 运行日志 / 活动连接 / 系统设置。控制台可查看实时流量趋势、搜索与筛选节点、启停和编辑订阅、开关逐节点端口映射、编辑分组与自定义规则、暂停连接或日志刷新，以及一键切换 规则/全局/直连 模式。系统设置采用页内分区导航，可管理主端口、自动选优、TUN、系统代理、开机自启与配置备份；配置导入会先展示差异预览，确认摘要未变化后才原子写入。常规状态每 10 秒刷新，活动连接页停留期间每 2 秒更新；并提供 `⌘K` / `Ctrl+K` 命令面板执行跳页、刷新、测速与模式切换。
+
+偏好终端时可运行 **`proxyd ls`**。TUI 每 3 秒读取与 Web 控制台同源的只读接口，并通过实时流量流更新速率；支持数字键或 `h/l` 切页、`j/k` 滚动、`r` 立即刷新、`?` 查看帮助、`q` 退出。它不提供切换、编辑、测速、刷新订阅或关闭连接等操作。
 
 也可以命令行开关系统代理（指向主端口）：
 

@@ -131,7 +131,7 @@ func TestResetRemoteTempKey(t *testing.T) {
 		t.Fatal("未生成时读取应报错")
 	}
 	manual := tailcat.NewPrivateKey().Private.Public().String()
-	if err := a.SetRemoteAllow([]string{manual}); err != nil {
+	if err := a.SetRemoteAllow([]config.RemoteAllowEntry{{Key: manual}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -154,7 +154,7 @@ func TestResetRemoteTempKey(t *testing.T) {
 		t.Fatal("重置应生成全新身份")
 	}
 	// 手动白名单条目不受重置影响。
-	if got := a.Config().Remote.Allow; len(got) != 1 || got[0] != manual {
+	if got := a.Config().Remote.Allow; len(got) != 1 || got[0].Key != manual {
 		t.Fatalf("手动白名单被重置影响: %+v", got)
 	}
 }
@@ -169,14 +169,14 @@ func TestSetRemoteAllow(t *testing.T) {
 	}
 	defer a.stopRemote()
 
-	if err := a.SetRemoteAllow([]string{"nodekey:bad"}); err == nil {
+	if err := a.SetRemoteAllow([]config.RemoteAllowEntry{{Key: "nodekey:bad"}}); err == nil {
 		t.Fatal("非法公钥应被拒绝")
 	}
 	pub := tailcat.NewPrivateKey().Private.Public().String()
-	if err := a.SetRemoteAllow([]string{pub}); err != nil {
+	if err := a.SetRemoteAllow([]config.RemoteAllowEntry{{Name: "家里", Key: pub}}); err != nil {
 		t.Fatalf("合法公钥应被接受: %v", err)
 	}
-	if got := a.Config().Remote.Allow; len(got) != 1 || got[0] != pub {
+	if got := a.Config().Remote.Allow; len(got) != 1 || got[0].Key != pub || got[0].Name != "家里" {
 		t.Fatalf("白名单未落盘: %+v", got)
 	}
 	if err := a.SetRemoteAllow(nil); err != nil {

@@ -97,13 +97,13 @@ func (s *Server) handleSetRemoteServe(w http.ResponseWriter, r *http.Request) {
 // handleSetRemoteAllow 整体替换客户端公钥白名单（空列表恢复放行所有）。
 func (s *Server) handleSetRemoteAllow(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Keys []string `json:"keys"`
+		Entries []config.RemoteAllowEntry `json:"entries"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if err := s.app.SetRemoteAllow(req.Keys); err != nil {
+	if err := s.app.SetRemoteAllow(req.Entries); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

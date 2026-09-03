@@ -32,6 +32,13 @@ import (
 
 var version = "dev"
 
+// main 是 proxyd 命令行入口，负责把首个位置参数分派到对应的 CLI 用例。
+//
+// 参数说明：无；参数来自 os.Args。
+//
+// 返回值说明：无；命令成功时正常退出，失败时通过 log.Fatalf 输出错误并以非零状态退出。
+//
+// 错误情况：未知命令会打印 usage 并退出 2；子命令错误会保留原始原因并退出 1。
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetOutput(io.MultiWriter(os.Stderr, logbuf.NewWriter(logbuf.Default)))
@@ -106,6 +113,8 @@ func main() {
 			err = cmdSCP(os.Args[2:])
 		case "traffic":
 			err = cmdTraffic(os.Args[2:])
+		case "ls":
+			err = cmdLS(os.Args[2:])
 		case "version", "-v", "--version":
 			fmt.Printf("proxyd %s\n", version)
 		case "-h", "--help", "help":
@@ -129,6 +138,13 @@ func looksLikeURL(s string) bool {
 	return len(s) > 8 && (s[:7] == "http://" || s[:8] == "https://")
 }
 
+// usage 将完整命令帮助写到标准错误，供 help 与未知命令分支复用。
+//
+// 参数说明：无。
+//
+// 返回值说明：无；帮助文本直接写入 os.Stderr。
+//
+// 错误情况：标准错误写入失败不会中断进程，命令分派层仍负责最终退出状态。
 func usage() {
 	fmt.Fprintf(os.Stderr, `proxyd %s — 多节点端口映射代理工具
 
@@ -169,6 +185,7 @@ usage:
   proxyd update-check [on|off]          查看/开关启动版本检查
   proxyd conn list|close <id|all>       查看/关闭活动连接
   proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
+  proxyd ls [-c 配置]                   启动只读 TUI，展示 Web 控制台数据
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 远程连接（tailcat 隧道，与代理功能独立）:

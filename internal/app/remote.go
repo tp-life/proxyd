@@ -103,18 +103,18 @@ func (a *App) SetRemoteServe(ports []int) error {
 }
 
 // SetRemoteAllow 整体替换客户端公钥白名单并持久化；空列表恢复为放行所有客户端。
-// 每个公钥都经 remote.ValidateClientKey 严格解析（nodekey: 形式）。
-func (a *App) SetRemoteAllow(keys []string) error {
-	if err := config.ValidateRemoteAllow(keys); err != nil {
+// 条目别名仅用于管理展示；每个公钥都经 remote.ValidateClientKey 严格解析（nodekey: 形式）。
+func (a *App) SetRemoteAllow(entries []config.RemoteAllowEntry) error {
+	if err := config.ValidateRemoteAllow(entries); err != nil {
 		return err
 	}
-	for _, k := range keys {
-		if _, err := remote.ValidateClientKey(k); err != nil {
+	for _, e := range entries {
+		if _, err := remote.ValidateClientKey(e.Key); err != nil {
 			return err
 		}
 	}
 	return a.mutateRemote(func(r *config.RemoteConfig) error {
-		r.Allow = append([]string(nil), keys...)
+		r.Allow = append([]config.RemoteAllowEntry(nil), entries...)
 		return nil
 	})
 }

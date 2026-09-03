@@ -3,11 +3,42 @@ package config
 // 「远程连接」周边模块配置段：RemoteConfig/RemotePeer/RemoteForward 及其校验。
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
+
+// RemoteAllowEntry 是一条客户端白名单条目：Key 为客户端 node 公钥，
+// Name 为可选管理别名（供 CLI/Web 按别名识别与删除，不影响握手判定）。
+type RemoteAllowEntry struct {
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	Key  string `yaml:"key" json:"key"`
+}
+
+// UnmarshalYAML 兼容旧的纯字符串写法（- nodekey:...，无别名）。
+func (e *RemoteAllowEntry) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		e.Name = ""
+		e.Key = value.Value
+		return nil
+	}
+	type plain RemoteAllowEntry
+	return value.Decode((*plain)(e))
+}
+
+// UnmarshalJSON 同样兼容旧的纯字符串 JSON 形式。
+func (e *RemoteAllowEntry) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		e.Name = ""
+		return json.Unmarshal(data, &e.Key)
+	}
+	type plain RemoteAllowEntry
+	return json.Unmarshal(data, (*plain)(e))
+}
 
 // RemotePeer 是一个保存的远程隧道端点（tailcat token 的命名别名），
 // 供 forwards 与 CLI 按名称引用。
@@ -37,7 +68,7 @@ type RemoteConfig struct {
 	Region     string          `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
 	DERPMapURL string          `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
 	Serve      []int           `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
-	Allow      []string        `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端 node 公钥白名单；空=放行所有持有 token 的客户端
+	Allow      []RemoteAllowEntry `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端公钥白名单（name 为可选管理别名）；空=放行所有持有 token 的客户端
 	TempKey    string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`       // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
 	KeyFile    string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`       // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
 	BuiltinSSH bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"` // 内嵌免密 SSH 服务：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证），不再转发 127.0.0.1:22，无需系统 sshd
@@ -49,7 +80,7 @@ type RemoteConfig struct {
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
-	out.Allow = append([]string(nil), r.Allow...)
+	out.Allow = append([]RemoteAllowEntry(nil), r.Allow...)
 	out.Remotes = append([]RemotePeer(nil), r.Remotes...)
 	out.Forwards = append([]RemoteForward(nil), r.Forwards...)
 	return out
@@ -70,19 +101,26 @@ func ValidateRemoteServe(ports []int) error {
 	return nil
 }
 
-// ValidateRemoteAllow 校验客户端公钥白名单的结构（非空、nodekey: 前缀、去重）；
-// 密钥格式本身的严格解析由 remote 包（tailcat 依赖的唯一入口）兜底。
-func ValidateRemoteAllow(keys []string) error {
-	seen := map[string]bool{}
-	for i, k := range keys {
-		k = strings.TrimSpace(k)
+// ValidateRemoteAllow 校验客户端公钥白名单的结构（公钥 nodekey: 前缀、按公钥去重、
+// 非空别名不重复）；密钥格式本身的严格解析由 remote 包（tailcat 依赖的唯一入口）兜底。
+func ValidateRemoteAllow(entries []RemoteAllowEntry) error {
+	seenKey := map[string]bool{}
+	seenName := map[string]bool{}
+	for i, e := range entries {
+		k := strings.TrimSpace(e.Key)
 		if !strings.HasPrefix(k, "nodekey:") {
 			return fmt.Errorf("allow[%d]: 客户端公钥须为 nodekey: 开头，got %q", i, k)
 		}
-		if seen[k] {
+		if seenKey[k] {
 			return fmt.Errorf("allow[%d]: 公钥重复", i)
 		}
-		seen[k] = true
+		seenKey[k] = true
+		if n := strings.TrimSpace(e.Name); n != "" {
+			if seenName[n] {
+				return fmt.Errorf("allow[%d]: 别名 %q 重复", i, n)
+			}
+			seenName[n] = true
+		}
 	}
 	return nil
 }
