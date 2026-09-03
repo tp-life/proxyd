@@ -11,6 +11,14 @@ import (
 )
 
 // cmdAutostart 开关/查看开机自启（直接操作 OS 自启项，无需实例运行）。
+//
+// 参数说明：
+//   - args: []string，包含可选 -c 配置路径及 on、off、status 操作。
+//
+// 返回值说明：error，参数、配置解析和系统服务操作全部成功时为 nil。
+//
+// 错误情况：参数非法、配置不可读、路径解析失败或平台自启项操作失败时返回错误；
+// macOS 安装/移除 LaunchDaemon 时系统会请求管理员授权。
 func cmdAutostart(args []string) error {
 	fs := flag.NewFlagSet("autostart", flag.ExitOnError)
 	cfgFile := fs.String("c", config.DefaultPath(), "配置文件路径")

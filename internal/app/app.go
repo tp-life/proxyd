@@ -101,6 +101,11 @@ type App struct {
 	// remote 是「远程连接」周边模块（tailcat 隧道），与代理数据面独立；
 	// 由 initRemote 创建，Run 启动时按配置应用，Shutdown 时关闭。
 	remote *remote.Manager
+
+	// remoteMutationMu 串行化完整的 remote 配置事务。单独的 a.mu 只能保护某个
+	// 内存读写片段，无法覆盖“克隆 → 调和运行态 → 落盘 → 失败回滚”的跨阶段过程；
+	// 若两个 API 并发修改，不加此锁会出现后一次变更被前一次持久化覆盖的问题。
+	remoteMutationMu sync.Mutex
 }
 
 // New 创建 App，并在配置已开启 TUN 时提前校验当前进程权限。
@@ -353,7 +358,15 @@ func normalizeBuildVersion(raw string) string {
 // Config 返回只读用的运行配置。
 func (a *App) Config() *config.Config { return a.cfg }
 
-// SetAutostart 注册/移除开机自启项（OS 级状态，不写入配置文件）。
+// SetAutostart 注册/移除开机自启项（OS 级状态，不写入配置文件）。macOS 使用
+// system LaunchDaemon，并以当前用户身份运行实际服务，因此无需登录即可启动。
+//
+// 参数说明：
+//   - enabled: bool，true 注册并立即启动，false 移除平台自启项。
+//
+// 返回值说明：error，目标状态完成时为 nil。
+//
+// 错误情况：配置路径不可用、管理员授权被拒绝或平台服务管理器操作失败时返回错误。
 func (a *App) SetAutostart(enabled bool) error {
 	if !enabled {
 		return autostart.Off()
@@ -366,12 +379,24 @@ func (a *App) SetAutostart(enabled bool) error {
 }
 
 // AutostartStatus 报告自启项是否存在（查询失败按 false 处理）。
+//
+// 参数说明：无。
+//
+// 返回值说明：bool，自启项存在且查询成功时为 true。
+//
+// 错误情况：底层查询错误被折叠为 false，避免概览接口因平台状态异常整体失败。
 func (a *App) AutostartStatus() bool {
 	on, err := autostart.Status()
 	return err == nil && on
 }
 
 // autostartOptions 构建注册自启项的参数：二进制与配置文件均取绝对路径。
+//
+// 参数说明：无。
+//
+// 返回值说明：autostart.Options 和 error，成功时包含当前二进制、配置与状态目录。
+//
+// 错误情况：应用未从配置文件启动，或可执行文件/配置路径无法绝对化时返回错误。
 func (a *App) autostartOptions() (autostart.Options, error) {
 	if a.cfgPath == "" {
 		return autostart.Options{}, fmt.Errorf("无配置文件路径，无法注册自启（请先以配置文件方式运行）")
@@ -426,8 +451,10 @@ func (a *App) Run(ctx context.Context) error {
 
 	refreshTick := time.NewTicker(a.cfg.RefreshInterval.D())
 	healthTick := time.NewTicker(a.cfg.HealthInterval.D())
+	remoteAllowCleanupTick := time.NewTicker(time.Minute)
 	defer refreshTick.Stop()
 	defer healthTick.Stop()
+	defer remoteAllowCleanupTick.Stop()
 
 	for {
 		select {
@@ -442,6 +469,12 @@ func (a *App) Run(ctx context.Context) error {
 		case <-healthTick.C:
 			if err := a.Refresh(ctx, false); err != nil {
 				log.Printf("[health] %v", err)
+			}
+		case now := <-remoteAllowCleanupTick.C:
+			// TTL 在连接授权时已实时生效；分钟清扫负责从持久配置中移除过期项，
+			// 使 CLI/Web 状态与磁盘配置最终收敛，同时避免为每个条目创建定时器。
+			if _, err := a.pruneExpiredRemoteAllow(now); err != nil {
+				log.Printf("[remote] 清扫过期客户端授权失败: %v", err)
 			}
 		}
 	}

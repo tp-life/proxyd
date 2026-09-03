@@ -591,6 +591,28 @@ func (c *Config) PortMappingEnabled() bool {
 	return c != nil && (c.PortMapping == nil || *c.PortMapping)
 }
 
+// PortMappingEnabledFor 返回指定来源（订阅名或 manual）的节点是否参与一对一端口监听生成。
+//
+// 参数说明：
+//   - subscription：节点来源名；订阅按自身 port-mapping 字段判定。
+//
+// 返回值说明：
+//   - bool：订阅存在时返回其显式设置（缺失默认开启）；来源不是任何已配置订阅
+//     （如手动节点 manual）时返回 true，即非订阅来源只跟随全局开关。
+//
+// 错误情况：无；nil 接收者按关闭处理，与 PortMappingEnabled 的防御语义一致。
+func (c *Config) PortMappingEnabledFor(subscription string) bool {
+	if c == nil {
+		return false
+	}
+	for _, sub := range c.Subscriptions {
+		if sub.Name == subscription {
+			return sub.PortMappingEnabled()
+		}
+	}
+	return true
+}
+
 // Validate checks the config for structural errors.
 func (c *Config) Validate() error {
 	if len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {

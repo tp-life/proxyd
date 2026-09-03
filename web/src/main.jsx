@@ -15,7 +15,7 @@
  * 如果 `#root` 不存在、静态资源损坏、或后端 API 不可达，页面会显示加载/错误反馈。
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -56,7 +56,6 @@ import { LogsPage } from "@/pages/LogsPage";
 import { NodesPage } from "@/pages/NodesPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { PortsPage } from "@/pages/PortsPage";
-import { RemotePage } from "@/pages/RemotePage";
 import { RulesPage } from "@/pages/RulesPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SubscriptionsPage } from "@/pages/SubscriptionsPage";
@@ -64,6 +63,31 @@ import { requestJSON, requestText } from "@/lib/api";
 import { MODE_LABELS } from "@/lib/constants";
 import { classNames, proxyEnvCommands, proxyURL } from "@/lib/format";
 import "./styles.css";
+
+/**
+ * mapRemotePageModule 把 RemotePage 的命名导出适配为 React.lazy 所需的默认导出结构。
+ *
+ * 参数说明：module 为动态加载后的 RemotePage ES 模块。
+ * 返回值说明：返回 `{default: React.ComponentType}`。
+ * 可能的异常/错误情况：模块缺少 RemotePage 导出时，React 渲染阶段会报告无效组件。
+ */
+function mapRemotePageModule(module) {
+  return { default: module.RemotePage };
+}
+
+/**
+ * loadRemotePage 按需加载远程连接页面。
+ *
+ * 参数说明：无。
+ * 返回值说明：返回 Promise，仅在用户进入“远程连接”页时下载对应页面代码。
+ * 可能的异常/错误情况：静态资源加载失败时 Promise 拒绝，由 React 错误边界按现有策略处理。
+ */
+function loadRemotePage() {
+  return import("@/pages/RemotePage").then(mapRemotePageModule);
+}
+
+// Remote 页面与更大的 xterm 运行时形成两级懒加载，首页不会携带远程终端相关实现。
+const RemotePage = lazy(loadRemotePage);
 
 const NAV_ITEMS = [
   { id: "overview", label: "运行概况", shortLabel: "概况", group: "概览", icon: Activity },
@@ -823,7 +847,11 @@ function App() {
             )}
             {activeView === "logs" && <LogsPage />}
             {activeView === "connections" && <ConnectionsPage {...connections} />}
-            {activeView === "remote" && <RemotePage {...remote} />}
+            {activeView === "remote" && (
+              <Suspense fallback={<EmptyState title="正在加载远程连接页面" detail="首次进入时按需加载远程管理与终端入口。" />}>
+                <RemotePage {...remote} />
+              </Suspense>
+            )}
             {activeView === "settings" && (
               <SettingsPage
                 forms={forms}

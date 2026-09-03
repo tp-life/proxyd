@@ -8,15 +8,67 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// RemoteAllowEntry 是一条客户端白名单条目：Key 为客户端 node 公钥，
-// Name 为可选管理别名（供 CLI/Web 按别名识别与删除，不影响握手判定）。
+// RemoteAllowEntry 是一条客户端白名单授权：Key 是客户端 node 公钥，Name 是管理别名，
+// ExpiresAt 与 Ports 分别收紧授权时间和目标端口；两者为空时保持永久、全部暴露端口可用。
 type RemoteAllowEntry struct {
-	Name string `yaml:"name,omitempty" json:"name,omitempty"`
-	Key  string `yaml:"key" json:"key"`
+	Name      string     `yaml:"name,omitempty" json:"name,omitempty"`
+	Key       string     `yaml:"key" json:"key"`
+	ExpiresAt *time.Time `yaml:"expires-at,omitempty" json:"expires_at,omitempty"`
+	Ports     []int      `yaml:"ports,omitempty" json:"ports,omitempty"`
+}
+
+// Clone 返回与原授权条目互不共享可变切片和时间指针的副本。
+//
+// 参数说明：无。
+//
+// 返回值说明：RemoteAllowEntry，可由配置事务独立修改的深拷贝。
+//
+// 错误情况：无；nil 的 ExpiresAt 与 Ports 会保持 nil。
+func (e RemoteAllowEntry) Clone() RemoteAllowEntry {
+	out := e
+	out.Ports = append([]int(nil), e.Ports...)
+	if e.ExpiresAt != nil {
+		expiresAt := *e.ExpiresAt
+		out.ExpiresAt = &expiresAt
+	}
+	return out
+}
+
+// IsExpired 判断授权在指定时刻是否已经到期。
+//
+// 参数说明：
+//   - now: time.Time，调用方提供的当前时间，便于连接校验与测试使用同一时间基准。
+//
+// 返回值说明：bool，永久授权返回 false；到期时刻等于 now 也视为已过期。
+//
+// 错误情况：无；零值时间由配置校验拒绝，运行时仍会按已过期保守处理。
+func (e RemoteAllowEntry) IsExpired(now time.Time) bool {
+	return e.ExpiresAt != nil && !now.Before(*e.ExpiresAt)
+}
+
+// AllowsPort 判断授权是否允许访问一个目标端口。
+//
+// 参数说明：
+//   - port: int，隧道连接请求的目标 TCP 端口。
+//
+// 返回值说明：bool，Ports 为空表示允许全部服务端暴露端口，否则仅精确匹配列表成员。
+//
+// 错误情况：无；非法端口不会命中，配置入口另行负责范围校验。
+func (e RemoteAllowEntry) AllowsPort(port int) bool {
+	if len(e.Ports) == 0 {
+		return true
+	}
+	for _, allowedPort := range e.Ports {
+		if allowedPort == port {
+			return true
+		}
+	}
+	return false
 }
 
 // UnmarshalYAML 兼容旧的纯字符串写法（- nodekey:...，无别名）。
@@ -64,26 +116,71 @@ func (f RemoteForward) IsEnabled() bool {
 // RemoteConfig 是「远程连接」周边模块的配置段，基于 tailcat 数据面隧道，
 // 与代理功能完全独立（不经过 mihomo）。
 type RemoteConfig struct {
-	Enabled    bool            `yaml:"enabled" json:"enabled"`                             // 隧道服务端总开关
-	Region     string          `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
-	DERPMapURL string          `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
-	Serve      []int           `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
+	Enabled    bool               `yaml:"enabled" json:"enabled"`                             // 隧道服务端总开关
+	Region     string             `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
+	DERPMapURL string             `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
+	Serve      []int              `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
 	Allow      []RemoteAllowEntry `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端公钥白名单（name 为可选管理别名）；空=放行所有持有 token 的客户端
-	TempKey    string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`       // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
-	KeyFile    string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`       // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
-	BuiltinSSH bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"` // 内嵌免密 SSH 服务：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证），不再转发 127.0.0.1:22，无需系统 sshd
-	Remotes    []RemotePeer    `yaml:"remotes,omitempty" json:"remotes,omitempty"`
-	Forwards   []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
+	// AllowRestricted 区分“用户明确开启过白名单但授权已全部过期”和“从未配置白名单”。
+	// 它避免清扫最后一条过期授权后意外回到开放模式；普通用户删除最后一条授权时会重置为 false。
+	AllowRestricted bool            `yaml:"allow-restricted,omitempty" json:"allow_restricted,omitempty"`
+	TempKey         string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`         // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
+	KeyFile         string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`         // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
+	BuiltinSSH      bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"`   // 内嵌免密 SSH 服务：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证），不再转发 127.0.0.1:22，无需系统 sshd
+	WebTerminal     bool            `yaml:"web-terminal,omitempty" json:"web_terminal,omitempty"` // 浏览器终端总开关；默认关闭，且非回环 api-listen 开启时必须显式确认暴露风险
+	Remotes         []RemotePeer    `yaml:"remotes,omitempty" json:"remotes,omitempty"`
+	Forwards        []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
 }
 
 // Clone 返回可独立修改的 RemoteConfig 副本，供热更新失败时回滚。
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
-	out.Allow = append([]RemoteAllowEntry(nil), r.Allow...)
+	out.Allow = make([]RemoteAllowEntry, len(r.Allow))
+	for index, entry := range r.Allow {
+		out.Allow[index] = entry.Clone()
+	}
 	out.Remotes = append([]RemotePeer(nil), r.Remotes...)
 	out.Forwards = append([]RemoteForward(nil), r.Forwards...)
 	return out
+}
+
+// ClientWhitelistEnabled 返回服务端是否必须限制客户端身份。
+//
+// 参数说明：无。
+//
+// 返回值说明：bool；显式限制、现存 allow 条目或临时身份任一存在时返回 true。
+//
+// 错误情况：无；兼容旧配置时即使尚无 allow-restricted 字段，只要 allow 非空仍保持白名单模式。
+func (r RemoteConfig) ClientWhitelistEnabled() bool {
+	return r.AllowRestricted || len(r.Allow) > 0 || strings.TrimSpace(r.TempKey) != ""
+}
+
+// IsLoopbackAPIListen 判断管理 API 是否仅绑定本机回环地址。
+//
+// 参数说明：
+//   - listen: string，配置中的 api-listen，通常为 host:port。
+//
+// 返回值说明：bool，仅 127.0.0.0/8、::1 或 localhost 返回 true；空 host、通配地址、
+// 普通网卡 IP 与无法解析的文本均返回 false。
+//
+// 错误情况：无；格式非法时采取保守策略返回 false，具体地址合法性由配置总校验负责。
+func IsLoopbackAPIListen(listen string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return false
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	// IPv6 zone 只对链路本地等地址有意义；先移除 zone 再解析，::1%zone 仍可按
+	// 回环处理，而任何不可解析主机名都不会被乐观视为安全。
+	if address, _, found := strings.Cut(host, "%"); found {
+		host = address
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ValidateRemoteServe 校验经隧道暴露的本机端口列表（范围与去重），供 API/CLI 入口复用。
@@ -115,6 +212,12 @@ func ValidateRemoteAllow(entries []RemoteAllowEntry) error {
 			return fmt.Errorf("allow[%d]: 公钥重复", i)
 		}
 		seenKey[k] = true
+		if e.ExpiresAt != nil && e.ExpiresAt.IsZero() {
+			return fmt.Errorf("allow[%d]: expires-at 不能为零值时间", i)
+		}
+		if err := ValidateRemoteServe(e.Ports); err != nil {
+			return fmt.Errorf("allow[%d].ports: %w", i, err)
+		}
 		if n := strings.TrimSpace(e.Name); n != "" {
 			if seenName[n] {
 				return fmt.Errorf("allow[%d]: 别名 %q 重复", i, n)

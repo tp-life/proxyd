@@ -11,7 +11,7 @@
 - 多个订阅源（Clash YAML 和 base64 分享链接两种格式，自动嗅探）
 - 手动节点（`manual-nodes`）：自有 http(s)/socks5 代理或 ss/vmess 等分享链接，与订阅节点同等参与测速/映射/分组
 - 可用节点自动映射到指定端口区间，映射关系稳定（重启/刷新后同一节点尽量保持原端口）
-- 逐节点端口映射可独立热开关（`port-mapping`）：关闭时保留稳定分配关系，不启动对应监听端口，重新开启后恢复原映射
+- 逐节点端口映射可独立热开关（`port-mapping`）：关闭时保留稳定分配关系，不启动对应监听端口，重新开启后恢复原映射；每个订阅还可单独开关（只停该订阅节点的监听，不影响选路）
 - 节点快照持久化（`state-dir/nodes.json`）：启动即恢复最近一次的可用节点提供服务，断网/订阅挂掉也不丢节点
 - 定时刷新订阅（`refresh-interval`）+ 定时健康检测（`health-interval`），死节点自动下端口、新节点自动补位
 - 主端口完整支持 Clash 规则与三种代理模式（rule / global / direct），可热切换；可在线修改端口号（`POST /api/main-port` / `proxyd main-port`）
@@ -21,7 +21,7 @@
 - 自定义规则（追加式，前置到内置规则之前）+ 规则 URL 导入（mihomo 规则文本 / gfwlist）+ 节点分组端口（支持 url-test / fallback / load-balance，也可按订阅动态生成成员）
 - 链式代理：透传 Clash 节点的 `dialer-proxy`，自动修正订阅合并后的名称引用并执行完整链路测速；支持指向节点或 proxyd 策略组，不再使用 mihomo 已移除的 `relay` 组
 - 后台守护模式：`proxyd start|stop|restart|status`（日志落 `state-dir/proxyd.log`）；`proxyd` 无参数等价于 `serve`
-- 开机自启：`proxyd autostart on|off|status`（macOS launchd / Linux systemd user / Windows 注册表）或 Web 设置页开关
+- 开机自启：`proxyd autostart on|off|status`（macOS 系统级 LaunchDaemon / Linux systemd user / Windows 注册表）或 Web 设置页开关
 - 系统代理开关：CLI `proxyd sysproxy on|off|status` 或 Web 设置页，把系统代理指向主端口（macOS networksetup / Linux gsettings / Windows 注册表）
 - TUN 模式：配置/API/Web/CLI 热开关，支持完整系统 TCP/UDP 流量接管；macOS sudo、Linux root/CAP_NET_ADMIN、Windows 管理员权限不足时返回平台指引
 - DNS 预设：`off | fake-ip | redir-host` 三档热切换，手写 `dns:` 始终优先；TUN 开启时控制台建议 fake-ip
@@ -69,7 +69,7 @@ proxyd start        # 后台运行（日志 state-dir/proxyd.log），自动等�
 proxyd status       # 查看 pid / 端口 / Web 地址
 proxyd restart      # 重启
 proxyd stop         # 停止（SIGTERM 优雅退出）
-proxyd autostart on   # 注册开机自启（macOS launchd / Linux systemd user / Windows 注册表）
+proxyd autostart on   # 注册开机自启（macOS LaunchDaemon / Linux systemd user / Windows 注册表）
 ```
 
 日常管理也有全套 CLI（操作运行中实例，需先 start/serve）：
@@ -144,7 +144,7 @@ PORT   NODE              SUBSCRIPTION   DELAY
 - `subscriptions`：多个订阅，`type` 默认 auto 自动嗅探
 - `manual-nodes`：手动节点（http(s)/socks5 URL 或分享链接），落盘在配置文件，与订阅节点同等待遇
 - `port-range`：节点映射端口区间；`mixed-port`：主端口（默认区间前一位，Web/CLI 可在线修改）
-- `port-mapping`：逐节点端口映射总开关（默认 true）；关闭后不启动映射监听，但稳定端口分配仍保留并可在 Web 查看
+- `port-mapping`：逐节点端口映射总开关（默认 true）；关闭后不启动映射监听，但稳定端口分配仍保留并可在 Web 查看。订阅上还有同名字段（默认 true）做订阅级开关，只停该订阅节点的监听
 - `main-auto`：主端口使用最优节点（默认 false）——主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
 - `main-node`：主端口固定节点（默认空）——不开优选时主端口跳过规则、直达指定节点（存节点 Key）；`main-auto` 开启时被忽略；节点失效自动回退规则模式、配置保留
 - `auto-port`：自动选优端口（0=关闭），固定走全部可用节点中延迟最低者，与主端口模式互不影响
@@ -173,7 +173,7 @@ geox-url:
 
 一条命令注册开机自启（推荐）：`proxyd autostart on`（`status`/`off` 查看与移除）。
 
-- **macOS**：写 `~/Library/LaunchAgents/com.proxyd.plist`（RunAtLoad + KeepAlive，日志指向 state-dir/proxyd.log）并 `launchctl bootstrap` 立即启动
+- **macOS**：经管理员授权写 `/Library/LaunchDaemons/com.proxyd.plist`，在 `system` 域以当前用户身份运行（RunAtLoad + KeepAlive，日志指向 state-dir/proxyd.log）；无需用户登录，冷启动、断电恢复或系统重启后都会自动拉起，并在迁移时清理旧 `LaunchAgents` 项
 - **Linux**：写 `~/.config/systemd/user/proxyd.service` 并 `systemctl --user enable --now`（日志看 `journalctl --user -u proxyd`）
 - **Windows**：写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，登录时执行 `proxyd start`（派生后台进程，不弹控制台窗口）
 

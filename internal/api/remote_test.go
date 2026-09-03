@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tailscale/tailcat"
 
@@ -30,7 +32,7 @@ func newRemoteTestToken(t *testing.T) string {
 func newRemoteTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := &config.Config{StateDir: dir}
+	cfg := &config.Config{StateDir: dir, APIListen: "127.0.0.1:19091"}
 	a, err := app.New(cfg, filepath.Join(dir, "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +83,14 @@ func freeListenPort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
+// TestRemoteAPI 验证 remote 基础 HTTP 用例及总开关对 builtin-ssh 的联动行为。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；状态、远端、转发、端口与开关联动接口均符合契约时测试通过。
+//
+// 错误情况：测试服务无法监听、HTTP 请求失败、响应码或状态字段不符合预期时测试失败。
 func TestRemoteAPI(t *testing.T) {
 	_, addr := newRemoteTestServer(t)
 	base := "http://" + addr
@@ -92,6 +102,17 @@ func TestRemoteAPI(t *testing.T) {
 	}
 	if st["enabled"] != false || st["running"] != false {
 		t.Fatalf("initial status: %v", st)
+	}
+
+	// Web 使用的 remote 总开关端点必须联动 builtin-ssh；先独立开启内嵌 SSH，
+	// 再关闭总开关，验证响应与持久配置不会留下“remote 关、SSH 开”的残余状态。
+	code, st = remoteAPIReq(t, http.MethodPost, base+"/api/remote/builtin-ssh", map[string]bool{"enabled": true})
+	if code != http.StatusOK || st["builtin_ssh"] != true {
+		t.Fatalf("开启 builtin-ssh 失败: code=%d status=%v", code, st)
+	}
+	code, st = remoteAPIReq(t, http.MethodPost, base+"/api/remote", map[string]bool{"enabled": false})
+	if code != http.StatusOK || st["enabled"] != false || st["builtin_ssh"] != false {
+		t.Fatalf("remote 总开关未联动关闭 builtin-ssh: code=%d status=%v", code, st)
 	}
 
 	// 新增远端（合法 token），列表中应打码。
@@ -213,6 +234,54 @@ func TestRemoteAPIPersistsConfig(t *testing.T) {
 	}
 }
 
+// TestRemoteWebTerminalSafetyAPI 验证默认 404、builtin-ssh 引导与非回环二次确认门。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；断言失败时由 testing 标记用例失败。
+//
+// 错误情况：仅启动回环 HTTP 测试服务，不建立 DERP 或真实 shell；失败表示高权限
+// Web 终端可能在未确认时暴露，或关闭状态仍泄露端点存在。
+func TestRemoteWebTerminalSafetyAPI(t *testing.T) {
+	_, addr := newRemoteTestServer(t)
+	base := "http://" + addr
+	if code, _ := remoteAPIReq(t, http.MethodGet, base+"/api/remote/terminal", nil); code != http.StatusNotFound {
+		t.Fatalf("默认关闭的终端端点应返回 404，got %d", code)
+	}
+	if code, status := remoteAPIReq(t, http.MethodPost, base+"/api/remote/web-terminal", map[string]bool{"enabled": true}); code != http.StatusOK || status["web_terminal"] != true {
+		t.Fatalf("回环 API 应允许直接开启 Web 终端，code=%d status=%v", code, status)
+	}
+	if code, _ := remoteAPIReq(t, http.MethodGet, base+"/api/remote/terminal", nil); code != http.StatusConflict {
+		t.Fatalf("builtin-ssh 未开启时应在升级前返回明确 409，got %d", code)
+	}
+	if code, _ := remoteAPIReq(t, http.MethodPost, base+"/api/remote/web-terminal", map[string]bool{"enabled": false}); code != http.StatusOK {
+		t.Fatalf("关闭 Web 终端失败: %d", code)
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	application, err := app.New(&config.Config{StateDir: dir, APIListen: "0.0.0.0:19091"}, cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", application)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { server.Shutdown(t.Context()) })
+	nonLoopbackBase := "http://" + server.ln.Addr().String()
+	if code, _ := remoteAPIReq(t, http.MethodPost, nonLoopbackBase+"/api/remote/web-terminal", map[string]bool{"enabled": true}); code != http.StatusBadRequest {
+		t.Fatalf("非回环 API 未确认时必须拒绝开启，got %d", code)
+	}
+	if code, status := remoteAPIReq(t, http.MethodPost, nonLoopbackBase+"/api/remote/web-terminal", map[string]bool{
+		"enabled":              true,
+		"acknowledge_exposure": true,
+	}); code != http.StatusOK || status["web_terminal"] != true || status["api_loopback"] != false {
+		t.Fatalf("非回环 API 显式确认后应可开启，code=%d status=%v", code, status)
+	}
+}
+
 // TestRemoteAPIPeerToken 验证按名称取回已保存远端的完整 token；名称不存在时 404。
 func TestRemoteAPIPeerToken(t *testing.T) {
 	_, addr := newRemoteTestServer(t)
@@ -269,5 +338,125 @@ func TestRemoteAPIForwardAutoAssign(t *testing.T) {
 			t.Fatalf("两次自动分配得到相同地址 %q", got)
 		}
 		listens[got] = true
+	}
+}
+
+// TestRemoteSecurityMetadataAPI 验证 TTL/端口授权的 JSON 往返、空审计查询和参数边界。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；断言失败时由 testing 标记用例失败。
+//
+// 错误情况：测试启动本机回环 HTTP 服务；监听或请求失败会直接终止用例。
+func TestRemoteSecurityMetadataAPI(t *testing.T) {
+	_, addr := newRemoteTestServer(t)
+	base := "http://" + addr
+	publicKey := tailcat.NewPrivateKey().Private.Public().String()
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+
+	code, status := remoteAPIReq(t, "POST", base+"/api/remote/allow", map[string]any{
+		"entries": []map[string]any{{
+			"name":       "临时维护",
+			"key":        publicKey,
+			"expires_at": expiresAt.Format(time.RFC3339),
+			"ports":      []int{22, 8080},
+		}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("设置带 TTL/端口的授权失败: code=%d response=%v", code, status)
+	}
+	entries, _ := status["allow"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("授权条目未返回: %v", status)
+	}
+	entry := entries[0].(map[string]any)
+	ports, _ := entry["ports"].([]any)
+	if entry["expires_at"] != expiresAt.Format(time.RFC3339) || len(ports) != 2 || status["allow_restricted"] != true {
+		t.Fatalf("TTL/端口/受限模式响应错误: %v", status)
+	}
+
+	// CLI 与 Web 都调用该端点重置临时身份；响应中的手动 nodekey 及其最小授权
+	// 元数据必须原样保留，避免前端用响应替换状态后看起来像“白名单被重置”。
+	code, status = remoteAPIReq(t, http.MethodPost, base+"/api/remote/tempkey/reset", nil)
+	if code != http.StatusOK || status["temp_key"] == "" {
+		t.Fatalf("重置临时身份失败: code=%d response=%v", code, status)
+	}
+	entries, _ = status["allow"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("临时身份重置后手动 nodekey 丢失: %v", status)
+	}
+	entry = entries[0].(map[string]any)
+	ports, _ = entry["ports"].([]any)
+	if entry["key"] != publicKey || entry["expires_at"] != expiresAt.Format(time.RFC3339) || len(ports) != 2 {
+		t.Fatalf("临时身份重置改写了手动授权: %v", entry)
+	}
+
+	code, audit := remoteAPIReq(t, "GET", base+"/api/remote/audit?tail=10", nil)
+	if code != http.StatusOK {
+		t.Fatalf("查询审计失败: code=%d response=%v", code, audit)
+	}
+	if entries, ok := audit["entries"].([]any); !ok || len(entries) != 0 {
+		t.Fatalf("初始审计应为空数组: %v", audit)
+	}
+	if code, _ = remoteAPIReq(t, "GET", base+"/api/remote/audit?tail=501", nil); code != http.StatusBadRequest {
+		t.Fatalf("越界 tail 应返回 400，got %d", code)
+	}
+	if code, _ = remoteAPIReq(t, "POST", base+"/api/remote/ping", map[string]string{"remote": "missing"}); code != http.StatusBadRequest {
+		t.Fatalf("未知远端探测应返回 400，got %d", code)
+	}
+}
+
+// TestRemoteKeyFileAPI 验证专用下载端点与原始 JSON 导入端点不会泄露到普通状态接口。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；断言失败时由 testing 标记用例失败。
+//
+// 错误情况：测试启动回环 HTTP 服务；请求、读取或 JSON 解析错误会终止用例。
+func TestRemoteKeyFileAPI(t *testing.T) {
+	_, addr := newRemoteTestServer(t)
+	base := "http://" + addr
+
+	response, err := http.Get(base + "/api/remote/keyfile/export")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("导出密钥失败: status=%d err=%v", response.StatusCode, readErr)
+	}
+	if !strings.Contains(response.Header.Get("Content-Disposition"), "attachment") || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("敏感下载响应头不完整: %v", response.Header)
+	}
+	var exportedKey tailcat.PrivateKey
+	if err := json.Unmarshal(exported, &exportedKey); err != nil || exportedKey.Private.IsZero() {
+		t.Fatalf("导出文件格式无效: %v", err)
+	}
+
+	invalidResponse, err := http.Post(base+"/api/remote/keyfile/import", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("非法导入应返回 400，got %d", invalidResponse.StatusCode)
+	}
+
+	importedKey := tailcat.NewPrivateKey()
+	imported, err := json.Marshal(importedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	importResponse, err := http.Post(base+"/api/remote/keyfile/import", "application/json", bytes.NewReader(imported))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer importResponse.Body.Close()
+	if importResponse.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(importResponse.Body)
+		t.Fatalf("合法导入失败: status=%d body=%s", importResponse.StatusCode, body)
 	}
 }

@@ -89,6 +89,8 @@ function normalizeWidth(width) {
  * - resizable: boolean，是否显示列宽拖拽手柄。
  * - className: string，容器附加样式。
  * - getRowClassName: (row) => string，可选行附加 class（如主端口节点高亮）。
+ * - isRowExpanded: (row) => boolean，可选，判断某行是否展示详情。
+ * - renderExpandedRow: (row) => ReactNode，可选，在主行之后渲染跨列详情。
  *
  * 返回值说明：
  * 返回 Radix ScrollArea 包裹的语义化 table。
@@ -107,6 +109,8 @@ function Table({
   resizable = false,
   className,
   getRowClassName,
+  isRowExpanded,
+  renderExpandedRow,
 }) {
   const [sort, setSort] = useState(null);
   const [widths, setWidths] = useState({});
@@ -256,13 +260,23 @@ function Table({
               <tr>
                 <td className="radix-data-table-empty" colSpan={Math.max(1, columns.length)}>{emptyState}</td>
               </tr>
-            ) : rows.map((row, index) => (
-              <tr key={getRowId ? getRowId(row, index) : String(index)} className={getRowClassName?.(row) || undefined}>
-                {columns.map((column) => (
-                  <td key={column.key} style={{ textAlign: column.align || "left" }}>{readCell(row, column)}</td>
-                ))}
-              </tr>
-            ))}
+            ) : rows.map((row, index) => {
+              const rowID = getRowId ? getRowId(row, index) : String(index);
+              return (
+                <React.Fragment key={rowID}>
+                  <tr className={getRowClassName?.(row) || undefined}>
+                    {columns.map((column) => (
+                      <td key={column.key} style={{ textAlign: column.align || "left" }}>{readCell(row, column)}</td>
+                    ))}
+                  </tr>
+                  {isRowExpanded?.(row) && typeof renderExpandedRow === "function" ? (
+                    <tr className="radix-data-table-expanded">
+                      <td colSpan={Math.max(1, columns.length)}>{renderExpandedRow(row)}</td>
+                    </tr>
+                  ) : null}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </ScrollArea.Viewport>

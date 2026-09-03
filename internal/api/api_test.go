@@ -554,6 +554,78 @@ func TestPortMappingAPI(t *testing.T) {
 	}
 }
 
+// TestSubscriptionPortMappingAPI 验证订阅级端口映射开关可经订阅编辑接口热切换，
+// 并在 overview 的订阅条目中暴露；请求体省略 port_mapping 时必须保留原值，
+// 避免旧客户端的启用开关操作意外重置映射开关。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建隔离应用并报告 HTTP/JSON 断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：切换未生效、省略字段时原值被重置，或 overview 未反映最新状态时测试失败。
+func TestSubscriptionPortMappingAPI(t *testing.T) {
+	a, err := app.New(&config.Config{
+		Listen:   "127.0.0.1",
+		Mode:     "rule",
+		LogLevel: "silent",
+		StateDir: t.TempDir(),
+		Rules:    []string{"MATCH,PROXY"},
+		Subscriptions: []config.Subscription{
+			{Name: "sub-a", URL: "https://example.com/sub", Type: "auto"},
+		},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:0", a)
+
+	portMappingOf := func() bool {
+		t.Helper()
+		overview := httptest.NewRecorder()
+		srv.handleOverview(overview, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+		var payload struct {
+			Subs []SubEntry `json:"subscriptions"`
+		}
+		if err := json.Unmarshal(overview.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("解析 overview 失败: %v", err)
+		}
+		if len(payload.Subs) != 1 {
+			t.Fatalf("overview 订阅条目数量异常: %#v", payload.Subs)
+		}
+		return payload.Subs[0].PortMapping
+	}
+
+	if !portMappingOf() {
+		t.Fatal("订阅缺少 port-mapping 字段时 overview 应报告默认开启")
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/subscriptions/sub-a",
+		strings.NewReader(`{"name":"sub-a","url":"https://example.com/sub","type":"auto","port_mapping":false}`))
+	req.SetPathValue("name", "sub-a")
+	srv.handleUpdateSub(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if portMappingOf() {
+		t.Fatal("关闭后 overview 仍报告该订阅参与端口映射")
+	}
+
+	// 省略 port_mapping 的更新（如只改启用状态）必须保留已关闭的映射开关。
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/subscriptions/sub-a",
+		strings.NewReader(`{"name":"sub-a","url":"https://example.com/sub","type":"auto","enabled":true}`))
+	req.SetPathValue("name", "sub-a")
+	srv.handleUpdateSub(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preserve status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if portMappingOf() {
+		t.Fatal("省略 port_mapping 的更新不应重置已关闭的订阅级映射开关")
+	}
+}
+
 // TestDNSPresetAPIRejectsInvalid 验证 DNS 预设接口在进入热更新前拒绝未知枚举。
 //
 // 参数：

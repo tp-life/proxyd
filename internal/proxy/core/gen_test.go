@@ -209,6 +209,60 @@ func TestGeneratePortMappingDisabledKeepsRoutingNodesAndOtherListeners(t *testin
 	}
 }
 
+// TestGenerateSubscriptionPortMappingDisabled 验证订阅级端口映射开关只停该订阅节点的
+// 一对一 listener：节点仍留在 PROXY 路由组与稳定分配中，其他订阅与手动节点的监听不受影响。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于隔离 mihomo 主目录并报告断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：被关订阅的节点仍生成监听、其他来源的监听被误删，或路由组成员丢失时测试失败。
+func TestGenerateSubscriptionPortMappingDisabled(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	disabled := false
+	cfg.Subscriptions = []config.Subscription{
+		{Name: "sub-a", URL: "https://a.example.com/sub", PortMapping: &disabled},
+		{Name: "sub-b", URL: "https://b.example.com/sub"},
+	}
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSubNode("节点A", "sub-a", 10001)},
+		{Port: 42002, Node: fakeSubNode("节点B", "sub-b", 10002)},
+		{Port: 42003, Node: fakeSubNode("手动节点", "manual", 10003)},
+	}
+
+	buf, err := Generate(cfg, assigns, nil)
+	if err != nil {
+		t.Fatalf("订阅级关闭端口映射后生成配置失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	ports := map[int]bool{}
+	for _, raw := range m["listeners"].([]any) {
+		listener := raw.(map[string]any)
+		ports[listener["port"].(int)] = true
+	}
+	if ports[42001] {
+		t.Fatalf("订阅 sub-a 已关闭映射，其节点不应再生成一对一入口: %#v", ports)
+	}
+	if !ports[42002] || !ports[42003] {
+		t.Fatalf("其他订阅与手动节点的监听不应受 sub-a 开关影响: %#v", ports)
+	}
+
+	groups, ok := m["proxy-groups"].([]any)
+	if !ok || len(groups) < 1 {
+		t.Fatalf("缺少 PROXY 组: %#v", m["proxy-groups"])
+	}
+	proxyGroup, ok := groups[0].(map[string]any)
+	if !ok {
+		t.Fatalf("PROXY 组类型异常: %#v", groups[0])
+	}
+	members, ok := proxyGroup["proxies"].([]any)
+	if !ok || len(members) != 4 || members[0] != "节点A" || members[1] != "节点B" || members[2] != "手动节点" || members[3] != "DIRECT" {
+		t.Fatalf("订阅级关闭映射不应移除路由节点，实际成员: %#v", proxyGroup["proxies"])
+	}
+}
+
 // TestGenerateWithDialerProxyDependencies 验证链式入口即使是唯一获得本地端口的节点，
 // 其上游节点仍会作为 proxy-only 出站进入配置，并通过 mihomo 的引用与循环自检。
 //

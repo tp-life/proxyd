@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
@@ -21,28 +22,31 @@ import (
 
 // Status 是远程连接模块的运行时快照，供 API/Web 展示。
 type Status struct {
-	Enabled   bool            `json:"enabled"`             // 配置中的服务端开关
-	Running   bool            `json:"running"`             // 隧道服务端是否在运行
-	Error     string          `json:"error,omitempty"`     // 最近一次启动失败原因
-	Token     string          `json:"token,omitempty"`     // 本机连接 token（tc...，运行中才有）
-	ClientKey string          `json:"client_key,omitempty"` // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
-	Region    string          `json:"region,omitempty"`    // 配置的 region 原值
-	Serve     []int           `json:"serve"`               // 经隧道暴露的本机端口
-	Allow     []config.RemoteAllowEntry `json:"allow"`        // 客户端公钥白名单（含可选别名；空=放行所有）
-	TempKey   string          `json:"temp_key,omitempty"`  // 临时身份公钥（应急 nodekey）
-	KeyFile   string          `json:"key_file"`            // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
-	CustomKeyFile string      `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
-	BuiltinSSH bool           `json:"builtin_ssh"`         // 内嵌免密 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
+	Enabled         bool                      `json:"enabled"`                   // 配置中的服务端开关
+	Running         bool                      `json:"running"`                   // 隧道服务端是否在运行
+	Error           string                    `json:"error,omitempty"`           // 最近一次启动失败原因
+	Token           string                    `json:"token,omitempty"`           // 本机连接 token（tc...，运行中才有）
+	ClientKey       string                    `json:"client_key,omitempty"`      // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
+	Region          string                    `json:"region,omitempty"`          // 配置的 region 原值
+	Serve           []int                     `json:"serve"`                     // 经隧道暴露的本机端口
+	Allow           []config.RemoteAllowEntry `json:"allow"`                     // 客户端公钥白名单（含别名、TTL 与端口限制）
+	AllowRestricted bool                      `json:"allow_restricted"`          // 授权清扫为空后是否继续保持拒绝模式
+	TempKey         string                    `json:"temp_key,omitempty"`        // 临时身份公钥（应急 nodekey）
+	KeyFile         string                    `json:"key_file"`                  // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
+	CustomKeyFile   string                    `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
+	BuiltinSSH      bool                      `json:"builtin_ssh"`               // 内嵌免密 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
+	WebTerminal     bool                      `json:"web_terminal"`              // 浏览器终端总开关；默认关闭，API 层关闭时直接返回 404
 	// ClientActivity 是各已知客户端公钥（白名单+临时身份）当前的入站活动连接数。
-	ClientActivity map[string]int64 `json:"client_activity,omitempty"`
-	Forwards  []ForwardStatus `json:"forwards"`            // 全部转发条目（含禁用项）
+	ClientActivity map[string]int64  `json:"client_activity,omitempty"`
+	Peers          []PeerObservation `json:"peers"`    // 已知入站客户端的连接路径与累计流量
+	Forwards       []ForwardStatus   `json:"forwards"` // 全部转发条目（含禁用项）
 }
 
 // ForwardStatus 是单条本地转发的运行时状态。
 type ForwardStatus struct {
 	Name       string `json:"name"`
-	Listen     string `json:"listen"`        // 规范化后的本地监听地址
-	Remote     string `json:"remote"`        // 配置原值（remotes 名称或 token）
+	Listen     string `json:"listen"` // 规范化后的本地监听地址
+	Remote     string `json:"remote"` // 配置原值（remotes 名称或 token）
 	RemotePort int    `json:"remote_port"`
 	Enabled    bool   `json:"enabled"`
 	Running    bool   `json:"running"`
@@ -56,18 +60,19 @@ type Manager struct {
 	stateDir string
 	logf     func(format string, args ...any)
 
-	mu           sync.Mutex
-	cfg          config.RemoteConfig
-	srv          *tailcat.Server
-	token        string
-	serveErr     string
-	forwards     map[string]*forwardRunner
-	activeClients map[string]int64  // 已知客户端公钥 → 当前入站活动连接数
-	clientLoaded bool             // 是否已尝试加载客户端身份密钥
-	clientPriv   key.NodePrivate  // 持久客户端身份（对端 --allow 白名单用）
-	clientErr    error            // 客户端密钥加载失败原因（惰性加载只尝试一次）
-	autoRegion      *tailcfg.DERPRegion // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
-	autoRegionMapURL string             // 产生缓存时的 DERPMapURL
+	mu               sync.Mutex
+	cfg              config.RemoteConfig
+	srv              *tailcat.Server
+	token            string
+	serveErr         string
+	forwards         map[string]*forwardRunner
+	activeClients    map[string]int64    // 已知客户端公钥 → 当前入站活动连接数
+	audit            *auditLog           // 独立于代理日志的固定容量连接审计环
+	clientLoaded     bool                // 是否已尝试加载客户端身份密钥
+	clientPriv       key.NodePrivate     // 持久客户端身份（对端 --allow 白名单用）
+	clientErr        error               // 客户端密钥加载失败原因（惰性加载只尝试一次）
+	autoRegion       *tailcfg.DERPRegion // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
+	autoRegionMapURL string              // 产生缓存时的 DERPMapURL
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥
@@ -82,6 +87,7 @@ func NewManager(stateDir string, logf func(format string, args ...any)) *Manager
 		logf:          logf,
 		forwards:      map[string]*forwardRunner{},
 		activeClients: map[string]int64{},
+		audit:         newAuditLog(remoteAuditCapacity),
 	}
 }
 
@@ -125,9 +131,11 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 }
 
 // serverConfigEqual 判断运行中的服务端是否与新配置等价（等价则无需重建隧道）。
+// WebTerminal 只控制本机 HTTP/WS 入口，不改变 tailcat 数据面，因此不参与比较；
+// 切换它不会中断已有隧道连接或改变 token。
 func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 	old := m.cfg
-	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey || old.KeyFile != cfg.KeyFile || old.BuiltinSSH != cfg.BuiltinSSH {
+	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey || old.KeyFile != cfg.KeyFile || old.BuiltinSSH != cfg.BuiltinSSH || old.AllowRestricted != cfg.AllowRestricted {
 		return false
 	}
 	if len(old.Serve) != len(cfg.Serve) || len(old.Allow) != len(cfg.Allow) {
@@ -160,17 +168,22 @@ func (m *Manager) Status() Status {
 	defer m.mu.Unlock()
 
 	st := Status{
-		Enabled: m.cfg.Enabled,
-		Running: m.srv != nil,
-		Error:   m.serveErr,
-		Token:   m.token,
-		Region:  m.cfg.Region,
-		Serve:   append([]int(nil), m.cfg.Serve...),
-		Allow:   append([]config.RemoteAllowEntry(nil), m.cfg.Allow...),
-		TempKey: m.cfg.TempKey,
-		KeyFile: m.serverKeyPath(m.cfg),
-		CustomKeyFile: strings.TrimSpace(m.cfg.KeyFile),
-		BuiltinSSH: m.cfg.BuiltinSSH,
+		Enabled:         m.cfg.Enabled,
+		Running:         m.srv != nil,
+		Error:           m.serveErr,
+		Token:           m.token,
+		Region:          m.cfg.Region,
+		Serve:           append([]int(nil), m.cfg.Serve...),
+		Allow:           m.cfg.Clone().Allow,
+		AllowRestricted: m.cfg.AllowRestricted,
+		TempKey:         m.cfg.TempKey,
+		KeyFile:         m.serverKeyPath(m.cfg),
+		CustomKeyFile:   strings.TrimSpace(m.cfg.KeyFile),
+		BuiltinSSH:      m.cfg.BuiltinSSH,
+		WebTerminal:     m.cfg.WebTerminal,
+	}
+	if m.srv != nil {
+		st.Peers = peerObservations(m.srv.Status(), m.cfg.Allow, m.cfg.TempKey, m.activeClients, time.Now())
 	}
 	if len(m.activeClients) > 0 {
 		st.ClientActivity = make(map[string]int64, len(m.activeClients))

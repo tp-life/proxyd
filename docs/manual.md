@@ -116,7 +116,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
 | `proxyd tun [-c 配置] on\|off\|status` | 开关/查看 TUN 模式及当前进程权限（操作运行中实例） |
-| `proxyd autostart [-c 配置] on\|off\|status` | 开关/查看开机自启（flag 需放在操作前） |
+| `proxyd autostart [-c 配置] on\|off\|status` | 开关/查看开机自启（macOS 为系统级 LaunchDaemon，flag 需放在操作前） |
 
 ### 本地管理命令（CLI ↔ Web 对齐）
 
@@ -128,7 +128,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd mode [rule\|global\|direct]` | 无参查看当前模式；带参切换（持久化） |
 | `proxyd refresh` / `proxyd test` | 触发刷新订阅 / 手动测速（后台执行） |
 | `proxyd subs list\|add <名> <url>\|del <名>` | 订阅管理（list 含状态列：正常/部分可用/全部失效/无节点/已禁用） |
-| `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] <名>` | 修改订阅；未给出的字段保持原值 |
+| `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] [--mapping on\|off] <名>` | 修改订阅；未给出的字段保持原值；`--mapping` 是该订阅的端口映射开关（只控制其节点的一对一监听） |
 | `proxyd subs refresh <名>` / `proxyd subs test <名>` | 只刷新 / 只测速单个订阅（同步执行，失败原因直接返回） |
 | `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因 |
 | `proxyd nodes add <url> [名称]` | 添加手动节点（http(s)/socks5/分享链接） |
@@ -138,7 +138,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组 |
 | `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
 | `proxyd logs [--tail N] [--level debug\|info\|warning\|error]` | 查看运行中实例的内存日志尾部 |
-| `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听 |
+| `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听。单个订阅可用 `subs set --mapping on\|off` 单独开关（只影响该订阅节点） |
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
 | `proxyd auto-port <端口\|off>` | 设置/关闭自动选优端口；无参查看 |
 | `proxyd main-auto [on\|off]` | 开关「主端口使用最优节点」（跳过规则）；无参查看 |
@@ -154,7 +154,11 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
 | `proxyd remote status\|on\|off\|token` | 远程连接（tailcat 隧道）：查看状态、热开关服务端、打印完整本机 token（见「十、远程连接」） |
 | `proxyd remote serve [端口,...]` | 查看/设置经隧道暴露的本机端口 |
-| `proxyd remote remotes list\|add <名> <token>\|del <名>` | 管理保存的远端（token 命名别名） |
+| `proxyd remote allow list\|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]\|del <别名\|公钥>` | 管理带有效期和目标端口限制的客户端授权 |
+| `proxyd remote audit [--tail N]` | 查看连接建立、拒绝与断开审计记录（最多 500 条） |
+| `proxyd remote keyfile [路径\|-]\|export <路径>\|import <路径>` | 设置自定义密钥路径，或迁移内置托管的服务端身份 |
+| `proxyd remote web-terminal [on\|off] [--yes]` | 查看/切换高权限浏览器终端；非回环 API 监听需确认，非交互环境用 `--yes` |
+| `proxyd remote remotes list\|add <名> <token>\|del <名>` | 管理保存的远端；列表会探测在线状态、连接路径与 RTT |
 | `proxyd remote forwards list\|add <名> <监听> <远端> <端口>\|del <名>\|on\|off <名>` | 管理本地常驻转发；监听地址可填 `auto`（或留空），自动从 10022 起分配空闲端口 |
 | `proxyd ssh <远端>` / `proxyd scp <源> <目标>` | 经隧道直连 SSH / scp 传文件（纯客户端命令，远端可填保存的名称或 token，见「十、远程连接」） |
 
@@ -164,13 +168,13 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 ### 开机自启
 
-`proxyd autostart on` 注册当前二进制（`os.Executable` 绝对路径）+ 当前配置文件为登录自启项，并立即启动一次：
+`proxyd autostart on` 注册当前二进制（`os.Executable` 绝对路径）+ 当前配置文件为开机自启项，并立即启动一次：
 
-- **macOS**：`~/Library/LaunchAgents/com.proxyd.plist`——RunAtLoad + KeepAlive，`serve -c <配置绝对路径>`，StandardOut/Err 指向 `state-dir/proxyd.log`；launchd 直接托管 serve 前台进程（崩溃自动拉起）
+- **macOS**：经管理员授权安装 `/Library/LaunchDaemons/com.proxyd.plist`，注册到 `system` 域；LaunchDaemon 通过 `UserName` 以注册用户运行 `serve -c <配置绝对路径>`，StandardOut/Err 指向 `state-dir/proxyd.log`。它不依赖用户登录，冷启动、断电恢复或系统重启后均会启动，KeepAlive 负责崩溃拉起；启用或关闭时也会清理旧版 `~/Library/LaunchAgents/com.proxyd.plist`
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
-`off` 移除对应项（不停止当前运行中的实例）；`status` 检测自启项是否存在。不支持的平台返回明确错误。
+`off` 移除对应项；macOS/Linux 服务管理器会同时停止由该自启项托管的实例，Windows 不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
 
 ### 配置备份与恢复
 
@@ -203,7 +207,7 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因）、自定义规则、节点分组、TUN 权限、系统代理与开机自启状态 |
+| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因）、自定义规则、节点分组、TUN 权限、系统代理与开机自启状态 |
 | `GET /api/traffic` | 代理 mihomo `/traffic` 流，返回 NDJSON 实时速率；后端自动附加 `secret` 鉴权 |
 | `GET /api/connections` | 代理 mihomo `/connections` 快照，返回活动连接、累计上下行和内存占用；后端自动附加 `secret` 鉴权 |
 | `DELETE /api/connections/{id}` | 关闭指定活动连接；连接 ID 作为单个安全路径段转发 |
@@ -212,7 +216,7 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 | `POST /api/refresh` | 触发一轮完整刷新：拉订阅 + 规则源 + 测速（异步，返回 202） |
 | `POST /api/test` | 手动测速：只对现有节点做延迟/可用性检测，不拉订阅（异步，返回 202） |
 | `POST /api/subscriptions` `{"url":"..."}` | 添加订阅（name 可选，默认按域名命名） |
-| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式或启用状态；改名时同步修正引用该订阅的策略分组 |
+| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式、启用状态或订阅级端口映射开关（`port_mapping`）；改名时同步修正引用该订阅的策略分组；未给出的字段保持原值 |
 | `DELETE /api/subscriptions/{name}` | 删除订阅 |
 | `POST /api/subscriptions/{name}/refresh` | 只刷新该订阅：重新拉取 + 只检测其节点 + 热更新（同步，最长 3 分钟，失败直接返回原因） |
 | `POST /api/subscriptions/{name}/test` | 只对该订阅的现有节点测速（同步，不拉订阅） |
@@ -388,6 +392,8 @@ dns:              # 可选，mihomo dns 配置原样透传
 
 **端口映射稳定性**：映射快照持久化在 `state-dir/mapping.json`——同一节点在刷新/重启后尽量保持原端口；新节点按延迟从低到高填空闲端口；可用节点多于端口容量时按延迟截断（日志会提示）。
 
+**订阅级端口映射**：除全局 `port-mapping` 总开关外，每个订阅还有自己的映射开关（订阅 YAML 的 `port-mapping` 字段，默认开启；Web 订阅卡片 / `proxyd subs set --mapping on|off` / `PUT /api/subscriptions/{name}` 均可切换）。两者是叠加关系：全局关闭时全部不监听；全局开启而某订阅关闭时，只有该订阅的节点不生成一对一监听。被关闭的节点仍保留稳定端口分配，并继续参与主端口、auto-port 与策略组选路；手动节点没有订阅级开关，只跟随全局开关。
+
 **节点快照（nodes.json）**：每轮刷新后，把合并后的全量节点（完整 proxy 配置、来源订阅、最近测速结果）持久化到 `state-dir/nodes.json`。下次启动时**立即加载该快照生成配置提供服务**，不必等首次订阅刷新完成；随后刷新成功再覆盖。刷新失败/无网时快照保持可用。快照带格式版本号，解析失败或版本不兼容仅打日志丢弃，不影响启动。
 
 **失败兜底**：订阅拉取失败时自动使用本地缓存（`state-dir/cache/`），网络抖动不会清空节点；全部订阅失败或全部节点死亡时保持现有配置不动，下一轮再试。
@@ -475,8 +481,12 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
                             # 缺省用内置托管密钥 state-dir/remote/server.private.json
   # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
                             # 无需系统 sshd；持有 token 即可登录，建议配合白名单
-  # allow: [{name: 家里, key: nodekey:...}]  # 客户端公钥白名单（name 可省）；
-                            # 非空时仅列表内可连，兼容旧写法 ["nodekey:..."]
+  # web-terminal: false      # 浏览器本机 shell，默认关闭且依赖 enabled + builtin-ssh；
+                            # 非回环 api-listen 上开启必须二次确认
+  # allow: [{name: 家里, key: nodekey:..., expires-at: 2026-09-10T12:00:00Z, ports: [22]}]
+                            # 客户端最小权限白名单：name/expires-at/ports 均可省；
+                            # ports 为空=可访问全部 serve 端口，兼容旧写法 ["nodekey:..."]
+  # allow-restricted: false # 过期清扫后防止空列表退化为开放模式的内部状态，通常无需手工设置
   remotes: []               # 保存的远端：name + token
   forwards: []              # 本地常驻转发：listen → remote:remote-port；listen 可留空或填 "auto" 自动分配端口
 ```
@@ -492,28 +502,51 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
 - **token（连接凭据）**：服务端启动后生成 `tc...` 字符串，由服务端 WireGuard 公钥 + DERP 区域信息派生。谁拿到 token 谁就能连到服务端的暴露端口——**像密码一样保管**（Web/CLI 默认只显示摘要，配置导出默认打码）。
 - **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。配置 `remote.key-file` 可改用自定义密钥文件（如 tailcat 的 default key），此时内置文件不再使用。
 - **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。`remote.region` 留空时自动就近选择，且**进程内保持粘性**——配置变更（白名单/端口等）引发的隧道重建沿用首次探测结果，已分发的 token 不会因区域漂移而失效；彻底固定可显式填区域 ID（如 `302`）。跨区域迁移或脱离公共中继时可填自建 derper 主机名。
+- **连接观测**：`proxyd remote remotes list` 会主动探测已保存远端并显示在线状态、直连/DERP 路径与 RTT；Web 展开远端行后立即探测，并每 30 秒刷新。服务端入站客户端可显示在线近似状态、路径与累计收发流量；tailcat 当前不提供服务端侧 RTT，因此该列显示“—”。
 
 ### 服务端：暴露本机端口
 
 ```sh
-proxyd remote on              # 开启隧道服务端（热开关，自动持久化）
+proxyd remote on              # 同时开启隧道服务端与 builtin-ssh（单事务热切换并持久化）
 proxyd remote serve 22        # 设置暴露端口（可逗号分隔多个）
 proxyd remote token           # 打印完整 token，发给要连接的人
 ```
 
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
 
-**内嵌免密 SSH**（`proxyd remote builtin-ssh on`，或 Web 服务状态卡开关）：隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
+**内嵌免密 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
 
-**客户端白名单**（`remote allow`，Web 服务状态卡同样可管理）：按客户端 WireGuard 公钥（`nodekey:...`）限制谁能连入——非空时仅列表内客户端可建立隧道，空列表放行所有持有 token 的客户端。每条可带一个别名便于管理：
+**Web Terminal**（`remote.web-terminal`）把同一套内嵌 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，必须同时满足远程服务运行中与 `builtin-ssh` 已开启；Web 服务状态卡开启后才显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
+
+Web Terminal 等价于把 **proxyd 进程用户的本机 shell** 交给控制台访问者，因此安全边界比普通只读状态页高得多。`api-listen` 为非回环地址（例如 `0.0.0.0:19091`）时，Web 开启动作必须在危险确认框中再次确认；CLI 会在交互终端提示，自动化环境必须显式执行 `proxyd remote web-terminal on --yes`。优先保持 `api-listen: 127.0.0.1:19091`；若确需远程暴露控制台，应在外层增加可信鉴权和网络访问控制，并仅在使用期间开启 Web Terminal。
 
 ```sh
-proxyd remote allow add nodekey:... 家里   # 添加（别名可省略）
-proxyd remote allow list                   # 列表：NAME / KEY 两列
-proxyd remote allow del 家里               # 按别名删除，也可直接填完整公钥
+proxyd remote web-terminal          # 查看开关、API 监听范围与依赖状态
+proxyd remote web-terminal on       # 回环监听直接开启；非回环监听要求交互确认
+proxyd remote web-terminal on --yes # 非交互环境显式承担非回环暴露风险
+proxyd remote web-terminal off      # 关闭入口，新的 WebSocket 握手立即返回 404
 ```
 
-客户端公钥在客户端机器上查看：`proxyd remote status`（或 Web 状态卡）里的「本机公钥」。配置文件中写作 `allow: [{name: 家里, key: nodekey:...}]`，兼容旧格式纯字符串列表（无别名）。
+**客户端最小权限白名单**（`remote allow`，Web 服务状态卡同样可管理）：按客户端 WireGuard 公钥（`nodekey:...`）限制谁能连入。每条授权可设置别名、TTL 与允许访问的目标端口；未设置 TTL 表示永久，`ports` 为空表示可访问全部 `serve` 端口。TTL 在连接建立时实时校验，后台每分钟清扫过期条目并落盘；如果最后一项因过期被清扫，系统保持“拒绝全部”而不会意外退回开放模式。
+
+```sh
+proxyd remote allow add nodekey:... 家里                       # 永久授权全部 serve 端口
+proxyd remote allow add nodekey:... 临时维护 --ttl 1h          # 一小时后自动失效
+proxyd remote allow add nodekey:... 运维 --ports 22,8080       # 仅允许两个目标端口
+proxyd remote allow list                                      # NAME / KEY / EXPIRES / PORTS
+proxyd remote allow del 家里                                  # 按别名删除，也可填完整公钥
+```
+
+客户端公钥在客户端机器上查看：`proxyd remote status`（或 Web 状态卡）里的「本机公钥」。配置文件中写作 `allow: [{name: 家里, key: nodekey:..., expires-at: 2026-09-10T12:00:00Z, ports: [22]}]`，兼容旧格式纯字符串列表（无别名、永久且不限制端口）。用户显式删除最后一项会恢复开放模式；自动过期清扫则保留受限空列表，等待重新添加授权或显式清空。
+
+**连接审计**保存在 remote 独立的 500 条内存环形缓冲中，不会被代理访问日志挤掉。它记录连接建立、拒绝、断开、客户端身份、目标端口、持续时间与双向字节数；重启进程后清空，不包含 payload：
+
+```sh
+proxyd remote audit               # 最近 100 条
+proxyd remote audit --tail 500    # 最多查询 500 条
+```
+
+Web 服务端区域的「连接记录」面板提供同样的只读视图。
 
 ### 客户端：连接远端
 
@@ -541,7 +574,7 @@ ssh -p 2222 localhost         # 之后任何 TCP 客户端都能用这条转发
 
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
-Web 控制台「远程连接」页每个对端都有「连接」对话框，给出两种方式的现成命令：**方式一**一键创建/启用指向对端 22 端口的本地 SSH 转发，并提供可复制的 `ssh 用户@127.0.0.1 -p 端口` 与 `scp -P 端口 ...` 命令；**方式二** proxyd CLI 直连，给出 `proxyd ssh <token>`、`proxyd scp ...` 命令以及可写进 ssh config 的 ProxyCommand 片段。
+Web 控制台「远程连接」页按「服务端 / 客户端」两个页签组织（选中项会被记住，下次打开页面自动恢复）。每个对端都有「连接」对话框，给出两种方式的现成命令：**方式一**一键创建/启用指向对端 22 端口的本地 SSH 转发，并提供可复制的 `ssh 用户@127.0.0.1 -p 端口` 与 `scp -P 端口 ...` 命令；**方式二** proxyd CLI 直连，给出 `proxyd ssh <token>`、`proxyd scp ...` 命令以及可写进 ssh config 的 ProxyCommand 片段。设备列表还有「终端」按钮：在本机 Web Terminal 已开启时，一键打开浏览器终端并自动执行 `proxyd ssh <名称>` 直连对端（同样受「SSH 携带 TERM」统一开关控制）。
 
 ### 与 tailcat CLI 的互通
 
@@ -554,9 +587,11 @@ proxyd 的 token 与官方 `tailcat` CLI 完全互通：对方可以用 `tailcat
 proxyd remote keyfile "~/Library/Application Support/tailcat/keys/default.private.json"
 proxyd remote keyfile -     # 恢复内置托管密钥
 proxyd remote keyfile       # 查看当前生效的密钥文件
+proxyd remote keyfile export ./server.private.json  # 导出当前实际身份，文件权限收紧为 0600
+proxyd remote keyfile import ./server.private.json  # 校验并事务导入到内置托管路径
 ```
 
-Web 控制台「远程连接」页的服务状态卡中也可设置。切换密钥即更换身份，运行中的隧道会重建，旧 token 立即失效。
+Web 控制台「远程连接」页的服务状态卡中也可设置、导出和导入。导出走专用下载端点，私钥不会进入普通状态接口；导入会先校验 tailcat 格式，再以原子写入和完整回滚切换到内置托管密钥。切换密钥即更换身份，运行中的隧道会重建，token 随导入身份更新。
 
 ### 限制
 

@@ -38,7 +38,7 @@ import { classNames, formatUserInfo } from "@/lib/format";
  * 启用无可用缓存的订阅可能同步失败；失败时弹窗保留或开关回退为服务端状态。
  */
 export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, onWrite }) {
-  const emptyDraft = { name: "", url: "", type: "auto", enabled: true };
+  const emptyDraft = { name: "", url: "", type: "auto", enabled: true, port_mapping: true };
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [saving, setSaving] = useState(false);
@@ -88,6 +88,7 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
       url: subscription.url || "",
       type: subscription.type || "auto",
       enabled: subscription.enabled !== false,
+      port_mapping: subscription.port_mapping !== false,
     } : emptyDraft);
   }
 
@@ -173,6 +174,27 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
     );
   }
 
+  /**
+   * toggleSubscriptionMapping 切换单个订阅的端口映射开关，只影响该订阅节点的一对一监听。
+   *
+   * 参数说明：
+   * - subscription: object，当前订阅完整快照。
+   * - enabled: boolean，目标映射状态。
+   *
+   * 返回值说明：返回 Promise<boolean>，由通用写入器返回提交结果。
+   *
+   * 可能的异常/错误情况：
+   * 请求体不带 enabled 字段，后端保留原启用状态；热更新或持久化失败时开关回退为服务端状态。
+   */
+  function toggleSubscriptionMapping(subscription, enabled) {
+    return onWrite(
+      `/api/subscriptions/${encodeURIComponent(subscription.name)}`,
+      { name: subscription.name, url: subscription.url, type: subscription.type || "auto", port_mapping: enabled },
+      enabled ? `订阅 ${subscription.name} 的端口映射已开启` : `订阅 ${subscription.name} 的端口映射已关闭（节点仍参与选路）`,
+      "PUT",
+    );
+  }
+
   return (
     <div className="stack">
       <PageHeader eyebrow="代理资源" title="订阅管理" detail="管理来源、启用状态、同步与缓存健康度。">
@@ -197,6 +219,23 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
                 <span><b>{subscription.alive}</b>/{subscription.total} 可用</span>
                 <StatusBadge ok={subscription.state === "healthy"} text={stateLabel} />
                 <Badge variant="outline">{(subscription.type || "auto").toUpperCase()}</Badge>
+              </div>
+              <div className="subscription-mapping">
+                <UISwitch
+                  ariaLabel={`${subscription.name} 端口映射`}
+                  checked={subscription.port_mapping !== false}
+                  className="mt-0 border-0 pt-0"
+                  disabled={subscription.enabled === false || overview?.port_mapping_enabled === false}
+                  label="端口映射（一对一节点端口）"
+                  onCheckedChange={(enabled) => toggleSubscriptionMapping(subscription, enabled)}
+                />
+                {subscription.enabled === false ? (
+                  <span className="text-xs text-muted-foreground">订阅已停用</span>
+                ) : overview?.port_mapping_enabled === false ? (
+                  <span className="text-xs text-muted-foreground">全局端口映射已关闭</span>
+                ) : subscription.port_mapping === false ? (
+                  <span className="text-xs text-muted-foreground">该订阅节点不参与一对一端口监听，仍保留稳定分配并参与选路</span>
+                ) : null}
               </div>
               {info && <div className="subscription-usage"><span>{info.usage}</span><span className={classNames(info.urgent && "urgent")}>{info.expire}</span></div>}
               <div className="subscription-card-actions">
@@ -232,6 +271,7 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
                 />
               </Field>
               <UISwitch checked={draft.enabled} label="保存后启用此订阅" onCheckedChange={(enabled) => updateDraft("enabled", enabled)} />
+              <UISwitch checked={draft.port_mapping} label="该订阅节点参与端口映射（一对一节点端口）" onCheckedChange={(enabled) => updateDraft("port_mapping", enabled)} />
             </div>
             <DialogFooter>
               <Button variant="outline" type="button" onClick={() => cancelEditor(false)}>{saving ? "取消等待" : "取消"}</Button>

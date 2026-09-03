@@ -155,7 +155,7 @@ usage:
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
   proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式（需系统权限）
-  proxyd autostart [-c 配置] on|off|status   开关/查看开机自启
+  proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
 
@@ -189,10 +189,14 @@ usage:
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 远程连接（tailcat 隧道，与代理功能独立）:
-  proxyd remote status|on|off|token      查看状态/开关服务端/打印完整 token
+  proxyd remote status|on|off|token      查看状态/联动开关服务端与 builtin-ssh/打印完整 token
   proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
-  proxyd remote allow list|add <公钥>|del <公钥>   客户端公钥白名单（空=放行所有）
-  proxyd remote tempkey [reset]          查看临时身份密钥对/重置（旧私钥失效）
+  proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del <别名|公钥>   客户端最小权限白名单
+  proxyd remote audit [--tail N]       查看连接建立、拒绝与断开审计记录
+  proxyd remote tempkey [reset]          查看/重置临时身份（保留手动白名单与客户端 nodekey）
+  proxyd remote keyfile [路径|-]|export <路径>|import <路径>   设置、导出或导入服务端身份密钥
+  proxyd remote builtin-ssh [on|off]    查看/开关进程内免密 SSH（隧道即认证）
+  proxyd remote web-terminal [on|off] [--yes]   查看/开关浏览器终端（默认关闭；非回环开启需确认）
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
   proxyd remote genkey                   生成应急客户端身份（公钥录入对端白名单，私钥自行保存）

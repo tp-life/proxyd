@@ -102,6 +102,9 @@ export function PortsPage({ overview, portSort, onCopy, onCopyEnv, onSort, onTog
         resizable
       />
       {!overview.port_mapping_enabled && <p className="panel-footnote">主代理端口、自动选优端口与策略分组端口不受此开关影响。</p>}
+      {overview.port_mapping_enabled && (overview.subscriptions || []).some((sub) => sub.port_mapping === false) && (
+        <p className="panel-footnote">部分订阅已在「订阅管理」页关闭端口映射：其节点不在监听列表中，但保留稳定端口分配并继续参与选路。</p>
+      )}
       </section>
     </div>
   );

@@ -76,7 +76,10 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	portOf := map[string]int{}
 	if cfg.PortMappingEnabled() {
 		for _, as := range s.app.Assignments() {
-			portOf[as.Node.Name] = as.Port
+			// 订阅级映射关闭时节点不参与监听，Port 保持 0，与真实运行态一致。
+			if as.Node != nil && cfg.PortMappingEnabledFor(as.Node.Subscription) {
+				portOf[as.Node.Name] = as.Port
+			}
 		}
 	}
 
@@ -105,7 +108,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	}
 	for _, sub := range s.app.Subscriptions() {
 		subs[sub.Name] = len(ov.Subs)
-		entry := SubEntry{Name: sub.Name, URL: sub.URL, Type: sub.Type, Enabled: sub.IsEnabled()}
+		entry := SubEntry{Name: sub.Name, URL: sub.URL, Type: sub.Type, Enabled: sub.IsEnabled(), PortMapping: sub.PortMappingEnabled()}
 		if info, ok := subInfos[sub.Name]; ok {
 			entry.UserInfo = &info
 		}

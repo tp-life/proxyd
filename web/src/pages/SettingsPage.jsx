@@ -52,7 +52,7 @@ const SETTINGS_HELP = {
     paragraphs: [
       "系统代理只修改操作系统的 HTTP、HTTPS 和 SOCKS 代理设置，适合浏览器及遵循系统代理的应用；进程退出时 proxyd 会尝试恢复原状态。",
       "TUN 在网络层接管 TCP/UDP 流量，可覆盖不读取系统代理的程序，但需要管理员或网络管理权限。通常选择系统代理或 TUN 其中一种即可，同时开启不会改变规则优先级。",
-      "登录后自动启动只负责在用户登录时启动 proxyd，不会自动提升 TUN 权限；启用 TUN 时仍需按当前平台完成授权。",
+      "开机自启会按平台注册系统启动项；macOS 使用 LaunchDaemon，可在用户登录前启动。它不会自动提升 TUN 权限，启用 TUN 时仍需按当前平台完成授权。",
     ],
     note: "修改接管方式可能短暂影响现有连接；操作前请确认主端口和规则配置可用。",
   },
@@ -210,7 +210,7 @@ export function SettingsPage({ forms, overview, onForm, onImportConfig, onPost, 
               <UISwitch checked={overview.system_proxy} label="接管系统代理" onCheckedChange={(enabled) => onPost("/api/system-proxy", { enabled }, enabled ? "系统代理已开启" : "系统代理已关闭")} />
               <UISwitch checked={Boolean(overview.tun?.enabled)} label="启用 TUN 模式" onCheckedChange={(enabled) => onPost("/api/tun", { enabled }, enabled ? "TUN 已开启" : "TUN 已关闭")} />
               {overview.tun && <p className={classNames("permission-note", overview.tun.allowed && (!overview.tun.enabled || overview.tun.active) ? "ok" : "warn")}>{overview.tun.enabled && !overview.tun.active ? "TUN 配置已开启但实际未生效，请检查日志" : overview.tun.allowed ? `${overview.tun.platform} 权限可用` : overview.tun.permission}</p>}
-              <UISwitch checked={overview.autostart} label="登录后自动启动 proxyd" onCheckedChange={(enabled) => onPost("/api/autostart", { enabled }, enabled ? "开机自启已开启" : "开机自启已关闭")} />
+              <UISwitch checked={overview.autostart} label="系统启动时自动启动 proxyd" onCheckedChange={(enabled) => onPost("/api/autostart", { enabled }, enabled ? "开机自启已开启" : "开机自启已关闭")} />
             </div>
           </section>
         </div>

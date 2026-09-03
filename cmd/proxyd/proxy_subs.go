@@ -67,10 +67,14 @@ func cmdSubs(args []string) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tSTATE\tURL\tNODES(alive/total)\tUSAGE\tEXPIRE")
+		fmt.Fprintln(tw, "NAME\tSTATE\tURL\tNODES(alive/total)\tMAPPING\tUSAGE\tEXPIRE")
 		for _, s := range ov.Subs {
 			usage, expire := formatSubUserInfo(s.UserInfo)
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%d\t%s\t%s\n", s.Name, subStateText(s.State), s.URL, s.Alive, s.Total, usage, expire)
+			mapping := "on"
+			if !s.PortMapping {
+				mapping = "off"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%d\t%s\t%s\t%s\n", s.Name, subStateText(s.State), s.URL, s.Alive, s.Total, mapping, usage, expire)
 		}
 		_ = tw.Flush()
 		return nil
@@ -133,7 +137,7 @@ func subStateText(state string) string {
 	}
 }
 
-// cmdSubsSet 修改订阅的名称/地址/类型/启停；未给出的字段保持原值（客户端先读现状再合并提交）。
+// cmdSubsSet 修改订阅的名称/地址/类型/启停/端口映射；未给出的字段保持原值（客户端先读现状再合并提交）。
 func cmdSubsSet(c *apiClient, args []string) error {
 	setFS := flag.NewFlagSet("subs set", flag.ExitOnError)
 	rename := setFS.String("rename", "", "新名称")
@@ -141,16 +145,20 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	newType := setFS.String("type", "", "订阅类型（auto|clash|share）")
 	enable := setFS.Bool("enable", false, "启用订阅")
 	disable := setFS.Bool("disable", false, "禁用订阅")
+	mapping := setFS.String("mapping", "", "订阅级端口映射开关（on|off）")
 	_ = setFS.Parse(args)
 	items := setFS.Args()
 	if len(items) != 1 {
-		return fmt.Errorf("用法: proxyd subs set [-c 配置] [--rename 新名] [--url 地址] [--type 类型] [--enable|--disable] <name>")
+		return fmt.Errorf("用法: proxyd subs set [-c 配置] [--rename 新名] [--url 地址] [--type 类型] [--enable|--disable] [--mapping on|off] <name>")
 	}
 	if *enable && *disable {
 		return fmt.Errorf("--enable 与 --disable 不能同时使用")
 	}
-	if *rename == "" && *newURL == "" && *newType == "" && !*enable && !*disable {
-		return fmt.Errorf("未给出任何修改项（--rename/--url/--type/--enable/--disable）")
+	if *mapping != "" && *mapping != "on" && *mapping != "off" {
+		return fmt.Errorf("--mapping 只接受 on 或 off")
+	}
+	if *rename == "" && *newURL == "" && *newType == "" && !*enable && !*disable && *mapping == "" {
+		return fmt.Errorf("未给出任何修改项（--rename/--url/--type/--enable/--disable/--mapping）")
 	}
 	ov, err := c.overview()
 	if err != nil {
@@ -182,6 +190,9 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	}
 	if *enable || *disable {
 		body["enabled"] = *enable
+	}
+	if *mapping != "" {
+		body["port_mapping"] = *mapping == "on"
 	}
 	// 修改启用中的订阅会同步重新拉取（服务端最长 3 分钟），放宽客户端超时
 	if err := c.doTimeout(http.MethodPut, "/api/subscriptions/"+url.PathEscape(items[0]), body, nil, 200*time.Second); err != nil {

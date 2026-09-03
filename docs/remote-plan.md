@@ -19,24 +19,33 @@
 
 目标：用半天以内的实验确认 tailcat v0.4.0 能提供什么，给 M1/M3 的落法定案。
 
-- [ ] 确认隧道对端状态可暴露哪些字段：直连/中继路径、RTT、累计流量（查 tailcat `Conn`/magicsock 层 API）
-- [ ] 确认 `tailcat ping` 的实现路径可否在进程内复用（对端在线状态探测的数据源）
-- [ ] 确认 serve 侧能否拿到「单条入连的客户端公钥 + 目标端口」（现有 `attributeClient` 已能做公钥归因，
+- [x] 确认隧道对端状态可暴露哪些字段：直连/中继路径、RTT、累计流量（查 tailcat `Conn`/magicsock 层 API）
+- [x] 确认 `tailcat ping` 的实现路径可否在进程内复用（对端在线状态探测的数据源）
+- [x] 确认 serve 侧能否拿到「单条入连的客户端公钥 + 目标端口」（现有 `attributeClient` 已能做公钥归因，
       需验证是否能挂到每连接回调上做按端口拦截）
-- [ ] 产出：每项一段结论写进本文档对应任务下；某项不可行则该任务降级或改方案（备选见任务备注）
+- [x] 产出：每项一段结论写进本文档对应任务下；某项不可行则该任务降级或改方案（备选见任务备注）
 
 ## M1 观测性：对端在线状态 + 连接路径可视化
 
 目标：远程设备列表一眼看出「活没活、走直连还是中继、有多快」。
 
-- [ ] **M1a 对端在线状态**：对已保存远端做隧道内探测（复用 M0 的 ping 路径），
+- [x] **M1a 对端在线状态**：对已保存远端做隧道内探测（复用 M0 的 ping 路径），
       结果含 在线/离线 + RTT。CLI `proxyd remote remotes list` 加状态列；
       Web 远程设备表加「状态」列（手动触发 + 每 30s 自动刷新已展开行）
   - 落点：`internal/remote/remote.go`（探测）、`internal/api/remote.go`（`POST /api/remote/ping`）、
     `cmd/proxyd/remote.go`、`web/src/pages/RemotePage.jsx` + `useRemoteFeed.js`
-- [ ] **M1b 连接路径与质量**：服务端状态卡与每条入连显示 直连/DERP 中继、RTT、收发字节。
+  - **M0 结论**：可行。tailcat v0.4.0 直接导出 `Client.DiscoPing(ctx)`，返回
+    `LatencySeconds`、直连 `Endpoint` 或 `DERPRegionID/DERPRegionCode`；它还会主动触发路径发现，
+    与 `tailcat ping` CLI 使用的是同一实现。现有 `remote.Ping` 只调用 `Client.Ping`，该方法始终测量
+    DERP 握手 RTT，M1a 应改为封装 `DiscoPing`，并继续由 `internal/remote` 隔离上游类型。
+- [x] **M1b 连接路径与质量**：服务端状态卡与每条入连显示 直连/DERP 中继、RTT、收发字节。
       数据源即 M0 验证的字段；只读展示，不做控制
   - 落点：`internal/remote`（状态采集薄层）、`Status` 扩字段、Web 服务状态卡 + 白名单条目行
+  - **M0 结论 / 降级决策**：tailcat v0.4.0 的 `Server.Status()` 可按客户端公钥返回
+    `CurAddr`（非空即直连）、`Relay`（DERP 区域）、`RxBytes/TxBytes` 与 `LastHandshake`，因此路径、
+    在线近似状态和累计流量可完整展示；但服务端没有面向入站客户端的已导出 ping API，状态结构也不保存
+    RTT。为避免依赖 `locoBackend`/magicsock 私有字段，本批次的入连 RTT 明确显示“—”；已保存远端的
+    RTT 仍由 M1a 完整提供。若未来 tailcat 导出 server-side ping，只需替换 `internal/remote` 的采集薄层。
 - **最终目标 / 验收**：dev 实例下 `tailcat ping` 与 CLI/Web 显示的 RTT 同量级；
   强制中继（打洞不可能的环境）时路径显示「中继」；直连环境显示「直连」；tailcat 升级只需改 `internal/remote`
 
@@ -44,17 +53,24 @@
 
 目标：浏览器内经隧道 SSH 登录本机，补齐「没带电脑」应急链路的最后一环（配合已有临时身份）。
 
-- [ ] 后端：WebSocket 端点 `GET /api/remote/terminal`（`coder/websocket` 已在依赖树），
+- [x] 后端：WebSocket 端点 `GET /api/remote/terminal`（`coder/websocket` 已在依赖树），
       服务端作为 SSH 客户端经 loopback 接进程内 builtin-ssh（认证=控制台会话本身，隧道即认证）；
       依赖 builtin-ssh 已开启，未开时返回明确引导。PTY 用 `creack/pty`
-  - 落点：`internal/remote/server.go`（会话桥接）、`internal/api/remote.go`（WS handler + 开关校验）
-- [ ] 配置与开关：`remote.web-terminal: false`（默认关），CLI `proxyd remote web-terminal on|off`，
+  - 落点：`internal/remote/terminal.go`（会话桥接）、`internal/api/remote.go`（WS handler + 开关校验）
+  - **实现结论**：tailcat 的 builtin-ssh 已在 Unix PTY 路径内使用 `creack/pty`，proxyd 无需复制
+    PTY 生命周期；浏览器会话通过仅监听一次的 `127.0.0.1` SSH 回环接入现有 handler。由于 builtin-ssh
+    是免认证模型，进入 SSH 前额外校验每会话随机令牌，监听器接受首条连接后立即关闭。
+- [x] 配置与开关：`remote.web-terminal: false`（默认关），CLI `proxyd remote web-terminal on|off`，
       Web 服务状态卡开关；`api-listen` 非回环时开启动作二次确认并打印警告
   - 落点：`internal/config/remote.go`、`internal/app/remote.go`（事务模式）
-- [ ] 前端：xterm.js + addon-fit，动态 import 懒加载（不进首屏 chunk）；
+- [x] 前端：xterm.js + addon-fit，动态 import 懒加载（不进首屏 chunk）；
       服务状态卡「打开终端」按钮 → 全屏 Dialog；resize 同步 PTY 窗口大小
   - 落点：`web/src/pages/RemotePage.jsx` + 新组件 `web/src/components/TerminalDialog.jsx`
-- [ ] 体积预算落地验证：二进制增量 ≤1MB、首屏 JS 不变（xterm chunk 按需加载）
+- [x] 体积预算落地验证：二进制增量 ≤1MB、首屏 JS 不变（xterm chunk 按需加载）
+  - **验证记录（2026-09-03）**：xterm `329.31 kB`、addon-fit `1.21 kB`、TerminalDialog
+    `5.88 kB` 均为独立按需 chunk；RemotePage 同步按需加载后首屏 JS 从 `518.49 kB` 降至
+    `486.26 kB`。完整内嵌 Web 产物的 Go 二进制从 `85,665,666` 增至 `86,208,450` 字节，
+    增量 `542,784` 字节（约 530 KiB），低于 1MB 预算。
 - **最终目标 / 验收**：dev 实例开启后浏览器内可登录本机 shell（含 TERM、颜色、窗口缩放正常）；
   关闭开关后 WS 端点 404；`api-listen: 0.0.0.0` 时开启被警告拦截；`npm run build` 产物中 xterm 为独立 chunk
 
@@ -62,15 +78,20 @@
 
 目标：从「进得来就全通、事后无记录」升级为「最小授权 + 可追溯」。
 
-- [ ] **M3a 白名单条目过期**：条目加 `expires_at`（可空）；连接时校验 + 每分钟清扫过期条目并落盘。
+- [x] **M3a 白名单条目过期**：条目加 `expires_at`（可空）；连接时校验 + 每分钟清扫过期条目并落盘。
       CLI `proxyd remote allow add <公钥> [别名] --ttl 1h`；Web 表单加「有效期」下拉（永久/1h/1d/7d），
       列表显示剩余时间，过期条目灰显待清扫
-- [ ] **M3b 按端口授权**：条目加 `ports`（可空=serve 全开）；非空时该客户端只可连列出的端口。
+- [x] **M3b 按端口授权**：条目加 `ports`（可空=serve 全开）；非空时该客户端只可连列出的端口。
       拦截点依赖 M0 第 3 项结论；若 tailcat 层拿不到每连接目标端口，备选方案：
       仅对内嵌 SSH 与转发层生效 + 文档注明限制。Web 表单加「限定端口」可选输入
+  - **M0 结论**：可完整实现，无需降级。tailcat `Server.OnTCP(port)` 在建立处理器时提供目标端口，
+    随后的 `net.Conn.RemoteAddr()` 是由客户端公钥确定性映射的隧道 ULA；现有 `attributeClient` 已能
+    对白名单和临时身份反查公钥。因此可在进入 builtin-ssh 或本地端口转发前统一执行
+    “公钥归因 → TTL → ports”授权，并为允许/拒绝/断开产生审计事件。开放模式下无法归因的陌生客户端
+    没有对应受限条目，仍按“allow 为空即全部放行”的既有语义处理。
   - 共同落点：`internal/config/remote.go`（条目结构 + 校验）、`internal/remote/server.go`（强制点）、
     `internal/app/remote.go`、`internal/api/remote.go`、CLI/Web 表单与列表
-- [ ] **M3c 连接审计日志**：环形缓冲（~500 条，复用 `logbuf` 思路但独立实例避免被代理日志冲掉），
+- [x] **M3c 连接审计日志**：环形缓冲（~500 条，复用 `logbuf` 思路但独立实例避免被代理日志冲掉），
       记录 时间/客户端公钥/别名/目标端口/动作（建立、拒绝、断开）/时长/字节数；
       `GET /api/remote/audit?tail=N`；Web 服务端区加「连接记录」面板；CLI `proxyd remote audit`
   - 落点：`internal/remote`（事件产生）、`internal/api/remote.go`、Web/CLI 各一处
@@ -81,9 +102,9 @@
 
 目标：换机迁移不换身份，token 延续。
 
-- [ ] 导出：`proxyd remote keyfile export <路径>` + Web 状态卡「导出密钥」按钮（下载 *.private.json）；
+- [x] 导出：`proxyd remote keyfile export <路径>` + Web 状态卡「导出密钥」按钮（下载 *.private.json）；
       导出走专用端点（与 token 同样按需获取，不进列表/状态接口）
-- [ ] 导入：`proxyd remote keyfile import <路径>` + Web 文件选择；写入内置托管路径（0600），
+- [x] 导入：`proxyd remote keyfile import <路径>` + Web 文件选择；写入内置托管路径（0600），
       隧道重建、token 变更前端显式提示；与现有自定义 `key-file` 逻辑共存（导入即覆盖内置托管密钥）
   - 落点：`internal/app/remote.go`（事务）、`internal/api/remote.go`、CLI/Web
 - **最终目标 / 验收**：导出文件可直接被 `tailcat` CLI 当密钥用（格式兼容）；导入后 token 与源机器一致；

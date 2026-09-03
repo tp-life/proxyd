@@ -25,29 +25,31 @@ func (s *Server) registerProxySubscriptionRoutes(mux *http.ServeMux) {
 
 // SubEntry 是订阅聚合信息。
 type SubEntry struct {
-	Name     string              `json:"name"`
-	URL      string              `json:"url"`
-	Type     string              `json:"type"`
-	Enabled  bool                `json:"enabled"`
-	State    string              `json:"state"` // disabled|empty|error|degraded|healthy
-	Total    int                 `json:"total"`
-	Alive    int                 `json:"alive"`
-	UserInfo *subscribe.UserInfo `json:"userinfo,omitempty"`
+	Name        string              `json:"name"`
+	URL         string              `json:"url"`
+	Type        string              `json:"type"`
+	Enabled     bool                `json:"enabled"`
+	PortMapping bool                `json:"port_mapping"`
+	State       string              `json:"state"` // disabled|empty|error|degraded|healthy
+	Total       int                 `json:"total"`
+	Alive       int                 `json:"alive"`
+	UserInfo    *subscribe.UserInfo `json:"userinfo,omitempty"`
 }
 
 func (s *Server) handleAddSub(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		URL     string `json:"url"`
-		Type    string `json:"type"`
-		Enabled *bool  `json:"enabled"`
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		Type        string `json:"type"`
+		Enabled     *bool  `json:"enabled"`
+		PortMapping *bool  `json:"port_mapping"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
 		http.Error(w, "bad request: url required", http.StatusBadRequest)
 		return
 	}
 	sub, err := s.app.AddSubscriptionEntry(config.Subscription{
-		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled,
+		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled, PortMapping: req.PortMapping,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -60,7 +62,7 @@ func (s *Server) handleAddSub(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sub)
 }
 
-// handleUpdateSub 同步编辑订阅名称、URL、类型和启用状态。
+// handleUpdateSub 同步编辑订阅名称、URL、类型、启用状态和订阅级端口映射开关。
 //
 // 参数：
 //   - w: http.ResponseWriter，写出提交后的订阅或事务错误。
@@ -72,10 +74,11 @@ func (s *Server) handleAddSub(w http.ResponseWriter, r *http.Request) {
 // 或回滚失败时返回 400；同步执行使界面不会先乐观显示再被后台失败推翻。
 func (s *Server) handleUpdateSub(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		URL     string `json:"url"`
-		Type    string `json:"type"`
-		Enabled *bool  `json:"enabled"`
+		Name        string `json:"name"`
+		URL         string `json:"url"`
+		Type        string `json:"type"`
+		Enabled     *bool  `json:"enabled"`
+		PortMapping *bool  `json:"port_mapping"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -84,7 +87,7 @@ func (s *Server) handleUpdateSub(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
 	updated, err := s.app.UpdateSubscription(ctx, r.PathValue("name"), config.Subscription{
-		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled,
+		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled, PortMapping: req.PortMapping,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

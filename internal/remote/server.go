@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,8 +82,9 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 		Logf:       logger.Logf(m.logf),
 		DERPMapURL: cfg.DERPMapURL,
 	}
-	// 客户端公钥白名单：非空时只有列表内的客户端能完成握手，空则放行所有。
-	// 临时身份公钥（temp-key）与白名单叠加生效，去重后统一登记。
+	// 客户端公钥白名单只负责尽早挡住未知身份；TTL 与端口范围仍在每条 TCP
+	// 连接进入时由 guardConnection 判定。授权清扫后即使列表为空，也必须保留
+	// “受限模式”，否则 tailcat 会把空 AllowedClients 解释为重新开放给所有人。
 	seenKey := map[string]bool{}
 	for _, text := range append(allowKeys(cfg.Allow), cfg.TempKey) {
 		text = strings.TrimSpace(text)
@@ -97,6 +97,11 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 			return err
 		}
 		s.AllowedClients = append(s.AllowedClients, pub)
+	}
+	if cfg.ClientWhitelistEnabled() && len(s.AllowedClients) == 0 {
+		// 随机占位公钥不可能属于真实客户端，仅用于表达 tailcat 缺失的
+		// “拒绝全部”状态；业务配置和 API 均不会暴露或持久化该值。
+		s.AllowedClients = append(s.AllowedClients, key.NewNode().Public())
 	}
 	if len(hosts) > 0 {
 		// 自建 derper：构造内嵌区域，token 会携带完整区域信息，客户端无需 DERP map。
@@ -140,12 +145,12 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	}
 	s.OnTCP = func(port uint16) func(net.Conn) {
 		if port == 22 && sshHandler != nil {
-			return m.withClientTracking(sshHandler)
+			return m.guardConnection(port, sshHandler)
 		}
 		if !servePorts[port] {
 			return nil // RST
 		}
-		return m.withClientTracking(func(c net.Conn) {
+		return m.guardConnection(port, func(c net.Conn) {
 			m.serveConn(c, port)
 		})
 	}
@@ -190,27 +195,6 @@ func (m *Manager) serveConn(c net.Conn, port uint16) {
 	relay(c, upstream)
 }
 
-// withClientTracking 为连接处理器叠加「已知客户端（白名单+临时身份）活动连接数」统计；
-// 开放模式下的陌生客户端无法反推公钥，直接透传。
-func (m *Manager) withClientTracking(h func(net.Conn)) func(net.Conn) {
-	return func(c net.Conn) {
-		keyText := m.attributeClient(c.RemoteAddr())
-		if keyText == "" {
-			h(c)
-			return
-		}
-		m.mu.Lock()
-		m.activeClients[keyText]++
-		m.mu.Unlock()
-		defer func() {
-			m.mu.Lock()
-			m.activeClients[keyText]--
-			m.mu.Unlock()
-		}()
-		h(c)
-	}
-}
-
 // allowKeys 提取白名单条目的公钥列表（别名只用于管理展示，不参与握手判定）。
 func allowKeys(entries []config.RemoteAllowEntry) []string {
 	keys := make([]string, 0, len(entries))
@@ -218,23 +202,6 @@ func allowKeys(entries []config.RemoteAllowEntry) []string {
 		keys = append(keys, e.Key)
 	}
 	return keys
-}
-
-// attributeClient 把入站连接的远端隧道地址归属到已知客户端公钥
-// （白名单+临时身份）；开放模式下的陌生客户端无法反推公钥，返回空串。
-func (m *Manager) attributeClient(remoteAddr net.Addr) string {
-	ap, ok := remoteAddr.(*net.TCPAddr)
-	if !ok {
-		return ""
-	}
-	addr, ok := netip.AddrFromSlice(ap.IP)
-	if !ok {
-		return ""
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	known := knownClientAddrs(allowKeys(m.cfg.Allow), m.cfg.TempKey)
-	return known[addr]
 }
 
 // relay 双向拷贝两个连接，任一端结束后两边都关闭。

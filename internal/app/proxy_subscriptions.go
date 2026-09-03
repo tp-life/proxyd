@@ -168,6 +168,9 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 	if next.Enabled == nil {
 		next.Enabled = current.Enabled
 	}
+	if next.PortMapping == nil {
+		next.PortMapping = current.PortMapping
+	}
 	if err := validateSubscriptionFields(next); err != nil {
 		return config.Subscription{}, err
 	}

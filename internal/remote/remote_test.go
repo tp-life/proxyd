@@ -339,6 +339,15 @@ func TestServerConfigEqual(t *testing.T) {
 	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, BuiltinSSH: true}) {
 		t.Fatal("builtin-ssh changed should not be equal")
 	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, AllowRestricted: true}) {
+		t.Fatal("allow-restricted changed should not be equal")
+	}
+	// TTL、别名和端口限制由每条连接上的领域授权动态读取，变化时不应重启
+	// tailcat 服务端，否则会无谓中断现有连接。
+	expiresAt := time.Now().Add(time.Hour)
+	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Name: "renamed", Key: "nodekey:a", ExpiresAt: &expiresAt, Ports: []int{22}}}}) {
+		t.Fatal("allow metadata changes should not restart the server")
+	}
 }
 
 func TestAutoRegionSticky(t *testing.T) {

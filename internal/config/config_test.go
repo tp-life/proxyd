@@ -132,6 +132,35 @@ func TestSubscriptionEnabledDefaultsAndExplicitDisable(t *testing.T) {
 	}
 }
 
+// TestPortMappingEnabledFor 验证订阅级端口映射判定：字段缺失默认开启、显式关闭生效、
+// 非订阅来源（手动节点 manual）与未知来源只跟随全局开关。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于报告判定断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：缺失字段被误判为关闭、显式 false 未生效，或 manual 被误判为关闭时测试失败。
+func TestPortMappingEnabledFor(t *testing.T) {
+	disabled := false
+	cfg := &Config{Subscriptions: []Subscription{
+		{Name: "legacy", URL: "https://example.com/a"},
+		{Name: "off", URL: "https://example.com/b", PortMapping: &disabled},
+	}}
+	if !cfg.PortMappingEnabledFor("legacy") {
+		t.Fatal("缺少 port-mapping 字段的订阅应默认参与端口映射")
+	}
+	if cfg.PortMappingEnabledFor("off") {
+		t.Fatal("显式 port-mapping=false 的订阅不应参与端口映射")
+	}
+	if !cfg.PortMappingEnabledFor("manual") {
+		t.Fatal("手动节点没有订阅级开关，应默认参与端口映射")
+	}
+	if !cfg.PortMappingEnabledFor("ghost") {
+		t.Fatal("未知来源应按开启处理，避免异常数据意外停掉监听")
+	}
+}
+
 func TestQuick(t *testing.T) {
 	cfg, err := Quick([]string{"https://a.com/sub", "https://b.com/link"}, "")
 	if err != nil {
@@ -633,10 +662,12 @@ func minimalValidConfig() *Config {
 }
 
 func TestRemoteConfigValidate(t *testing.T) {
+	expiresAt := time.Now().Add(time.Hour)
 	cfg := minimalValidConfig()
 	cfg.Remote = RemoteConfig{
 		Enabled: true,
 		Serve:   []int{22},
+		Allow:   []RemoteAllowEntry{{Name: "laptop", Key: "nodekey:abc", ExpiresAt: &expiresAt, Ports: []int{22}}},
 		Remotes: []RemotePeer{{Name: "nas", Token: "tcAAA"}},
 		Forwards: []RemoteForward{
 			{Name: "nas-ssh", Listen: "127.0.0.1:2222", Remote: "nas", RemotePort: 22},
@@ -649,10 +680,13 @@ func TestRemoteConfigValidate(t *testing.T) {
 	bad := []RemoteConfig{
 		{Serve: []int{0}},      // 端口越界
 		{Serve: []int{22, 22}}, // 端口重复
-		{Allow: []RemoteAllowEntry{{Key: "not-a-nodekey"}}},              // 公钥缺 nodekey: 前缀
-		{Allow: []RemoteAllowEntry{{Key: "nodekey:abc"}, {Key: "nodekey:abc"}}}, // 公钥重复
+		{Allow: []RemoteAllowEntry{{Key: "not-a-nodekey"}}},                                       // 公钥缺 nodekey: 前缀
+		{Allow: []RemoteAllowEntry{{Key: "nodekey:abc"}, {Key: "nodekey:abc"}}},                   // 公钥重复
 		{Allow: []RemoteAllowEntry{{Name: "x", Key: "nodekey:a"}, {Name: "x", Key: "nodekey:b"}}}, // 别名重复
-		{TempKey: "not-a-nodekey"},                      // 临时身份公钥缺 nodekey: 前缀
+		{Allow: []RemoteAllowEntry{{Key: "nodekey:a", ExpiresAt: new(time.Time)}}},                // 到期时间零值
+		{Allow: []RemoteAllowEntry{{Key: "nodekey:a", Ports: []int{0}}}},                          // 授权端口越界
+		{Allow: []RemoteAllowEntry{{Key: "nodekey:a", Ports: []int{22, 22}}}},                     // 授权端口重复
+		{TempKey: "not-a-nodekey"},                                                                     // 临时身份公钥缺 nodekey: 前缀
 		{Remotes: []RemotePeer{{Name: "", Token: "tcA"}}},                                              // 空名称
 		{Remotes: []RemotePeer{{Name: "a", Token: ""}}},                                                // 空 token
 		{Remotes: []RemotePeer{{Name: "a", Token: "tcA"}, {Name: "a", Token: "tcB"}}},                  // 名称重复
@@ -674,6 +708,73 @@ func TestRemoteConfigValidate(t *testing.T) {
 		c.Remote = r
 		if err := c.Validate(); err == nil {
 			t.Errorf("bad[%d]: expected error, got nil (%+v)", i, r)
+		}
+	}
+}
+
+// TestRemoteAllowEntryPolicy 验证 TTL 边界、端口授权语义和配置事务深拷贝。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无。
+//
+// 错误情况：永久授权被误判过期、到期边界放行、端口越权或 Clone 共享底层数据时测试失败。
+func TestRemoteAllowEntryPolicy(t *testing.T) {
+	expiresAt := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	entry := RemoteAllowEntry{Key: "nodekey:test", ExpiresAt: &expiresAt, Ports: []int{22, 443}}
+	if entry.IsExpired(expiresAt.Add(-time.Nanosecond)) {
+		t.Fatal("授权不应在 expires-at 之前过期")
+	}
+	if !entry.IsExpired(expiresAt) {
+		t.Fatal("授权应在 expires-at 边界立即过期")
+	}
+	if !entry.AllowsPort(22) || entry.AllowsPort(80) {
+		t.Fatal("非空 ports 必须仅允许明确列出的端口")
+	}
+	if !(RemoteAllowEntry{}).AllowsPort(65535) {
+		t.Fatal("空 ports 应允许全部有效服务端端口")
+	}
+
+	clone := (RemoteConfig{Allow: []RemoteAllowEntry{entry}}).Clone()
+	clone.Allow[0].Ports[0] = 80
+	cloneTime := clone.Allow[0].ExpiresAt.Add(time.Hour)
+	clone.Allow[0].ExpiresAt = &cloneTime
+	if entry.Ports[0] != 22 || !entry.ExpiresAt.Equal(expiresAt) {
+		t.Fatal("RemoteConfig.Clone 不得共享授权端口切片或到期时间指针")
+	}
+	if !(RemoteConfig{Allow: []RemoteAllowEntry{entry}}).ClientWhitelistEnabled() {
+		t.Fatal("旧配置只要存在 allow 条目就必须保持白名单模式")
+	}
+	if !(RemoteConfig{AllowRestricted: true}).ClientWhitelistEnabled() {
+		t.Fatal("授权清扫为空后必须用 allow-restricted 保持拒绝模式")
+	}
+}
+
+// TestIsLoopbackAPIListen 验证 Web 终端安全门只信任明确的回环监听地址。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无。
+//
+// 错误情况：通配地址或普通网卡地址被误判为回环会使高权限终端绕过二次确认；
+// 合法 IPv4/IPv6 回环被拒则会造成不必要的操作阻塞。
+func TestIsLoopbackAPIListen(t *testing.T) {
+	cases := map[string]bool{
+		"127.0.0.1:19091": true,
+		"127.20.30.40:80": true,
+		"[::1]:19091":     true,
+		"localhost:19091": true,
+		":19091":          false,
+		"0.0.0.0:19091":   false,
+		"[::]:19091":      false,
+		"192.0.2.8:19091": false,
+		"invalid":         false,
+	}
+	for listen, expected := range cases {
+		if actual := IsLoopbackAPIListen(listen); actual != expected {
+			t.Errorf("IsLoopbackAPIListen(%q) = %v, want %v", listen, actual, expected)
 		}
 	}
 }

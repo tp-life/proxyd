@@ -60,14 +60,23 @@ func (s *Server) assignmentEntries() []PortEntry {
 //
 // 参数：无。
 //
-// 返回值：[]PortEntry；端口映射关闭时返回空切片，开启时返回稳定 assignments。
+// 返回值：[]PortEntry；全局端口映射关闭时返回空切片，开启时返回稳定 assignments 中
+// 来源订阅未单独关闭映射的条目（port_assignments 稳定分配保持全量，不在此过滤）。
 //
 // 错误情况：无；该方法刻意区分“已分配但停用”和“正在监听”，避免 API 误报端口可用。
 func (s *Server) portEntries() []PortEntry {
-	if !s.app.Config().PortMappingEnabled() {
+	cfg := s.app.Config()
+	if !cfg.PortMappingEnabled() {
 		return []PortEntry{}
 	}
-	return s.assignmentEntries()
+	entries := s.assignmentEntries()
+	listening := make([]PortEntry, 0, len(entries))
+	for _, entry := range entries {
+		if cfg.PortMappingEnabledFor(entry.Subscription) {
+			listening = append(listening, entry)
+		}
+	}
+	return listening
 }
 
 // handleSetPortRange 修改节点映射端口区间：持久化 + 重新分配端口 + 热更新（不同步测速）。

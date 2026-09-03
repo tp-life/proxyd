@@ -116,8 +116,9 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		}
 		// 节点仍需进入 PROXY/AUTO 等路由组；端口映射开关只控制一对一 listener，
 		// 不能通过跳过整个 assignment 来实现，否则会同时破坏主端口和策略组的出口集合。
+		// 订阅级 port-mapping 关闭同样只停该订阅的 listener，节点保留在路由组中。
 		nodeNames = append(nodeNames, a.Node.Name)
-		if cfg.PortMappingEnabled() {
+		if cfg.PortMappingEnabled() && cfg.PortMappingEnabledFor(a.Node.Subscription) {
 			listeners = append(listeners, map[string]any{
 				"name":   fmt.Sprintf("L%d", a.Port), // 纯端口名：热更新端口换人时避免 bind 冲突（见函数注释）
 				"type":   "mixed",

@@ -5,7 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Table } from "@/components/ui/data-table";
 import { Input } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Field } from "@/components/Field";
 import { PageHeader } from "@/components/PageHeader";
 import { PanelTitle } from "@/components/PanelTitle";
@@ -64,23 +68,28 @@ export function ConnectionsPage({
   closeConnection,
 }) {
   const initialLoading = loading && !hasLoaded && rows.length === 0;
-  const updatedText = updatedAt ? updatedAt.toLocaleTimeString("zh-CN", { hour12: false }) : "—";
+  const updatedText = updatedAt
+    ? updatedAt.toLocaleTimeString("zh-CN", { hour12: false })
+    : "—";
   const visibleCount = visibleRows.length;
   const hasRows = rows.length > 0;
   const hasVisibleRows = visibleRows.length > 0;
   const memoryValue = summary.memory ?? "—";
-  const memoryFormatter = typeof memoryValue === "number" ? formatBytes : undefined;
+  const memoryFormatter =
+    typeof memoryValue === "number" ? formatBytes : undefined;
 
-  const emptyTitle = error && !hasRows
-    ? "连接列表加载失败"
-    : hasRows && !hasVisibleRows
-      ? "没有匹配的连接"
-      : "当前没有活动连接";
-  const emptyDetail = error && !hasRows
-    ? `${error}，点击重试重新加载。`
-    : hasRows && !hasVisibleRows
-      ? "当前筛选条件下没有匹配的连接。"
-      : "当代理开始接入流量后，这里会显示域名、入口、出口链和开始时间。";
+  const emptyTitle =
+    error && !hasRows
+      ? "连接列表加载失败"
+      : hasRows && !hasVisibleRows
+        ? "没有匹配的连接"
+        : "当前没有活动连接";
+  const emptyDetail =
+    error && !hasRows
+      ? `${error}，点击重试重新加载。`
+      : hasRows && !hasVisibleRows
+        ? "当前筛选条件下没有匹配的连接。"
+        : "当代理开始接入流量后，这里会显示域名、入口、出口链和开始时间。";
 
   const connectionColumns = useMemo(
     () => [
@@ -92,7 +101,9 @@ export function ConnectionsPage({
         cell: (row) => (
           <div className="connections-cell-stack">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="min-w-0 break-words font-medium text-foreground">{row.targetLabel}</span>
+              <span className="min-w-0 break-words font-medium text-foreground">
+                {row.targetLabel}
+              </span>
               <Badge variant="outline">{row.protocolLabel}</Badge>
             </div>
             {row.targetDetail && <small>{row.targetDetail}</small>}
@@ -106,8 +117,14 @@ export function ConnectionsPage({
         width: "19%",
         cell: (row) => (
           <div className="connections-cell-stack">
-            <span><b>入口：</b>{row.entryLabel}</span>
-            <small><b>来源：</b>{row.sourceLabel}</small>
+            <span>
+              <b>入口：</b>
+              {row.entryLabel}
+            </span>
+            <small>
+              <b>来源：</b>
+              {row.sourceLabel}
+            </small>
           </div>
         ),
         sortValue: (row) => `${row.entryLabel} ${row.sourceLabel}`,
@@ -117,7 +134,9 @@ export function ConnectionsPage({
         header: "出口链",
         sortable: true,
         width: "20%",
-        cell: (row) => <span className="connections-chain-text">{row.exitLabel}</span>,
+        cell: (row) => (
+          <span className="connections-chain-text">{row.exitLabel}</span>
+        ),
       },
       {
         key: "totalBytes",
@@ -127,7 +146,10 @@ export function ConnectionsPage({
         cell: (row) => (
           <div className="connections-cell-stack">
             <span>{formatBytes(row.totalBytes)}</span>
-            <small>↑ {formatBytes(row.uploadBytes)} / ↓ {formatBytes(row.downloadBytes)}</small>
+            <small>
+              ↑ {formatBytes(row.uploadBytes)} / ↓{" "}
+              {formatBytes(row.downloadBytes)}
+            </small>
           </div>
         ),
       },
@@ -136,7 +158,14 @@ export function ConnectionsPage({
         header: "开始时间",
         sortable: true,
         width: "124px",
-        cell: (row) => <time className="connections-time-cell" dateTime={row.startedDateTime || undefined}>{row.startedLabel}</time>,
+        cell: (row) => (
+          <time
+            className="connections-time-cell"
+            dateTime={row.startedDateTime || undefined}
+          >
+            {row.startedLabel}
+          </time>
+        ),
         sortValue: (row) => row.startedDateTime || row.startedLabel,
       },
       {
@@ -176,18 +205,30 @@ export function ConnectionsPage({
       aria-label="活动连接"
       className="connections-page grid gap-4"
     >
-      {(loading || refreshing) && <span className="sr-only" role="status">正在更新活动连接</span>}
-      <PageHeader eyebrow="运行监测" title="活动连接" detail="查看实时流量、出口链与连接来源，并可按协议快速筛选。">
+      {(loading || refreshing) && (
+        <span className="sr-only" role="status">
+          正在更新活动连接
+        </span>
+      )}
+      <PageHeader
+        eyebrow="运行监测"
+        title="活动连接"
+        detail="查看实时流量、出口链与连接来源，并可按协议快速筛选。"
+      >
         <div className="page-actions">
           <div className="connection-refresh-state">
             <div>
               {refreshing && <Badge variant="secondary">更新中</Badge>}
-              <Badge variant="outline">{visibleCount}/{activeCount}</Badge>
+              <Badge variant="outline">
+                {visibleCount}/{activeCount}
+              </Badge>
             </div>
             <p>
-            <Clock3 size={14} aria-hidden="true" />
-            <span>刷新于</span>
-            <time dateTime={updatedAt?.toISOString() || undefined}>{updatedText}</time>
+              <Clock3 size={14} aria-hidden="true" />
+              <span>刷新于</span>
+              <time dateTime={updatedAt?.toISOString() || undefined}>
+                {updatedText}
+              </time>
             </p>
           </div>
           <Button
@@ -198,7 +239,11 @@ export function ConnectionsPage({
             onClick={retryConnections}
             aria-label="刷新活动连接"
           >
-            <RefreshCw className={classNames(refreshing && "animate-spin")} size={16} aria-hidden="true" />
+            <RefreshCw
+              className={classNames(refreshing && "animate-spin")}
+              size={16}
+              aria-hidden="true"
+            />
             <span>刷新</span>
           </Button>
           <Button
@@ -222,7 +267,13 @@ export function ConnectionsPage({
             <CircleAlert size={16} aria-hidden="true" />
             <span className="min-w-0 break-words">{error}</span>
           </div>
-          <Button className="h-11" type="button" variant="outline" onClick={retryConnections} aria-label="重试加载活动连接">
+          <Button
+            className="h-11"
+            type="button"
+            variant="outline"
+            onClick={retryConnections}
+            aria-label="重试加载活动连接"
+          >
             <RefreshCw size={16} aria-hidden="true" />
             <span>重试</span>
           </Button>
@@ -235,7 +286,11 @@ export function ConnectionsPage({
         <>
           <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
             <Metric
-              detail={visibleCount === activeCount ? "当前筛选显示全部连接" : `当前筛选显示 ${visibleCount} 条`}
+              detail={
+                visibleCount === activeCount
+                  ? "当前筛选显示全部连接"
+                  : `当前筛选显示 ${visibleCount} 条`
+              }
               label="活动连接"
               value={summary.activeCount}
             />
@@ -252,7 +307,7 @@ export function ConnectionsPage({
               value={summary.downloadBytes}
             />
             <Metric
-              detail="mihomo 运行占用"
+              detail="内核运行占用"
               format={memoryFormatter}
               label="内存"
               value={memoryValue}
@@ -287,7 +342,11 @@ export function ConnectionsPage({
           </section>
 
           {!hasVisibleRows ? (
-            <ConnectionsEmptyState detail={emptyDetail} onRetry={error ? retryConnections : null} title={emptyTitle} />
+            <ConnectionsEmptyState
+              detail={emptyDetail}
+              onRetry={error ? retryConnections : null}
+              title={emptyTitle}
+            />
           ) : (
             <>
               <Table
@@ -305,14 +364,23 @@ export function ConnectionsPage({
                 {visibleRows.map((row) => {
                   const isPending = pendingIds.has(row.closeId);
                   return (
-                    <article className="grid gap-4 rounded-md border bg-card p-4 shadow-sm" key={row.id}>
+                    <article
+                      className="grid gap-4 rounded-md border bg-card p-4 shadow-sm"
+                      key={row.id}
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="min-w-0 break-words text-sm font-semibold text-foreground">{row.targetLabel}</h3>
+                            <h3 className="min-w-0 break-words text-sm font-semibold text-foreground">
+                              {row.targetLabel}
+                            </h3>
                             <Badge variant="outline">{row.protocolLabel}</Badge>
                           </div>
-                          {row.targetDetail && <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">{row.targetDetail}</p>}
+                          {row.targetDetail && (
+                            <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
+                              {row.targetDetail}
+                            </p>
+                          )}
                         </div>
                         <Button
                           aria-label={`关闭连接 ${row.targetLabel}`}
@@ -330,27 +398,46 @@ export function ConnectionsPage({
 
                       <dl className="grid gap-3 text-sm">
                         <div className="grid gap-1">
-                          <dt className="text-xs font-medium text-muted-foreground">入口与来源</dt>
+                          <dt className="text-xs font-medium text-muted-foreground">
+                            入口与来源
+                          </dt>
                           <dd className="break-words text-foreground">
-                            <span className="font-medium">入口：</span>{row.entryLabel}
+                            <span className="font-medium">入口：</span>
+                            {row.entryLabel}
                             <br />
-                            <span className="font-medium">来源：</span>{row.sourceLabel}
+                            <span className="font-medium">来源：</span>
+                            {row.sourceLabel}
                           </dd>
                         </div>
                         <div className="grid gap-1">
-                          <dt className="text-xs font-medium text-muted-foreground">出口链</dt>
-                          <dd className="break-words text-foreground">{row.exitLabel}</dd>
+                          <dt className="text-xs font-medium text-muted-foreground">
+                            出口链
+                          </dt>
+                          <dd className="break-words text-foreground">
+                            {row.exitLabel}
+                          </dd>
                         </div>
                         <div className="grid gap-1">
-                          <dt className="text-xs font-medium text-muted-foreground">累计流量</dt>
+                          <dt className="text-xs font-medium text-muted-foreground">
+                            累计流量
+                          </dt>
                           <dd className="text-foreground">
                             {formatBytes(row.totalBytes)}
-                            <span className="mt-1 block text-xs text-muted-foreground">↑ {formatBytes(row.uploadBytes)} / ↓ {formatBytes(row.downloadBytes)}</span>
+                            <span className="mt-1 block text-xs text-muted-foreground">
+                              ↑ {formatBytes(row.uploadBytes)} / ↓{" "}
+                              {formatBytes(row.downloadBytes)}
+                            </span>
                           </dd>
                         </div>
                         <div className="grid gap-1">
-                          <dt className="text-xs font-medium text-muted-foreground">开始时间</dt>
-                          <dd><time dateTime={row.startedDateTime || undefined}>{row.startedLabel}</time></dd>
+                          <dt className="text-xs font-medium text-muted-foreground">
+                            开始时间
+                          </dt>
+                          <dd>
+                            <time dateTime={row.startedDateTime || undefined}>
+                              {row.startedLabel}
+                            </time>
+                          </dd>
                         </div>
                       </dl>
                     </article>
@@ -386,7 +473,10 @@ function ConnectionsSkeleton() {
     <div className="grid gap-4" aria-hidden="true">
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         {Array.from({ length: 4 }).map((_, index) => (
-          <div className="grid min-h-[112px] gap-3 rounded-md border bg-card p-4" key={index}>
+          <div
+            className="grid min-h-[112px] gap-3 rounded-md border bg-card p-4"
+            key={index}
+          >
             <div className="h-3 w-20 animate-pulse rounded-full bg-muted" />
             <div className="h-9 w-28 animate-pulse rounded-md bg-muted" />
             <div className="h-3 w-32 animate-pulse rounded-full bg-muted" />
@@ -408,9 +498,15 @@ function ConnectionsSkeleton() {
       <div className="hidden gap-0 overflow-hidden rounded-md border bg-card md:block">
         <div className="grid gap-0">
           {Array.from({ length: 5 }).map((_, index) => (
-            <div className="grid grid-cols-6 gap-4 border-b px-4 py-4 last:border-b-0" key={index}>
+            <div
+              className="grid grid-cols-6 gap-4 border-b px-4 py-4 last:border-b-0"
+              key={index}
+            >
               {Array.from({ length: 6 }).map((__, columnIndex) => (
-                <div className="h-4 w-full animate-pulse rounded-full bg-muted" key={columnIndex} />
+                <div
+                  className="h-4 w-full animate-pulse rounded-full bg-muted"
+                  key={columnIndex}
+                />
               ))}
             </div>
           ))}
@@ -418,7 +514,10 @@ function ConnectionsSkeleton() {
       </div>
       <div className="grid gap-3 md:hidden">
         {Array.from({ length: 3 }).map((_, index) => (
-          <article className="grid gap-3 rounded-md border bg-card p-4" key={index}>
+          <article
+            className="grid gap-3 rounded-md border bg-card p-4"
+            key={index}
+          >
             <div className="flex items-start justify-between gap-3">
               <div className="grid gap-2">
                 <div className="h-4 w-40 animate-pulse rounded-full bg-muted" />
@@ -464,7 +563,13 @@ function ConnectionsEmptyState({ title, detail, onRetry }) {
       <h2>{title}</h2>
       <p>{detail}</p>
       {onRetry && (
-        <Button className="mt-4 h-11" type="button" variant="outline" onClick={onRetry} aria-label="重试加载活动连接">
+        <Button
+          className="mt-4 h-11"
+          type="button"
+          variant="outline"
+          onClick={onRetry}
+          aria-label="重试加载活动连接"
+        >
           <RefreshCw size={16} aria-hidden="true" />
           <span>重试</span>
         </Button>
@@ -496,7 +601,13 @@ function Metric({ label, value, detail, format }) {
   return (
     <section className="metric">
       <span>{label}</span>
-      <strong className="tabular-nums">{typeof value === "number" ? (format ? format(value) : Math.round(value).toString()) : value}</strong>
+      <strong className="tabular-nums">
+        {typeof value === "number"
+          ? format
+            ? format(value)
+            : Math.round(value).toString()
+          : value}
+      </strong>
       <small>{detail}</small>
     </section>
   );

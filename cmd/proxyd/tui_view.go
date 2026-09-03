@@ -348,7 +348,7 @@ func (m tuiModel) renderOverviewPage(width int) string {
 		{Label: "DNS", Value: tuiDNSLabel(overview.DNSPreset, overview.DNSCustom)},
 		{Label: "节点端口映射", Value: tuiOnOff(overview.PortMappingEnabled)},
 		{Label: "自动选优端口", Value: tuiPortOrOff(overview.AutoPort)},
-		{Label: "登录自启", Value: tuiOnOff(overview.Autostart)},
+		{Label: "系统自启", Value: tuiOnOff(overview.Autostart)},
 		{Label: "版本", Value: version},
 	}
 	statusPanel := renderTUIPanel(width, "系统状态", "只读快照 · 修改请使用 Web 或管理命令", renderTUIFacts(width-4, facts))

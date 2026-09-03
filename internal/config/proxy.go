@@ -15,6 +15,8 @@ type Subscription struct {
 	Type string `yaml:"type" json:"type"`
 	// Enabled 使用指针区分旧配置缺失字段和用户显式关闭；缺失时保持历史默认启用行为。
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// PortMapping 使用指针区分旧配置缺失字段和用户显式关闭；缺失时保持历史默认参与端口映射。
+	PortMapping *bool `yaml:"port-mapping,omitempty" json:"port_mapping,omitempty"`
 }
 
 // IsEnabled 返回该订阅是否参与拉取、合并、健康检测与端口监听生成。
@@ -27,6 +29,18 @@ type Subscription struct {
 // 错误情况：无；值对象不存在 nil 接收者场景，字段缺失按向后兼容语义处理。
 func (s Subscription) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
+}
+
+// PortMappingEnabled 返回该订阅的节点是否参与一对一端口监听生成。
+//
+// 参数：无；接收者为待判断的订阅值对象。
+//
+// 返回值：
+//   - bool：port-mapping 未配置时返回 true，显式配置时返回对应值。
+//
+// 错误情况：无；该开关只控制 listener 生成，不影响节点参与路由与稳定端口分配。
+func (s Subscription) PortMappingEnabled() bool {
+	return s.PortMapping == nil || *s.PortMapping
 }
 
 // NodeGroup 把一组节点聚合到一个指定端口。

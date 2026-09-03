@@ -8,7 +8,8 @@ import { requestJSON } from "@/lib/api";
  * 这个 hook 只在 `activeView === "remote"` 时工作，统一维护 `/api/remote`（服务状态、
  * 暴露端口与本地转发）和 `/api/remote/remotes`（远程设备列表）两份数据。加载策略与
  * 活动连接页一致：进入页面加载一次，之后由刷新按钮或写操作触发重新拉取，不做后台
- * 轮询，避免隐藏页签持续请求。
+ * 全页数据不做后台轮询，避免隐藏页签持续请求；只有用户展开的单个远端会每 30 秒
+ * 执行一次轻量探测，收起或切页后立即停止。
  *
  * 参数说明：
  * - activeView: string，当前激活视图名称，用于控制是否加载。
@@ -42,6 +43,9 @@ function readSshSetEnvTerm() {
 export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   const [status, setStatus] = useState(null);
   const [remotes, setRemotes] = useState([]);
+  const [remoteProbes, setRemoteProbes] = useState({});
+  const [expandedRemote, setExpandedRemote] = useState("");
+  const [auditEntries, setAuditEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -108,15 +112,17 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     }
 
     try {
-      const [nextStatus, nextRemotes] = await Promise.all([
+      const [nextStatus, nextRemotes, nextAudit] = await Promise.all([
         requestJSON("/api/remote", { signal: controller.signal }),
         requestJSON("/api/remote/remotes", { signal: controller.signal }),
+        requestJSON("/api/remote/audit?tail=100", { signal: controller.signal }),
       ]);
       if (requestTokenRef.current !== requestToken) {
         return;
       }
       setStatus(nextStatus);
       setRemotes(nextRemotes?.remotes || []);
+      setAuditEntries(nextAudit?.entries || []);
       setError("");
       hasLoadedRef.current = true;
       setHasLoaded(true);
@@ -138,6 +144,56 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     }
   }, []);
 
+  /**
+   * probeRemote 对一个已保存远端执行 disco ping，并缓存在线、RTT 与连接路径。
+   *
+   * 参数说明：
+   * - name: string，远端名称。
+   * - silent: boolean，自动轮询时为 true，失败不弹重复 toast。
+   *
+   * 返回值说明：返回 Promise<object | null>；成功为探测结果，失败为 null。
+   * 可能的异常/错误情况：远端离线、授权拒绝或超时时缓存离线原因；手动探测会 toast。
+   */
+  const probeRemote = useCallback(
+    async (name, silent = false) => {
+      setRemoteProbes((current) => ({
+        ...current,
+        [name]: { ...(current[name] || {}), loading: true, error: "" },
+      }));
+      try {
+        const result = await requestJSON("/api/remote/ping", {
+          method: "POST",
+          body: JSON.stringify({ remote: name }),
+        });
+        const next = { ...result, loading: false, error: "" };
+        setRemoteProbes((current) => ({ ...current, [name]: next }));
+        return next;
+      } catch (probeError) {
+        const next = {
+          online: false,
+          loading: false,
+          error: probeError.message || "探测失败",
+          checked_at: new Date().toISOString(),
+        };
+        setRemoteProbes((current) => ({ ...current, [name]: next }));
+        if (!silent) showToast(`远端 ${name} 探测失败：${next.error}`, "err");
+        return null;
+      }
+    },
+    [showToast],
+  );
+
+  /**
+   * toggleRemoteDetails 展开或收起远端质量详情；展开行会由 effect 每 30 秒自动探测。
+   *
+   * 参数说明：name 为被点击的远端名称。
+   * 返回值说明：无；同名再次点击会收起。
+   * 可能的异常/错误情况：无；实际网络错误由 probeRemote 记录。
+   */
+  const toggleRemoteDetails = useCallback((name) => {
+    setExpandedRemote((current) => (current === name ? "" : name));
+  }, []);
+
   useEffect(() => {
     if (activeView !== "remote") {
       requestControllerRef.current?.abort();
@@ -151,8 +207,33 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     };
   }, [activeView, loadRemote]);
 
+  useEffect(() => {
+    if (activeView !== "remote" || !expandedRemote) return undefined;
+    probeRemote(expandedRemote, true);
+    const timer = window.setInterval(() => probeRemote(expandedRemote, true), 30_000);
+    return () => window.clearInterval(timer);
+  }, [activeView, expandedRemote, probeRemote]);
+
   /**
-   * toggleEnabled 开关远程连接服务。
+   * refreshAudit 单独刷新连接审计面板，不影响页面主状态的加载指示。
+   *
+   * 参数说明：无。
+   * 返回值说明：返回 Promise<boolean>，成功时为 true。
+   * 可能的异常/错误情况：API 不可达时 toast 并保留上一份记录。
+   */
+  const refreshAudit = useCallback(async () => {
+    try {
+      const payload = await requestJSON("/api/remote/audit?tail=100");
+      setAuditEntries(payload?.entries || []);
+      return true;
+    } catch (auditError) {
+      showToast(`连接记录刷新失败：${auditError.message}`, "err");
+      return false;
+    }
+  }, [showToast]);
+
+  /**
+   * toggleEnabled 开关远程连接服务，并由后端在同一事务中联动内嵌 SSH。
    *
    * 参数说明：
    * - enabled: boolean，目标开关状态。
@@ -171,7 +252,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
           body: JSON.stringify({ enabled }),
         });
         if (payload) setStatus(payload);
-        showToast(enabled ? "远程连接服务已开启" : "远程连接服务已关闭");
+        showToast(enabled ? "远程连接服务与内嵌 SSH 已开启" : "远程连接服务与内嵌 SSH 已关闭");
       } catch (toggleError) {
         showToast(`操作失败：${toggleError.message}`, "err");
       }
@@ -236,11 +317,11 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
-   * saveAllow 整体替换客户端公钥白名单（空列表恢复放行所有客户端）。
+   * saveAllow 整体替换客户端公钥白名单。
    *
    * 参数说明：
-   * - entries: Array<{name?: string, key: string}>，目标条目列表（name 为可选管理别名）；
-   *   添加与删除都先由页面算出新列表再整体提交。
+   * - entries: Array<{name?: string, key: string, expires_at?: string, ports?: number[]}>，
+   *   目标最小授权列表；添加与删除都先由页面算出新列表再整体提交。
    *
    * 返回值说明：
    * 返回 Promise<boolean>；成功为 `true`。
@@ -256,7 +337,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
           body: JSON.stringify({ entries }),
         });
         if (payload) setStatus(payload);
-        showToast(entries.length > 0 ? "客户端白名单已更新" : "白名单已清空，恢复放行所有客户端");
+        showToast(entries.length > 0 ? "客户端白名单已更新" : "白名单已清空，访问策略已按当前临时身份更新");
         return true;
       } catch (saveError) {
         showToast(`操作失败：${saveError.message}`, "err");
@@ -297,6 +378,47 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * importKeyFile 上传 tailcat 服务端私钥并在确认后切换到内置托管身份。
+   *
+   * 参数说明：
+   * - file: File，用户选择的 *.private.json 文件。
+   *
+   * 返回值说明：返回 Promise<boolean>；导入成功并更新状态时为 true。
+   * 可能的异常/错误情况：空文件、超过 64 KiB、读取失败、格式非法或后端事务回滚时
+   * toast 明确错误并返回 false；失败不会改变现有 token。
+   */
+  const importKeyFile = useCallback(
+    async (file) => {
+      if (!file) return false;
+      if (file.size <= 0 || file.size > 64 * 1024) {
+        showToast("导入失败：服务端密钥必须是 1..64 KiB 的 JSON 文件", "err");
+        return false;
+      }
+      const accepted = await requestConfirmation({
+        title: "导入服务端私钥？",
+        description: "导入会覆盖内置托管密钥、切换服务端身份并更新 token。现有客户端需要使用与导入密钥对应的 token。",
+        confirmLabel: "确认导入",
+        destructive: true,
+      });
+      if (!accepted) return false;
+      try {
+        const body = await file.text();
+        const payload = await requestJSON("/api/remote/keyfile/import", {
+          method: "POST",
+          body,
+        });
+        if (payload) setStatus(payload);
+        showToast("服务端私钥已导入，token 已按导入身份更新");
+        return true;
+      } catch (importError) {
+        showToast(`导入失败：${importError.message}`, "err");
+        return false;
+      }
+    },
+    [requestConfirmation, showToast],
+  );
+
+  /**
    * setBuiltinSSH 热切换内嵌免密 SSH 服务（隧道 22 端口由进程内 SSH 处理，隧道即认证）。
    *
    * 参数说明：
@@ -324,6 +446,46 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
       }
     },
     [showToast],
+  );
+
+  /**
+   * setWebTerminal 热切换高权限浏览器终端，并在非回环 api-listen 上执行二次确认。
+   *
+   * 参数说明：
+   * - enabled: boolean，目标开关状态；关闭永远不要求确认。
+   *
+   * 返回值说明：返回 Promise<boolean>；用户确认且后端事务成功时为 true。
+   * 可能的异常/错误情况：用户取消、后端安全门拒绝或网络失败时返回 false，原状态不变。
+   */
+  const setWebTerminal = useCallback(
+    async (enabled) => {
+      let acknowledgeExposure = false;
+      if (enabled && status?.api_loopback === false) {
+        acknowledgeExposure = await requestConfirmation({
+          title: "在非回环地址开启 Web 终端？",
+          description: `当前 api-listen 为 ${status?.api_listen || "非回环地址"}。任何能访问控制台的客户端都可能获得当前用户 shell，请确认网络边界可信。`,
+          confirmLabel: "确认承担风险并开启",
+          destructive: true,
+        });
+        if (!acknowledgeExposure) return false;
+      }
+      try {
+        const payload = await requestJSON("/api/remote/web-terminal", {
+          method: "POST",
+          body: JSON.stringify({
+            enabled,
+            acknowledge_exposure: acknowledgeExposure,
+          }),
+        });
+        if (payload) setStatus(payload);
+        showToast(enabled ? "Web 终端已开启，仅在需要时保持开启" : "Web 终端已关闭");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [requestConfirmation, showToast, status?.api_listen, status?.api_loopback],
   );
 
   /**
@@ -432,6 +594,12 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
       if (!accepted) return false;
       try {
         await requestJSON(`/api/remote/remotes/${encodeURIComponent(name)}`, { method: "DELETE" });
+        setExpandedRemote((current) => (current === name ? "" : current));
+        setRemoteProbes((current) => {
+          const next = { ...current };
+          delete next[name];
+          return next;
+        });
         showToast(`远程设备 ${name} 已删除`);
         await loadRemote();
         return true;
@@ -469,6 +637,24 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * buildSSHCommand 构造到指定远程设备的 SSH 命令。
+   * 是否携带 SetEnv TERM=xterm-256color 由统一开关 sshSetEnvTerm 决定；
+   * 复制到剪贴板与 Web Terminal 自动执行共用同一模板，保证两处命令一致。
+   *
+   * 参数说明：
+   * - name: string，远程设备名称。
+   *
+   * 返回值说明：
+   * 返回 string，如 `proxyd ssh <名称> -o SetEnv=TERM=xterm-256color`。
+   *
+   * 可能的异常/错误情况：无；名称合法性在添加设备时已由后端校验。
+   */
+  const buildSSHCommand = useCallback(
+    (name) => `proxyd ssh ${name}${sshSetEnvTerm ? " -o SetEnv=TERM=xterm-256color" : ""}`,
+    [sshSetEnvTerm],
+  );
+
+  /**
    * copySSHCommand 复制到指定远程设备的 SSH 命令。
    * 是否携带 SetEnv TERM=xterm-256color 由统一开关 sshSetEnvTerm 决定。
    *
@@ -483,7 +669,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
    */
   const copySSHCommand = useCallback(
     async (name) => {
-      const command = `proxyd ssh ${name}${sshSetEnvTerm ? " -o SetEnv=TERM=xterm-256color" : ""}`;
+      const command = buildSSHCommand(name);
       try {
         await navigator.clipboard.writeText(command);
         showToast(`已复制 SSH 命令：${command}`);
@@ -491,7 +677,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
         showToast(`复制失败：${copyError.message}`, "err");
       }
     },
-    [showToast, sshSetEnvTerm],
+    [buildSSHCommand, showToast],
   );
 
   /**
@@ -654,7 +840,9 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   return {
+    auditEntries,
     error,
+    expandedRemote,
     hasLoaded,
     loading,
     refreshing,
@@ -662,11 +850,15 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     status,
     addForward,
     addRemote,
+    buildSSHCommand,
     copySSHCommand,
     copyText,
     copyToken,
     createSSHForward,
     fetchPeerToken,
+    importKeyFile,
+    probeRemote,
+    refreshAudit,
     reload: loadRemote,
     removeForward,
     removeRemote,
@@ -676,9 +868,12 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     saveKeyFile,
     saveServe,
     setBuiltinSSH,
+    setWebTerminal,
     setSshSetEnvTerm,
     sshSetEnvTerm,
     toggleEnabled,
     toggleForward,
+    toggleRemoteDetails,
+    remoteProbes,
   };
 }
