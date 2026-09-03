@@ -332,6 +332,54 @@ func TestServerConfigEqual(t *testing.T) {
 	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:b"}}) {
 		t.Fatal("allow key changed should not be equal")
 	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}, KeyFile: "/tmp/x.private.json"}) {
+		t.Fatal("key-file changed should not be equal")
+	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}, BuiltinSSH: true}) {
+		t.Fatal("builtin-ssh changed should not be equal")
+	}
+}
+
+func TestServerKeyPath(t *testing.T) {
+	m := NewManager(t.TempDir(), nil)
+	if got, want := m.serverKeyPath(config.RemoteConfig{}), filepath.Join(m.stateDir, serverKeyRelPath); got != want {
+		t.Fatalf("default key path = %q, want %q", got, want)
+	}
+	if got := m.serverKeyPath(config.RemoteConfig{KeyFile: " /tmp/x.private.json "}); got != "/tmp/x.private.json" {
+		t.Fatalf("custom key path = %q, want trimmed absolute path", got)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if got, want := m.serverKeyPath(config.RemoteConfig{KeyFile: "~/k.private.json"}), filepath.Join(home, "k.private.json"); got != want {
+			t.Fatalf("~/ expansion = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestValidateKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "k.private.json")
+	if err := ValidateKeyFile(path); err != nil {
+		t.Fatalf("missing file should pass (created on start): %v", err)
+	}
+	if _, err := loadOrCreateNodeKey(path); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := ValidateKeyFile(path); err != nil {
+		t.Fatalf("valid key rejected: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.private.json")
+	if err := os.WriteFile(bad, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateKeyFile(bad); err == nil {
+		t.Fatal("key file without private key accepted")
+	}
+	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateKeyFile(bad); err == nil {
+		t.Fatal("garbage key file accepted")
+	}
 }
 
 func TestValidateClientKey(t *testing.T) {

@@ -29,6 +29,9 @@ type Status struct {
 	Serve     []int           `json:"serve"`               // 经隧道暴露的本机端口
 	Allow     []string        `json:"allow"`               // 客户端公钥白名单（空=放行所有）
 	TempKey   string          `json:"temp_key,omitempty"`  // 临时身份公钥（应急 nodekey）
+	KeyFile   string          `json:"key_file"`            // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
+	CustomKeyFile string      `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
+	BuiltinSSH bool           `json:"builtin_ssh"`         // 内嵌免密 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
 	// ClientActivity 是各已知客户端公钥（白名单+临时身份）当前的入站活动连接数。
 	ClientActivity map[string]int64 `json:"client_activity,omitempty"`
 	Forwards  []ForwardStatus `json:"forwards"`            // 全部转发条目（含禁用项）
@@ -65,7 +68,8 @@ type Manager struct {
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥
-// （<stateDir>/remote/server.private.json），logf 为 nil 时丢弃隧道内部日志。
+// （<stateDir>/remote/server.private.json，可用配置 key-file 覆盖），
+// logf 为 nil 时丢弃隧道内部日志。
 func NewManager(stateDir string, logf func(format string, args ...any)) *Manager {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -120,7 +124,7 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 // serverConfigEqual 判断运行中的服务端是否与新配置等价（等价则无需重建隧道）。
 func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 	old := m.cfg
-	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey {
+	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey || old.KeyFile != cfg.KeyFile || old.BuiltinSSH != cfg.BuiltinSSH {
 		return false
 	}
 	if len(old.Serve) != len(cfg.Serve) || len(old.Allow) != len(cfg.Allow) {
@@ -161,6 +165,9 @@ func (m *Manager) Status() Status {
 		Serve:   append([]int(nil), m.cfg.Serve...),
 		Allow:   append([]string(nil), m.cfg.Allow...),
 		TempKey: m.cfg.TempKey,
+		KeyFile: m.serverKeyPath(m.cfg),
+		CustomKeyFile: strings.TrimSpace(m.cfg.KeyFile),
+		BuiltinSSH: m.cfg.BuiltinSSH,
 	}
 	if len(m.activeClients) > 0 {
 		st.ClientActivity = make(map[string]int64, len(m.activeClients))

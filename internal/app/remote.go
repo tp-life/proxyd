@@ -119,6 +119,30 @@ func (a *App) SetRemoteAllow(keys []string) error {
 	})
 }
 
+// SetRemoteKeyFile 修改自定义服务端密钥文件路径并持久化；空字符串恢复内置托管密钥。
+// 已存在的文件会先经 remote.ValidateKeyFile 校验；切换密钥即更换身份，token 随之改变。
+func (a *App) SetRemoteKeyFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		if err := remote.ValidateKeyFile(path); err != nil {
+			return err
+		}
+	}
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.KeyFile = path
+		return nil
+	})
+}
+
+// SetRemoteBuiltinSSH 热切换内嵌免密 SSH 服务并持久化（重建隧道，token 不变）。
+// 开启后隧道 22 端口由进程内 SSH 服务器处理（隧道即认证），不再转发系统 sshd。
+func (a *App) SetRemoteBuiltinSSH(enabled bool) error {
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.BuiltinSSH = enabled
+		return nil
+	})
+}
+
 // RemoteTempKeyPair 返回临时身份的完整密钥对（公钥, 私钥）。
 // 未生成时返回错误，提示用户先重置生成。私钥是连接凭据，只应经专用端点透出。
 func (a *App) RemoteTempKeyPair() (pub string, priv string, err error) {

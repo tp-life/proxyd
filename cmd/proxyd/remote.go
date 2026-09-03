@@ -31,6 +31,8 @@ type remoteStatusJSON struct {
 	Serve     []int    `json:"serve"`
 	Allow     []string `json:"allow"`
 	TempKey   string   `json:"temp_key,omitempty"`
+	KeyFile   string   `json:"key_file"`
+	BuiltinSSH bool    `json:"builtin_ssh"`
 	ClientActivity map[string]int64 `json:"client_activity,omitempty"`
 	Forwards  []struct {
 		Name       string `json:"name"`
@@ -103,12 +105,16 @@ func cmdRemote(args []string) error {
 		return cmdRemoteAllow(c, rest[1:])
 	case "tempkey":
 		return cmdRemoteTempKey(c, rest[1:])
+	case "keyfile":
+		return cmdRemoteKeyFile(c, rest[1:])
+	case "builtin-ssh":
+		return cmdRemoteBuiltinSSH(c, rest[1:])
 	case "remotes":
 		return cmdRemoteRemotes(c, rest[1:])
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|tempkey|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|tempkey|keyfile|builtin-ssh|remotes|forwards|genkey|pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -142,6 +148,12 @@ func remotePrintStatus(c *apiClient) error {
 	}
 	if st.Region != "" {
 		fmt.Printf("DERP 区域：%s\n", st.Region)
+	}
+	if st.KeyFile != "" {
+		fmt.Printf("密钥文件：%s\n", st.KeyFile)
+	}
+	if st.BuiltinSSH {
+		fmt.Println("内嵌免密 SSH：已开启（隧道 22 端口由进程内 SSH 处理，proxyd remote builtin-ssh off 关闭）")
 	}
 	fmt.Printf("暴露端口：%s\n", formatPorts(st.Serve))
 	if len(st.Forwards) > 0 {
@@ -323,6 +335,65 @@ func cmdRemoteTempKey(c *apiClient, args []string) error {
 	}
 	fmt.Printf("公钥（已在白名单叠加生效）：%s\n", out.Public)
 	fmt.Printf("私钥（给客户端连入本机用：PROXYD_CLIENT_KEY 或 --client-key，注意保密，勿当 token 使用）：%s\n", out.Private)
+	return nil
+}
+
+// cmdRemoteKeyFile 查看（无参）或设置自定义服务端密钥文件；"-" 恢复内置托管密钥。
+// 指向 tailcat genkey --key=default 生成的密钥文件可让两边 token 一致；
+// 切换密钥即更换身份，运行中的隧道会重建，token 随之改变。
+func cmdRemoteKeyFile(c *apiClient, args []string) error {
+	if len(args) == 0 {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return err
+		}
+		fmt.Printf("密钥文件：%s\n", st.KeyFile)
+		return nil
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("用法: proxyd remote keyfile [路径|-]（- 恢复内置托管密钥）")
+	}
+	path := args[0]
+	if path == "-" {
+		path = ""
+	}
+	var st remoteStatusJSON
+	if err := c.do(http.MethodPost, "/api/remote/keyfile", map[string]string{"path": path}, &st); err != nil {
+		return err
+	}
+	if path == "" {
+		fmt.Printf("已恢复内置托管密钥：%s（token 已随身份切换更新）\n", st.KeyFile)
+	} else {
+		fmt.Printf("密钥文件已更新：%s（token 已随身份切换更新）\n", st.KeyFile)
+	}
+	return nil
+}
+
+// cmdRemoteBuiltinSSH 查看（无参）或开关内嵌免密 SSH 服务（on|off）。
+// 开启后隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证，无需系统 sshd），
+// 与 tailcat serve 的 no-auth-ssh 同模型；token 不变。
+func cmdRemoteBuiltinSSH(c *apiClient, args []string) error {
+	if len(args) == 0 {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return err
+		}
+		fmt.Printf("内嵌免密 SSH：%v\n", st.BuiltinSSH)
+		return nil
+	}
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		return fmt.Errorf("用法: proxyd remote builtin-ssh [on|off]")
+	}
+	enabled := args[0] == "on"
+	var st remoteStatusJSON
+	if err := c.do(http.MethodPost, "/api/remote/builtin-ssh", map[string]bool{"enabled": enabled}, &st); err != nil {
+		return err
+	}
+	if enabled {
+		fmt.Println("内嵌免密 SSH 已开启：对端直接 proxyd ssh / tailcat ssh 即可登录（隧道即认证，无需系统 sshd 与账号密码）")
+	} else {
+		fmt.Println("内嵌免密 SSH 已关闭：隧道 22 端口恢复转发 127.0.0.1:22（系统 sshd）")
+	}
 	return nil
 }
 

@@ -91,6 +91,12 @@ rules:
 #   derpmap-url: ""            # 自建 DERP map JSON 地址（一般用不到）
 #   serve: [22]                # 经隧道暴露的本机端口（连接转发到 127.0.0.1:端口）；
 #                              # 暴露 22 即开放 SSH：对端可 proxyd ssh / proxyd scp 直连本机
+#   key-file: ""               # 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；
+#                              # 指向 tailcat genkey --key=default 的密钥可让两边 token 一致；
+#                              # 空=内置托管密钥 state-dir/remote/server.private.json
+#   builtin-ssh: false         # true=内嵌免密 SSH：隧道 22 端口由进程内 SSH 服务直接处理
+#                              #（隧道即认证，无需系统 sshd/账号密码，同 tailcat no-auth-ssh）；
+#                              # 注意：持有 token 即获得本机 shell，建议配合 allow 白名单
 #   remotes:                   # 保存的远端（给 token 起名字，供 CLI/转发引用）
 #     - name: nas
 #       token: tc...

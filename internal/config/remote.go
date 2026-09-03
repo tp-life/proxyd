@@ -39,6 +39,8 @@ type RemoteConfig struct {
 	Serve      []int           `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
 	Allow      []string        `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端 node 公钥白名单；空=放行所有持有 token 的客户端
 	TempKey    string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`       // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
+	KeyFile    string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`       // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
+	BuiltinSSH bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"` // 内嵌免密 SSH 服务：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证），不再转发 127.0.0.1:22，无需系统 sshd
 	Remotes    []RemotePeer    `yaml:"remotes,omitempty" json:"remotes,omitempty"`
 	Forwards   []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
 }

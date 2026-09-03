@@ -415,7 +415,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
 | `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
-| `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token |
+| `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token。配置 `remote.key-file` 时改用指定路径，此文件不再使用 |
 | `cache.db`、`geo*` 等 | mihomo 自身的缓存与 geo 数据文件 |
 
 ## 九、配置文件参考
@@ -469,6 +469,12 @@ state-dir: ~/.local/state/proxyd       # 状态目录（快照/缓存/pid/日志
 remote:                     # 远程连接（tailcat 隧道），与代理功能独立，详见「十、远程连接」
   enabled: false            # 隧道服务端开关
   serve: [22]               # 经隧道暴露的本机端口
+  # key-file: ~/Library/Application Support/tailcat/keys/default.private.json
+                            # 可选：自定义服务端密钥文件（tailcat *.private.json），
+                            # 指向 tailcat genkey --key=default 的密钥可让两边 token 一致；
+                            # 缺省用内置托管密钥 state-dir/remote/server.private.json
+  # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
+                            # 无需系统 sshd；持有 token 即可登录，建议配合白名单
   remotes: []               # 保存的远端：name + token
   forwards: []              # 本地常驻转发：listen → remote:remote-port；listen 可留空或填 "auto" 自动分配端口
 ```
@@ -482,7 +488,7 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
 ### 概念
 
 - **token（连接凭据）**：服务端启动后生成 `tc...` 字符串，由服务端 WireGuard 公钥 + DERP 区域信息派生。谁拿到 token 谁就能连到服务端的暴露端口——**像密码一样保管**（Web/CLI 默认只显示摘要，配置导出默认打码）。
-- **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。
+- **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。配置 `remote.key-file` 可改用自定义密钥文件（如 tailcat 的 default key），此时内置文件不再使用。
 - **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。可在 `remote.region` 填自建 derper 主机名脱离公共中继。
 
 ### 服务端：暴露本机端口
@@ -494,6 +500,8 @@ proxyd remote token           # 打印完整 token，发给要连接的人
 ```
 
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
+
+**内嵌免密 SSH**（`proxyd remote builtin-ssh on`，或 Web 服务状态卡开关）：隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
 
 ### 客户端：连接远端
 
@@ -527,11 +535,22 @@ Web 控制台「远程连接」页每个对端都有「连接」对话框，给�
 
 proxyd 的 token 与官方 `tailcat` CLI 完全互通：对方可以用 `tailcat ssh <token>` 连你的 `proxyd remote serve 22`，你也可以 `proxyd ssh <tailcat token>` 连官方服务端。
 
+注意 token 由服务端密钥决定，proxyd 默认使用自己的内置密钥（`state-dir/remote/server.private.json`），与 `tailcat genkey --key=default` 生成的密钥不同，两边 token 自然不一样。若想让两者一致（例如已把 tailcat genkey 的 token 发给对端），让 proxyd 复用同一把密钥即可：
+
+```sh
+# macOS 上 tailcat 的 default key 通常在 ~/Library/Application Support/tailcat/keys/default.private.json
+proxyd remote keyfile "~/Library/Application Support/tailcat/keys/default.private.json"
+proxyd remote keyfile -     # 恢复内置托管密钥
+proxyd remote keyfile       # 查看当前生效的密钥文件
+```
+
+Web 控制台「远程连接」页的服务状态卡中也可设置。切换密钥即更换身份，运行中的隧道会重建，旧 token 立即失效。
+
 ### 限制
 
 - tailcat 上游不承诺 API 与 wire format 稳定性，proxyd 锁定依赖版本升级；跨版本互联失败时先对齐版本。
 - 公共 DERP 中继限速，大流量场景（如长时间文件传输）建议自建 derper。
-- 文件传输通过 `proxyd scp`（包装系统 scp 走隧道）完成，不提供独立的文件传输子协议；不含 tailcat cp/recv、SOCKS、exit-node 与客户端白名单。
+- 文件传输通过 `proxyd scp`（包装系统 scp 走隧道）完成，不提供独立的文件传输子协议；不含 tailcat cp/recv、SOCKS 与 exit-node。
 
 ## 十一、常见问题
 

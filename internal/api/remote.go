@@ -21,6 +21,8 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/remote/token", s.handleGetRemoteToken)
 	mux.HandleFunc("POST /api/remote/serve", s.handleSetRemoteServe)
 	mux.HandleFunc("POST /api/remote/allow", s.handleSetRemoteAllow)
+	mux.HandleFunc("POST /api/remote/keyfile", s.handleSetRemoteKeyFile)
+	mux.HandleFunc("POST /api/remote/builtin-ssh", s.handleSetRemoteBuiltinSSH)
 	mux.HandleFunc("GET /api/remote/tempkey", s.handleGetRemoteTempKey)
 	mux.HandleFunc("POST /api/remote/tempkey/reset", s.handleResetRemoteTempKey)
 	mux.HandleFunc("GET /api/remote/remotes", s.handleListRemotes)
@@ -102,6 +104,38 @@ func (s *Server) handleSetRemoteAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.app.SetRemoteAllow(req.Keys); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleSetRemoteKeyFile 修改自定义服务端密钥文件路径（空字符串恢复内置托管密钥）。
+func (s *Server) handleSetRemoteKeyFile(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteKeyFile(req.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleSetRemoteBuiltinSSH 热切换内嵌免密 SSH 服务（隧道 22 端口进程内处理）。
+func (s *Server) handleSetRemoteBuiltinSSH(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteBuiltinSSH(req.Enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

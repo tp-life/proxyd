@@ -266,6 +266,66 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * saveKeyFile 设置自定义服务端密钥文件路径（空串恢复内置托管密钥）。
+   *
+   * 参数说明：
+   * - path: string，tailcat *.private.json 路径（支持 ~/ 开头）；空串恢复默认。
+   *
+   * 返回值说明：
+   * 返回 Promise<boolean>；成功为 `true`。切换密钥即更换身份，token 随之改变。
+   *
+   * 可能的异常/错误情况：
+   * 后端校验失败（文件已存在但非合法密钥）或网络失败时 toast 错误并返回 false。
+   */
+  const saveKeyFile = useCallback(
+    async (path) => {
+      try {
+        const payload = await requestJSON("/api/remote/keyfile", {
+          method: "POST",
+          body: JSON.stringify({ path }),
+        });
+        if (payload) setStatus(payload);
+        showToast(path ? "密钥文件已更新，token 已随身份切换" : "已恢复内置托管密钥，token 已随身份切换");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
+   * setBuiltinSSH 热切换内嵌免密 SSH 服务（隧道 22 端口由进程内 SSH 处理，隧道即认证）。
+   *
+   * 参数说明：
+   * - enabled: boolean，目标开关状态。
+   *
+   * 返回值说明：
+   * 返回 Promise<boolean>；成功为 `true`。
+   *
+   * 可能的异常/错误情况：
+   * 后端失败或网络失败时 toast 错误并返回 false。
+   */
+  const setBuiltinSSH = useCallback(
+    async (enabled) => {
+      try {
+        const payload = await requestJSON("/api/remote/builtin-ssh", {
+          method: "POST",
+          body: JSON.stringify({ enabled }),
+        });
+        if (payload) setStatus(payload);
+        showToast(enabled ? "内嵌免密 SSH 已开启（对端无需系统 sshd 即可登录）" : "内嵌免密 SSH 已关闭，恢复转发系统 sshd");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
    * resetTempKey 重置（或首次生成）临时身份：旧私钥立即失效，手动白名单不受影响。
    *
    * 参数说明：无。
@@ -612,7 +672,9 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     resetTempKey,
     copyTempKey,
     saveAllow,
+    saveKeyFile,
     saveServe,
+    setBuiltinSSH,
     setSshSetEnvTerm,
     sshSetEnvTerm,
     toggleEnabled,

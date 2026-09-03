@@ -30,6 +30,8 @@ import { classNames, maskRemoteSecret, tableViewportHeight } from "@/lib/format"
  * - hasLoaded: boolean，是否至少完成过一次加载尝试。
  * - reload/toggleEnabled/copyToken/saveServe: Function，状态加载与服务/端口操作。
  * - saveAllow: Function，整体替换客户端公钥白名单。
+ * - saveKeyFile: Function，设置自定义服务端密钥文件（空串恢复内置托管密钥）。
+ * - setBuiltinSSH: Function，热切换内嵌免密 SSH 服务（隧道 22 端口进程内处理）。
  * - resetTempKey/copyTempKey: Function，临时身份（应急 nodekey）的重置与私钥复制。
  * - addRemote/removeRemote/copySSHCommand: Function，远程设备操作。
  * - addForward/toggleForward/removeForward: Function，本地转发操作。
@@ -58,6 +60,8 @@ export function RemotePage({
   copyToken,
   saveServe,
   saveAllow,
+  saveKeyFile,
+  setBuiltinSSH,
   resetTempKey,
   copyTempKey,
   addRemote,
@@ -74,6 +78,7 @@ export function RemotePage({
 }) {
   const [serveInput, setServeInput] = useState("");
   const [allowInput, setAllowInput] = useState("");
+  const [keyFileInput, setKeyFileInput] = useState("");
   const [remoteForm, setRemoteForm] = useState({ name: "", token: "" });
   const [forwardForm, setForwardForm] = useState({ name: "", listen: "", remoteSource: "", remoteToken: "", remotePort: "" });
   const [connectTarget, setConnectTarget] = useState(null);
@@ -257,6 +262,20 @@ export function RemotePage({
   }
 
   /**
+   * submitKeyFile 提交自定义服务端密钥文件路径；空输入恢复内置托管密钥。
+   *
+   * 参数说明：event 为表单提交事件。
+   * 返回值说明：返回 Promise<void>。
+   * 可能的异常/错误情况：后端校验失败（文件已存在但非合法密钥）由 saveKeyFile toast。
+   */
+  async function submitKeyFile(event) {
+    event.preventDefault();
+    if (await saveKeyFile(keyFileInput.trim())) {
+      setKeyFileInput("");
+    }
+  }
+
+  /**
    * openSSHPort 一键把 22 端口并入暴露列表，供对端经隧道 SSH 登录本机。
    *
    * 参数说明：无。
@@ -351,6 +370,8 @@ export function RemotePage({
                 items: [
                   "本机 token：复制后发给对方，对方添加为「远程设备」即可连接本机",
                   "客户端公钥：本机连接别人时的身份；对端用 tailcat serve --allow=<此公钥> 可配置白名单，只放行本机",
+                  "密钥文件：决定 token 的服务端私钥；默认内置托管。若对端客户端是 tailcat 命令行，可填 tailcat genkey --key=default 生成的密钥文件路径（macOS 通常在 ~/Library/Application Support/tailcat/keys/default.private.json），两边用同一把密钥，token 即一致",
+                  "内嵌免密 SSH：开启后隧道 22 端口由 proxyd 进程内 SSH 服务直接处理（与 tailcat serve no-auth-ssh 同模型），对端 proxyd ssh / tailcat ssh 即可登录本机——无需系统 sshd（macOS 远程登录）、无需账号密码，隧道密钥握手本身就是认证；注意安全：持有 token 即可获得本机 shell，建议配合「允许的客户端」白名单使用",
                   "允许的客户端：添加对端的客户端公钥后，只有列表内的机器能连入本机（token+私钥双重校验）；清空则恢复放行所有",
                   "临时身份：给「客户端」使用的应急 nodekey（本机是服务端，它不是本机 token，不要填进远程设备）。公钥自动叠加进白名单；私钥复制后存密码管理器，没带电脑时在别的机器用 PROXYD_CLIENT_KEY=<私钥> 连入本机；重置只换这一对，不影响手动添加的白名单",
                 ],
@@ -366,6 +387,10 @@ export function RemotePage({
               ) : (
                 <Badge variant="secondary">已停止</Badge>
               )}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <UISwitch checked={Boolean(status?.builtin_ssh)} className="mt-0 border-0 pt-0" label="内嵌免密 SSH 服务（隧道 22 端口，无需系统 sshd）" onCheckedChange={setBuiltinSSH} />
+              <span className="text-xs text-muted-foreground">隧道即认证：持有 token 即可登录本机 shell，建议配合白名单</span>
             </div>
             {status?.enabled && !status?.running && status?.error && (
               <p className="permission-note warn">{status.error}</p>
@@ -402,6 +427,32 @@ export function RemotePage({
                 </div>
               )}
             </dl>
+            <div className="mt-3 grid gap-2 rounded-md border bg-muted/40 px-3 py-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                服务端密钥文件（决定 token）{!status?.custom_key_file && "：当前使用内置托管密钥"}
+              </span>
+              {status?.key_file && (
+                <code className="min-w-0 break-all font-mono text-xs text-muted-foreground">{status.key_file}</code>
+              )}
+              <form className="flex flex-wrap items-center gap-2" onSubmit={submitKeyFile}>
+                <input
+                  aria-label="自定义服务端密钥文件路径"
+                  className="mono-input min-w-0 flex-1"
+                  value={keyFileInput}
+                  onChange={(event) => setKeyFileInput(event.target.value)}
+                  placeholder="tailcat 密钥文件路径（~/ 开头亦可），留空保存即恢复内置托管"
+                />
+                <Button size="sm" variant="outline" type="submit"><span>保存</span></Button>
+                {status?.custom_key_file && (
+                  <Button size="sm" variant="outline" type="button" onClick={() => saveKeyFile("")}>
+                    <span>恢复默认</span>
+                  </Button>
+                )}
+              </form>
+              <span className="text-xs text-muted-foreground">
+                填 tailcat genkey --key=default 生成的密钥文件可让 tailcat 命令行与本服务 token 一致；切换密钥即更换身份，旧 token 立即失效。
+              </span>
+            </div>
             <div className="mt-3 grid gap-2 rounded-md border bg-muted/40 px-3 py-2">
               <span className="text-xs font-medium text-muted-foreground">
                 允许的客户端（公钥白名单）{allow.length === 0 && !status?.temp_key && "：当前放行所有持有 token 的客户端"}

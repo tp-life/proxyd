@@ -20,13 +20,33 @@ import (
 	"proxyd/internal/config"
 )
 
-// serverKeyRelPath 是服务端密钥在 stateDir 下的相对路径。
+// serverKeyRelPath 是内置托管服务端密钥在 stateDir 下的相对路径。
 // 密钥决定 token：文件在则 token 稳定，删除后下次启动生成全新 token。
+// 配置 key-file 时改用该路径（可指向 tailcat genkey 生成的密钥，使两边 token 一致）。
 const serverKeyRelPath = "remote/server.private.json"
+
+// serverKeyPath 返回服务端密钥的实际路径：配置 key-file 时展开 ~/ 后使用，
+// 否则用内置托管路径 <stateDir>/remote/server.private.json。
+func (m *Manager) serverKeyPath(cfg config.RemoteConfig) string {
+	if p := strings.TrimSpace(cfg.KeyFile); p != "" {
+		return expandHome(p)
+	}
+	return filepath.Join(m.stateDir, serverKeyRelPath)
+}
+
+// expandHome 把 ~/ 开头的路径展开为用户主目录下的绝对路径。
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
+		}
+	}
+	return p
+}
 
 // startServerLocked 按配置启动隧道服务端并刷新 token；调用方需持有 m.mu。
 func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
-	priv, err := loadOrCreateNodeKey(filepath.Join(m.stateDir, serverKeyRelPath))
+	priv, err := loadOrCreateNodeKey(m.serverKeyPath(cfg))
 	if err != nil {
 		return err
 	}
@@ -73,13 +93,29 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 		servePorts[uint16(p)] = true
 		s.ServedTCPPorts = append(s.ServedTCPPorts, filter.PortRange{First: uint16(p), Last: uint16(p)})
 	}
+	// 内嵌免密 SSH：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证，
+	// 与 tailcat serve 的 no-auth-ssh 同模型），覆盖对 127.0.0.1:22 的转发，
+	// 无需系统 sshd。host key 由 tailcat 库生成于用户配置目录 tailcat/ssh 下。
+	var sshHandler func(net.Conn)
+	if cfg.BuiltinSSH {
+		if !tailcat.SupportsSSHServer() {
+			return fmt.Errorf("当前平台不支持内嵌 SSH 服务")
+		}
+		sshHandler = s.SSHConnHandler(tailcat.SSHOptions{Shell: true})
+		if !servePorts[22] {
+			s.ServedTCPPorts = append(s.ServedTCPPorts, filter.PortRange{First: 22, Last: 22})
+		}
+	}
 	s.OnTCP = func(port uint16) func(net.Conn) {
+		if port == 22 && sshHandler != nil {
+			return m.withClientTracking(sshHandler)
+		}
 		if !servePorts[port] {
 			return nil // RST
 		}
-		return func(c net.Conn) {
+		return m.withClientTracking(func(c net.Conn) {
 			m.serveConn(c, port)
-		}
+		})
 	}
 
 	if err := s.Start(); err != nil {
@@ -88,7 +124,15 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	m.srv = s
 	m.token = string(s.ConnBlob())
 	m.serveErr = ""
-	m.logf("[remote] 隧道服务端已启动，暴露端口 %v", cfg.Serve)
+	sshNote := ""
+	if cfg.BuiltinSSH {
+		sshNote = "，内嵌免密 SSH（隧道 22 端口）"
+	}
+	if strings.TrimSpace(cfg.KeyFile) != "" {
+		m.logf("[remote] 隧道服务端已启动，暴露端口 %v%s，密钥文件 %s", cfg.Serve, sshNote, m.serverKeyPath(cfg))
+	} else {
+		m.logf("[remote] 隧道服务端已启动，暴露端口 %v%s", cfg.Serve, sshNote)
+	}
 	return nil
 }
 
@@ -103,19 +147,7 @@ func (m *Manager) stopServerLocked() {
 }
 
 // serveConn 把隧道内到来的连接转发到本机回环端口（serve 语义的实现）。
-// 同时对已知客户端（白名单+临时身份）按公钥统计活动连接数。
 func (m *Manager) serveConn(c net.Conn, port uint16) {
-	keyText := m.attributeClient(c.RemoteAddr())
-	if keyText != "" {
-		m.mu.Lock()
-		m.activeClients[keyText]++
-		m.mu.Unlock()
-		defer func() {
-			m.mu.Lock()
-			m.activeClients[keyText]--
-			m.mu.Unlock()
-		}()
-	}
 	defer c.Close()
 	upstream, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), 10*time.Second)
 	if err != nil {
@@ -124,6 +156,27 @@ func (m *Manager) serveConn(c net.Conn, port uint16) {
 	}
 	defer upstream.Close()
 	relay(c, upstream)
+}
+
+// withClientTracking 为连接处理器叠加「已知客户端（白名单+临时身份）活动连接数」统计；
+// 开放模式下的陌生客户端无法反推公钥，直接透传。
+func (m *Manager) withClientTracking(h func(net.Conn)) func(net.Conn) {
+	return func(c net.Conn) {
+		keyText := m.attributeClient(c.RemoteAddr())
+		if keyText == "" {
+			h(c)
+			return
+		}
+		m.mu.Lock()
+		m.activeClients[keyText]++
+		m.mu.Unlock()
+		defer func() {
+			m.mu.Lock()
+			m.activeClients[keyText]--
+			m.mu.Unlock()
+		}()
+		h(c)
+	}
 }
 
 // attributeClient 把入站连接的远端隧道地址归属到已知客户端公钥
@@ -151,6 +204,27 @@ func relay(a, b net.Conn) {
 	<-done
 	_ = a.Close()
 	_ = b.Close()
+}
+
+// ValidateKeyFile 校验自定义服务端密钥文件：已存在时必须能解析为 tailcat 密钥
+// 且含私钥；不存在时视为通过（启动时会在该路径生成新密钥）。
+func ValidateKeyFile(path string) error {
+	path = expandHome(strings.TrimSpace(path))
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("读取密钥文件 %s 失败: %w", path, err)
+	}
+	var saved tailcat.PrivateKey
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return fmt.Errorf("密钥文件 %s 不是合法的 tailcat 密钥: %w", path, err)
+	}
+	if saved.Private.IsZero() {
+		return fmt.Errorf("密钥文件 %s 不含私钥", path)
+	}
+	return nil
 }
 
 // loadOrCreateNodeKey 读取持久化节点密钥；不存在时生成新密钥并以 0600 落盘。
