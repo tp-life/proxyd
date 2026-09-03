@@ -3,3 +3,5 @@ bin/
 .gocache/
 proxyd.yaml
 web/node_modules/
+/proxyd
+configs/config.dev.yaml

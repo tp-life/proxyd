@@ -22,6 +22,23 @@ import { requestJSON } from "@/lib/api";
  * 接口失败时保留上一份数据并把错误文本交给页面错误条带；写操作失败时 toast 后端
  * 返回的纯文本错误。
  */
+// sshSetEnvStorageKey 是「SSH 命令携带 TERM 环境变量」统一开关的 localStorage 键。
+const sshSetEnvStorageKey = "proxyd.sshSetEnvTerm";
+
+/**
+ * readSshSetEnvTerm 读取统一开关，默认开启（保持既有行为：命令带 SetEnv TERM=xterm-256color）。
+ *
+ * 参数说明：无。
+ * 返回值说明：返回 boolean；localStorage 不可用时回退为 true。
+ */
+function readSshSetEnvTerm() {
+  try {
+    return localStorage.getItem(sshSetEnvStorageKey) !== "off";
+  } catch {
+    return true;
+  }
+}
+
 export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   const [status, setStatus] = useState(null);
   const [remotes, setRemotes] = useState([]);
@@ -29,9 +46,30 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [sshSetEnvTerm, setSshSetEnvTermState] = useState(readSshSetEnvTerm);
   const requestControllerRef = useRef(null);
   const requestTokenRef = useRef(0);
   const hasLoadedRef = useRef(false);
+
+  /**
+   * setSshSetEnvTerm 切换统一开关并持久化到 localStorage。
+   * 开启后所有复制的 SSH 命令（含本地转发 ssh、proxyd ssh）与 ssh config 块
+   * 都会携带 SetEnv TERM=xterm-256color。
+   *
+   * 参数说明：
+   * - next: boolean，目标开关状态。
+   *
+   * 返回值说明：无。
+   * 可能的异常/错误情况：localStorage 不可用时静默忽略，仅本次会话生效。
+   */
+  const setSshSetEnvTerm = useCallback((next) => {
+    setSshSetEnvTermState(next);
+    try {
+      localStorage.setItem(sshSetEnvStorageKey, next ? "on" : "off");
+    } catch {
+      // localStorage 不可用时仅本次会话生效
+    }
+  }, []);
 
   /**
    * loadRemote 拉取远程连接服务状态与远程设备列表。
@@ -198,6 +236,88 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * saveAllow 整体替换客户端公钥白名单（空列表恢复放行所有客户端）。
+   *
+   * 参数说明：
+   * - keys: string[]，目标公钥列表；添加与删除都先由页面算出新列表再整体提交。
+   *
+   * 返回值说明：
+   * 返回 Promise<boolean>；成功为 `true`。
+   *
+   * 可能的异常/错误情况：
+   * 后端校验失败或网络失败时 toast 错误并返回 false。
+   */
+  const saveAllow = useCallback(
+    async (keys) => {
+      try {
+        const payload = await requestJSON("/api/remote/allow", {
+          method: "POST",
+          body: JSON.stringify({ keys }),
+        });
+        if (payload) setStatus(payload);
+        showToast(keys.length > 0 ? "客户端白名单已更新" : "白名单已清空，恢复放行所有客户端");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
+   * resetTempKey 重置（或首次生成）临时身份：旧私钥立即失效，手动白名单不受影响。
+   *
+   * 参数说明：无。
+   * 返回值说明：返回 Promise<boolean>；成功为 `true`。
+   * 可能的异常/错误情况：重置前弹确认；后端失败时 toast 错误并返回 false。
+   */
+  const resetTempKey = useCallback(
+    async () => {
+      // 已有临时身份时重置会让旧私钥失效，需要确认；首次生成无需确认。
+      if (status?.temp_key) {
+        const accepted = await requestConfirmation({
+          title: "重置临时身份？",
+          description: "重置后旧私钥立即失效（已录入他处的私钥需重新复制保存），手动添加的白名单条目不受影响。",
+          confirmLabel: "确认重置",
+          destructive: true,
+        });
+        if (!accepted) return false;
+      }
+      try {
+        const payload = await requestJSON("/api/remote/tempkey/reset", { method: "POST" });
+        if (payload) setStatus(payload);
+        showToast(status?.temp_key ? "临时身份已重置" : "临时身份已生成");
+        return true;
+      } catch (resetError) {
+        showToast(`操作失败：${resetError.message}`, "err");
+        return false;
+      }
+    },
+    [requestConfirmation, requestJSON, showToast, status],
+  );
+
+  /**
+   * copyTempKey 按需获取临时身份的完整密钥对并复制私钥。
+   *
+   * 参数说明：无。
+   * 返回值说明：返回 Promise<void>。
+   * 可能的异常/错误情况：未生成或剪贴板失败时 toast 错误。
+   */
+  const copyTempKey = useCallback(
+    async () => {
+      try {
+        const payload = await requestJSON("/api/remote/tempkey");
+        await navigator.clipboard.writeText(payload?.private || "");
+        showToast("临时身份私钥已复制（注意保密，建议存密码管理器）");
+      } catch (copyError) {
+        showToast(`复制失败：${copyError.message}`, "err");
+      }
+    },
+    [requestJSON, showToast],
+  );
+
+  /**
    * addRemote 新增一个远程设备。
    *
    * 参数说明：
@@ -289,6 +409,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
 
   /**
    * copySSHCommand 复制到指定远程设备的 SSH 命令。
+   * 是否携带 SetEnv TERM=xterm-256color 由统一开关 sshSetEnvTerm 决定。
    *
    * 参数说明：
    * - name: string，远程设备名称。
@@ -301,14 +422,15 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
    */
   const copySSHCommand = useCallback(
     async (name) => {
+      const command = `proxyd ssh ${name}${sshSetEnvTerm ? " -o SetEnv=TERM=xterm-256color" : ""}`;
       try {
-        await navigator.clipboard.writeText(`proxyd ssh ${name}`);
-        showToast(`已复制 SSH 命令：proxyd ssh ${name}`);
+        await navigator.clipboard.writeText(command);
+        showToast(`已复制 SSH 命令：${command}`);
       } catch (copyError) {
         showToast(`复制失败：${copyError.message}`, "err");
       }
     },
-    [showToast],
+    [showToast, sshSetEnvTerm],
   );
 
   /**
@@ -487,7 +609,12 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     reload: loadRemote,
     removeForward,
     removeRemote,
+    resetTempKey,
+    copyTempKey,
+    saveAllow,
     saveServe,
+    setSshSetEnvTerm,
+    sshSetEnvTerm,
     toggleEnabled,
     toggleForward,
   };

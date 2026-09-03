@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
 
@@ -22,14 +23,19 @@ func ValidateToken(token string) error {
 	return nil
 }
 
-// Dial 以临时客户端身份拨号远端隧道端口，返回的 conn 关闭时自动回收隧道资源。
+// Dial 拨号远端隧道端口，返回的 conn 关闭时自动回收隧道资源。
+// clientKey 为本机客户端身份密钥（对端 --allow 白名单按它的公钥放行）；
+// 传零值则每次连接生成临时身份，无法被白名单识别。
 // 供一次性命令（pipe/ssh）使用；常驻转发请走 Manager 的 forwardRunner（复用隧道）。
-func Dial(ctx context.Context, token string, port int) (net.Conn, error) {
+func Dial(ctx context.Context, token string, port int, clientKey key.NodePrivate) (net.Conn, error) {
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("端口 %d 超出 1-65535", port)
 	}
 	cl := tailcat.NewClient(tailcat.ConnBlob(token))
 	cl.Logf = logger.Discard
+	if !clientKey.IsZero() {
+		cl.Key = clientKey
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, dialTimeout)
@@ -57,9 +63,9 @@ func (c *clientConn) Close() error {
 }
 
 // Pipe 把 stdin/stdout 与远端隧道端口双向管道化（OpenSSH ProxyCommand 用法）。
-// 对端关闭或 ctx 取消时返回；读取侧出错（非 EOF）时返回该错误。
-func Pipe(ctx context.Context, token string, port int, stdin io.Reader, stdout io.Writer) error {
-	conn, err := Dial(ctx, token, port)
+// clientKey 语义同 Dial。对端关闭或 ctx 取消时返回；读取侧出错（非 EOF）时返回该错误。
+func Pipe(ctx context.Context, token string, port int, clientKey key.NodePrivate, stdin io.Reader, stdout io.Writer) error {
+	conn, err := Dial(ctx, token, port, clientKey)
 	if err != nil {
 		return err
 	}
@@ -80,10 +86,13 @@ func Pipe(ctx context.Context, token string, port int, stdin io.Reader, stdout i
 	return nil
 }
 
-// Ping 测量到远端隧道的握手往返延迟（经 DERP 中继）。
-func Ping(ctx context.Context, token string) (time.Duration, error) {
+// Ping 测量到远端隧道的握手往返延迟（经 DERP 中继）。clientKey 语义同 Dial。
+func Ping(ctx context.Context, token string, clientKey key.NodePrivate) (time.Duration, error) {
 	cl := tailcat.NewClient(tailcat.ConnBlob(token))
 	cl.Logf = logger.Discard
+	if !clientKey.IsZero() {
+		cl.Key = clientKey
+	}
 	defer cl.Close()
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc

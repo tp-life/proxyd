@@ -174,10 +174,13 @@ usage:
 远程连接（tailcat 隧道，与代理功能独立）:
   proxyd remote status|on|off|token      查看状态/开关服务端/打印完整 token
   proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
+  proxyd remote allow list|add <公钥>|del <公钥>   客户端公钥白名单（空=放行所有）
+  proxyd remote tempkey [reset]          查看临时身份密钥对/重置（旧私钥失效）
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
-  proxyd ssh [-p 端口] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
-  proxyd scp [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
+  proxyd remote genkey                   生成应急客户端身份（公钥录入对端白名单，私钥自行保存）
+  proxyd ssh [-p 端口] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
+  proxyd scp [--client-key 私钥] [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
   proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
 
 flags:

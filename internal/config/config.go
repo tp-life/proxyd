@@ -47,6 +47,15 @@ func DefaultPath() string {
 	return "proxyd.yaml"
 }
 
+// DefaultStateDir 是配置未指定 state-dir 时使用的默认状态目录
+//（~/.local/state/proxyd），供无法加载配置的纯客户端命令（remote pipe）兜底。
+func DefaultStateDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "state", "proxyd")
+	}
+	return ".proxyd-state"
+}
+
 // Save 把配置写回 YAML 文件（临时文件 + rename，防止写坏）。
 func (c *Config) Save(path string) error {
 	data, err := yaml.Marshal(c)
@@ -524,9 +533,7 @@ func (c *Config) applyDefaults() {
 		c.MixedPort = c.PortRange[0] - 1
 	}
 	if c.StateDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			c.StateDir = filepath.Join(home, ".local", "state", "proxyd")
-		}
+		c.StateDir = DefaultStateDir()
 	}
 	for i := range c.Groups {
 		if c.Groups[i].Type == "" {

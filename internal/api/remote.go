@@ -20,6 +20,9 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/remote", s.handleSetRemote)
 	mux.HandleFunc("GET /api/remote/token", s.handleGetRemoteToken)
 	mux.HandleFunc("POST /api/remote/serve", s.handleSetRemoteServe)
+	mux.HandleFunc("POST /api/remote/allow", s.handleSetRemoteAllow)
+	mux.HandleFunc("GET /api/remote/tempkey", s.handleGetRemoteTempKey)
+	mux.HandleFunc("POST /api/remote/tempkey/reset", s.handleResetRemoteTempKey)
 	mux.HandleFunc("GET /api/remote/remotes", s.handleListRemotes)
 	mux.HandleFunc("POST /api/remote/remotes", s.handleAddRemote)
 	mux.HandleFunc("DELETE /api/remote/remotes/{name}", s.handleDelRemote)
@@ -84,6 +87,43 @@ func (s *Server) handleSetRemoteServe(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.app.SetRemoteServe(req.Ports); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleSetRemoteAllow 整体替换客户端公钥白名单（空列表恢复放行所有）。
+func (s *Server) handleSetRemoteAllow(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Keys []string `json:"keys"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteAllow(req.Keys); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleGetRemoteTempKey 显式返回临时身份完整密钥对（公钥+私钥）。
+// 私钥是连接凭据，与 token 一样只经此专用端点透出；未生成时返回 404。
+func (s *Server) handleGetRemoteTempKey(w http.ResponseWriter, _ *http.Request) {
+	pub, priv, err := s.app.RemoteTempKeyPair()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]string{"public": pub, "private": priv})
+}
+
+// handleResetRemoteTempKey 重置临时身份：生成新密钥对，公钥写入配置 temp-key。
+// 手动添加的白名单条目不受影响；响应返回新公钥与最新状态。
+func (s *Server) handleResetRemoteTempKey(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.app.ResetRemoteTempKey(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.handleGetRemote(w, r)

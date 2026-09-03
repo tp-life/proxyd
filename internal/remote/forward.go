@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 
 	"proxyd/internal/config"
@@ -16,11 +17,12 @@ import (
 // forwardRunner 是一条运行中的本地转发：监听本地端口，把每条连接
 // 经隧道拨到远端端口后双向拷贝。
 type forwardRunner struct {
-	name   string
-	listen string
-	token  tailcat.ConnBlob
-	port   uint16
-	logf   func(format string, args ...any)
+	name      string
+	listen    string
+	token     tailcat.ConnBlob
+	port      uint16
+	logf      func(format string, args ...any)
+	clientKey key.NodePrivate // 本机客户端身份（对端 --allow 白名单用）；零值=临时身份
 
 	// dial 可注入替换（测试）；为 nil 时内部创建复用的 tailcat 客户端。
 	dial func(ctx context.Context) (net.Conn, error)
@@ -35,15 +37,16 @@ type forwardRunner struct {
 }
 
 // newForwardRunner 构造转发runner；dial 为 nil 表示使用真实隧道拨号。
-func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, logf func(string, ...any), dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
+func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, logf func(string, ...any), clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
 	return &forwardRunner{
-		name:   name,
-		listen: listen,
-		token:  token,
-		port:   port,
-		logf:   logf,
-		dial:   dial,
-		done:   make(chan struct{}),
+		name:      name,
+		listen:    listen,
+		token:     token,
+		port:      port,
+		logf:      logf,
+		clientKey: clientKey,
+		dial:      dial,
+		done:      make(chan struct{}),
 	}
 }
 
@@ -62,6 +65,9 @@ func (r *forwardRunner) start() error {
 	if r.dial == nil {
 		cl := tailcat.NewClient(r.token)
 		cl.Logf = logger.Logf(r.logf)
+		if !r.clientKey.IsZero() {
+			cl.Key = r.clientKey
+		}
 		r.client = cl
 		r.dial = func(ctx context.Context) (net.Conn, error) {
 			ctx, cancel := context.WithTimeout(ctx, dialTimeout)
@@ -173,7 +179,7 @@ func (m *Manager) reconcileForwardsLocked(cfg config.RemoteConfig) {
 			m.logf("[remote] 转发 %s: %v", name, err)
 			continue
 		}
-		r := newForwardRunner(name, listen, tailcat.ConnBlob(token), uint16(f.RemotePort), m.logf, nil)
+		r := newForwardRunner(name, listen, tailcat.ConnBlob(token), uint16(f.RemotePort), m.logf, m.clientKeyLocked(), nil)
 		if err := r.start(); err != nil {
 			r.setLastError(err.Error())
 			m.logf("[remote] 转发 %s 启动失败: %v", name, err)

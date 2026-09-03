@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"proxyd/internal/config"
@@ -100,6 +102,53 @@ func (a *App) SetRemoteServe(ports []int) error {
 	})
 }
 
+// SetRemoteAllow 整体替换客户端公钥白名单并持久化；空列表恢复为放行所有客户端。
+// 每个公钥都经 remote.ValidateClientKey 严格解析（nodekey: 形式）。
+func (a *App) SetRemoteAllow(keys []string) error {
+	if err := config.ValidateRemoteAllow(keys); err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if _, err := remote.ValidateClientKey(k); err != nil {
+			return err
+		}
+	}
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.Allow = append([]string(nil), keys...)
+		return nil
+	})
+}
+
+// RemoteTempKeyPair 返回临时身份的完整密钥对（公钥, 私钥）。
+// 未生成时返回错误，提示用户先重置生成。私钥是连接凭据，只应经专用端点透出。
+func (a *App) RemoteTempKeyPair() (pub string, priv string, err error) {
+	a.mu.RLock()
+	stateDir := a.cfg.StateDir
+	a.mu.RUnlock()
+	priv, pub, err = remote.LoadTempKey(stateDir)
+	return pub, priv, err
+}
+
+// ResetRemoteTempKey 生成全新临时身份：私钥覆盖落盘（state-dir），公钥经事务
+// 写入配置 temp-key（与白名单叠加生效，隧道服务端随之重建）。旧私钥立即失效，
+// 手动添加的白名单条目不受影响。返回新公钥。
+func (a *App) ResetRemoteTempKey() (string, error) {
+	a.mu.RLock()
+	stateDir := a.cfg.StateDir
+	a.mu.RUnlock()
+	pub, err := remote.ResetTempKey(stateDir)
+	if err != nil {
+		return "", err
+	}
+	if err := a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.TempKey = pub
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return pub, nil
+}
+
 // AddRemotePeer 新增保存的远端（名称 → token）。
 func (a *App) AddRemotePeer(peer config.RemotePeer) error {
 	return a.mutateRemote(func(r *config.RemoteConfig) error {
@@ -162,10 +211,37 @@ func (a *App) AddRemoteForward(f config.RemoteForward) (config.RemoteForward, er
 			}
 			f.Listen = listen
 		}
+		if err := checkRemoteForwardPrivileged(f.Listen); err != nil {
+			return err
+		}
 		r.Forwards = append(r.Forwards, f)
 		return nil
 	})
 	return f, err
+}
+
+// checkRemoteForwardPrivileged 拦截需要 root 才能监听的特权端口（<1024，
+// Windows 无此限制），在创建入口直接给出可操作提示，避免运行时 bind 失败。
+func checkRemoteForwardPrivileged(listen string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	norm, err := config.NormalizeRemoteListen(listen)
+	if err != nil {
+		return err
+	}
+	_, portStr, err := net.SplitHostPort(norm)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return err
+	}
+	if port < 1024 {
+		return fmt.Errorf("监听端口 %d 是特权端口（<1024），需要 root 权限；请改用 ≥1024 的端口（如 2222）", port)
+	}
+	return nil
 }
 
 // assignRemoteForwardPort 在候选段 10022-10121 中挑选未被现有转发占用、

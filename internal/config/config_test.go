@@ -621,6 +621,9 @@ func TestRemoteConfigValidate(t *testing.T) {
 	bad := []RemoteConfig{
 		{Serve: []int{0}},      // 端口越界
 		{Serve: []int{22, 22}}, // 端口重复
+		{Allow: []string{"not-a-nodekey"}},              // 公钥缺 nodekey: 前缀
+		{Allow: []string{"nodekey:abc", "nodekey:abc"}}, // 公钥重复
+		{TempKey: "not-a-nodekey"},                      // 临时身份公钥缺 nodekey: 前缀
 		{Remotes: []RemotePeer{{Name: "", Token: "tcA"}}},                                              // 空名称
 		{Remotes: []RemotePeer{{Name: "a", Token: ""}}},                                                // 空 token
 		{Remotes: []RemotePeer{{Name: "a", Token: "tcA"}, {Name: "a", Token: "tcB"}}},                  // 名称重复

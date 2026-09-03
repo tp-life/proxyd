@@ -37,6 +37,8 @@ type RemoteConfig struct {
 	Region     string          `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
 	DERPMapURL string          `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
 	Serve      []int           `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
+	Allow      []string        `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端 node 公钥白名单；空=放行所有持有 token 的客户端
+	TempKey    string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`       // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
 	Remotes    []RemotePeer    `yaml:"remotes,omitempty" json:"remotes,omitempty"`
 	Forwards   []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
 }
@@ -45,6 +47,7 @@ type RemoteConfig struct {
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
+	out.Allow = append([]string(nil), r.Allow...)
 	out.Remotes = append([]RemotePeer(nil), r.Remotes...)
 	out.Forwards = append([]RemoteForward(nil), r.Forwards...)
 	return out
@@ -65,11 +68,34 @@ func ValidateRemoteServe(ports []int) error {
 	return nil
 }
 
+// ValidateRemoteAllow 校验客户端公钥白名单的结构（非空、nodekey: 前缀、去重）；
+// 密钥格式本身的严格解析由 remote 包（tailcat 依赖的唯一入口）兜底。
+func ValidateRemoteAllow(keys []string) error {
+	seen := map[string]bool{}
+	for i, k := range keys {
+		k = strings.TrimSpace(k)
+		if !strings.HasPrefix(k, "nodekey:") {
+			return fmt.Errorf("allow[%d]: 客户端公钥须为 nodekey: 开头，got %q", i, k)
+		}
+		if seen[k] {
+			return fmt.Errorf("allow[%d]: 公钥重复", i)
+		}
+		seen[k] = true
+	}
+	return nil
+}
+
 // checkRemote 校验 remote 配置段整体：端口范围、名称唯一性与转发字段。
 func (c *Config) checkRemote() error {
 	r := c.Remote
 	if err := ValidateRemoteServe(r.Serve); err != nil {
 		return fmt.Errorf("remote: %w", err)
+	}
+	if err := ValidateRemoteAllow(r.Allow); err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+	if t := strings.TrimSpace(r.TempKey); t != "" && !strings.HasPrefix(t, "nodekey:") {
+		return fmt.Errorf("remote: temp-key 须为 nodekey: 形式的客户端公钥，got %q", t)
 	}
 	seenPeer := map[string]bool{}
 	for i, p := range r.Remotes {

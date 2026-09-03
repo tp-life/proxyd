@@ -13,19 +13,25 @@ import (
 	"sync"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/types/key"
 
 	"proxyd/internal/config"
 )
 
 // Status 是远程连接模块的运行时快照，供 API/Web 展示。
 type Status struct {
-	Enabled  bool            `json:"enabled"`          // 配置中的服务端开关
-	Running  bool            `json:"running"`          // 隧道服务端是否在运行
-	Error    string          `json:"error,omitempty"`  // 最近一次启动失败原因
-	Token    string          `json:"token,omitempty"`  // 本机连接 token（tc...，运行中才有）
-	Region   string          `json:"region,omitempty"` // 配置的 region 原值
-	Serve    []int           `json:"serve"`            // 经隧道暴露的本机端口
-	Forwards []ForwardStatus `json:"forwards"`         // 全部转发条目（含禁用项）
+	Enabled   bool            `json:"enabled"`             // 配置中的服务端开关
+	Running   bool            `json:"running"`             // 隧道服务端是否在运行
+	Error     string          `json:"error,omitempty"`     // 最近一次启动失败原因
+	Token     string          `json:"token,omitempty"`     // 本机连接 token（tc...，运行中才有）
+	ClientKey string          `json:"client_key,omitempty"` // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
+	Region    string          `json:"region,omitempty"`    // 配置的 region 原值
+	Serve     []int           `json:"serve"`               // 经隧道暴露的本机端口
+	Allow     []string        `json:"allow"`               // 客户端公钥白名单（空=放行所有）
+	TempKey   string          `json:"temp_key,omitempty"`  // 临时身份公钥（应急 nodekey）
+	// ClientActivity 是各已知客户端公钥（白名单+临时身份）当前的入站活动连接数。
+	ClientActivity map[string]int64 `json:"client_activity,omitempty"`
+	Forwards  []ForwardStatus `json:"forwards"`            // 全部转发条目（含禁用项）
 }
 
 // ForwardStatus 是单条本地转发的运行时状态。
@@ -46,12 +52,16 @@ type Manager struct {
 	stateDir string
 	logf     func(format string, args ...any)
 
-	mu       sync.Mutex
-	cfg      config.RemoteConfig
-	srv      *tailcat.Server
-	token    string
-	serveErr string
-	forwards map[string]*forwardRunner
+	mu           sync.Mutex
+	cfg          config.RemoteConfig
+	srv          *tailcat.Server
+	token        string
+	serveErr     string
+	forwards     map[string]*forwardRunner
+	activeClients map[string]int64  // 已知客户端公钥 → 当前入站活动连接数
+	clientLoaded bool             // 是否已尝试加载客户端身份密钥
+	clientPriv   key.NodePrivate  // 持久客户端身份（对端 --allow 白名单用）
+	clientErr    error            // 客户端密钥加载失败原因（惰性加载只尝试一次）
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥
@@ -61,10 +71,24 @@ func NewManager(stateDir string, logf func(format string, args ...any)) *Manager
 		logf = func(string, ...any) {}
 	}
 	return &Manager{
-		stateDir: stateDir,
-		logf:     logf,
-		forwards: map[string]*forwardRunner{},
+		stateDir:      stateDir,
+		logf:          logf,
+		forwards:      map[string]*forwardRunner{},
+		activeClients: map[string]int64{},
 	}
+}
+
+// clientKeyLocked 惰性加载持久客户端身份密钥（首次调用时读盘/生成，之后缓存）。
+// 失败时缓存错误并返回零值密钥，调用方回退为临时身份。调用方需持有 m.mu。
+func (m *Manager) clientKeyLocked() key.NodePrivate {
+	if !m.clientLoaded {
+		m.clientLoaded = true
+		m.clientPriv, m.clientErr = LoadOrCreateClientKey(m.stateDir)
+		if m.clientErr != nil {
+			m.logf("[remote] 客户端身份密钥加载失败，回退为临时身份: %v", m.clientErr)
+		}
+	}
+	return m.clientPriv
 }
 
 // Apply 按新配置调和运行状态：启停隧道服务端（serve/region 变化时重建），
@@ -96,10 +120,10 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 // serverConfigEqual 判断运行中的服务端是否与新配置等价（等价则无需重建隧道）。
 func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 	old := m.cfg
-	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL {
+	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey {
 		return false
 	}
-	if len(old.Serve) != len(cfg.Serve) {
+	if len(old.Serve) != len(cfg.Serve) || len(old.Allow) != len(cfg.Allow) {
 		return false
 	}
 	ports := map[int]bool{}
@@ -108,6 +132,15 @@ func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 	}
 	for _, p := range cfg.Serve {
 		if !ports[p] {
+			return false
+		}
+	}
+	allowed := map[string]bool{}
+	for _, k := range old.Allow {
+		allowed[k] = true
+	}
+	for _, k := range cfg.Allow {
+		if !allowed[k] {
 			return false
 		}
 	}
@@ -126,9 +159,25 @@ func (m *Manager) Status() Status {
 		Token:   m.token,
 		Region:  m.cfg.Region,
 		Serve:   append([]int(nil), m.cfg.Serve...),
+		Allow:   append([]string(nil), m.cfg.Allow...),
+		TempKey: m.cfg.TempKey,
+	}
+	if len(m.activeClients) > 0 {
+		st.ClientActivity = make(map[string]int64, len(m.activeClients))
+		for k, n := range m.activeClients {
+			if n > 0 {
+				st.ClientActivity[k] = n
+			}
+		}
+	}
+	if priv := m.clientKeyLocked(); !priv.IsZero() {
+		st.ClientKey = priv.Public().String()
 	}
 	if st.Serve == nil {
 		st.Serve = []int{}
+	}
+	if st.Allow == nil {
+		st.Allow = []string{}
 	}
 	st.Forwards = make([]ForwardStatus, 0, len(m.cfg.Forwards))
 	for _, f := range m.cfg.Forwards {

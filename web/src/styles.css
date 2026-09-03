@@ -1549,6 +1549,18 @@
     @apply grid min-h-[280px] content-center justify-items-center rounded-xl border border-dashed bg-card px-6 py-10 text-center;
   }
 
+  .empty-state.compact {
+    @apply min-h-0 gap-0.5 py-5;
+  }
+
+  .empty-state.compact > h2 {
+    @apply mt-2 text-sm;
+  }
+
+  .empty-state.compact > p {
+    @apply text-xs;
+  }
+
   .empty-state > svg {
     @apply text-muted-foreground;
   }
@@ -2261,6 +2273,18 @@
 
   .rule-source-form {
     grid-template-columns: minmax(180px, 0.7fr) minmax(280px, 1.5fr) auto;
+  }
+
+  .remote-form {
+    grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
+  }
+
+  .forward-form {
+    grid-template-columns: repeat(3, minmax(170px, 1fr));
+  }
+
+  .forward-form .form-submit {
+    @apply self-end;
   }
 
   .setting-row {

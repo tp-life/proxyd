@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/types/key"
 
 	"proxyd/internal/config"
 )
@@ -85,7 +86,7 @@ func TestServerKeyPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "remote", "server.private.json")
 
-	k1, err := loadOrCreateServerKey(path)
+	k1, err := loadOrCreateNodeKey(path)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -97,12 +98,50 @@ func TestServerKeyPersistence(t *testing.T) {
 		t.Fatalf("key file perm = %o, want 600", perm)
 	}
 
-	k2, err := loadOrCreateServerKey(path)
+	k2, err := loadOrCreateNodeKey(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	if k1.Public() != k2.Public() {
 		t.Fatal("reloaded key differs from created key (token would change across restarts)")
+	}
+}
+
+func TestClientKeyPersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	k1, err := LoadOrCreateClientKey(dir)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, clientKeyRelPath))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("key file perm = %o, want 600", perm)
+	}
+
+	k2, err := LoadOrCreateClientKey(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if k1.Public() != k2.Public() {
+		t.Fatal("reloaded client key differs from created key (--allow identity would change across restarts)")
+	}
+}
+
+func TestManagerStatusClientKey(t *testing.T) {
+	m := NewManager(t.TempDir(), nil)
+	defer m.Close()
+
+	st := m.Status()
+	if st.ClientKey == "" {
+		t.Fatal("Status should expose the persistent client public key")
+	}
+	// 两次 Status 必须返回同一公钥（白名单身份跨调用稳定）。
+	if again := m.Status(); again.ClientKey != st.ClientKey {
+		t.Fatal("client key changed between Status calls")
 	}
 }
 
@@ -140,7 +179,7 @@ func dialDirect(addr string) func(ctx context.Context) (net.Conn, error) {
 func TestForwardRunnerEcho(t *testing.T) {
 	echoAddr := startEchoServer(t)
 
-	r := newForwardRunner("t", "127.0.0.1:0", tailcat.ConnBlob("tcunused"), 22, nil, dialDirect(echoAddr))
+	r := newForwardRunner("t", "127.0.0.1:0", tailcat.ConnBlob("tcunused"), 22, nil, key.NodePrivate{}, dialDirect(echoAddr))
 	if err := r.start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -273,19 +312,130 @@ func TestManagerForwardBadListen(t *testing.T) {
 
 func TestServerConfigEqual(t *testing.T) {
 	m := NewManager(t.TempDir(), nil)
-	m.cfg = config.RemoteConfig{Region: "302", Serve: []int{22, 8022}}
+	m.cfg = config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}
 
-	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{8022, 22}}) {
-		t.Fatal("same ports in different order should be equal")
+	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{8022, 22}, Allow: []string{"nodekey:a"}}) {
+		t.Fatal("same ports/allow in different order should be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}, Allow: []string{"nodekey:a"}}) {
 		t.Fatal("port removed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}) {
 		t.Fatal("region changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}, Allow: []string{"nodekey:a"}}) {
 		t.Fatal("derpmap changed should not be equal")
+	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}}) {
+		t.Fatal("allow removed should not be equal")
+	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []string{"nodekey:b"}}) {
+		t.Fatal("allow key changed should not be equal")
+	}
+}
+
+func TestValidateClientKey(t *testing.T) {
+	priv := tailcat.NewPrivateKey()
+	text := priv.Private.Public().String()
+
+	pub, err := ValidateClientKey(text)
+	if err != nil {
+		t.Fatalf("valid key rejected: %v", err)
+	}
+	if pub != priv.Private.Public() {
+		t.Fatal("parsed public key differs from source key")
+	}
+	if _, err = ValidateClientKey("nodekey:bad"); err == nil {
+		t.Fatal("garbage key should be rejected")
+	}
+	if _, err = ValidateClientKey(""); err == nil {
+		t.Fatal("empty key should be rejected")
+	}
+}
+
+func TestParseAndGenerateClientKey(t *testing.T) {
+	privText, pubText := GenerateClientKey()
+
+	priv, err := ParseClientKey(privText)
+	if err != nil {
+		t.Fatalf("generated private key rejected: %v", err)
+	}
+	pub, err := ValidateClientKey(pubText)
+	if err != nil {
+		t.Fatalf("generated public key rejected: %v", err)
+	}
+	if priv.Public() != pub {
+		t.Fatal("generated keypair mismatch: private does not correspond to public")
+	}
+	if _, err = ParseClientKey("nodekey:bad"); err == nil {
+		t.Fatal("garbage private key should be rejected")
+	}
+}
+
+func TestTempKeyLifecycle(t *testing.T) {
+	dir := t.TempDir()
+
+	// 未生成时读取报错（不自动创建）。
+	if _, _, err := LoadTempKey(dir); err == nil {
+		t.Fatal("missing temp key should error")
+	}
+
+	// 重置生成：返回公钥，私钥落盘 0600，读回密钥对一致。
+	pub, err := ResetTempKey(dir)
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(dir, tempKeyRelPath))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("temp key file perm = %o, want 600", perm)
+	}
+	privText, pubText, err := LoadTempKey(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if pubText != pub {
+		t.Fatal("loaded public key differs from reset result")
+	}
+	priv, err := ParseClientKey(privText)
+	if err != nil || priv.Public().String() != pub {
+		t.Fatal("loaded private key does not match public key")
+	}
+
+	// 再次重置：公钥必须变化（旧私钥失效）。
+	pub2, err := ResetTempKey(dir)
+	if err != nil {
+		t.Fatalf("second reset: %v", err)
+	}
+	if pub2 == pub {
+		t.Fatal("reset should generate a fresh identity")
+	}
+}
+
+func TestKnownClientAddrs(t *testing.T) {
+	privText, pubText := GenerateClientKey()
+	priv, _ := ParseClientKey(privText)
+
+	known := knownClientAddrs([]string{pubText}, "")
+	want := tcAddrForKey(priv.Public())
+	var got string
+	for addr, text := range known {
+		if addr == want {
+			got = text
+		}
+	}
+	if got != pubText {
+		t.Fatalf("allow key not mapped to its tunnel addr (got %q, want %q)", got, pubText)
+	}
+	if _, ok := known[want]; !ok {
+		t.Fatal("derived addr missing from map")
+	}
+	// 非法公钥静默跳过，不影响其他条目。
+	bad := knownClientAddrs([]string{"nodekey:bad", pubText}, "")
+	if len(bad) != 1 {
+		t.Fatalf("bad key should be skipped, got %d entries", len(bad))
 	}
 }
 
