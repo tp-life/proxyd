@@ -23,10 +23,10 @@ import (
 	"proxyd/internal/app"
 	"proxyd/internal/config"
 	"proxyd/internal/logbuf"
-	"proxyd/internal/node"
-	"proxyd/internal/pool"
-	"proxyd/internal/subscribe"
-	"proxyd/internal/sysproxy"
+	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
+	"proxyd/internal/proxy/subscribe"
+	"proxyd/internal/proxy/sysproxy"
 	"proxyd/internal/updatecheck"
 )
 
@@ -98,6 +98,12 @@ func main() {
 			err = cmdConfig(os.Args[2:])
 		case "conn":
 			err = cmdConn(os.Args[2:])
+		case "remote":
+			err = cmdRemote(os.Args[2:])
+		case "ssh":
+			err = cmdSSH(os.Args[2:])
+		case "scp":
+			err = cmdSCP(os.Args[2:])
 		case "traffic":
 			err = cmdTraffic(os.Args[2:])
 		case "version", "-v", "--version":
@@ -164,6 +170,15 @@ usage:
   proxyd conn list|close <id|all>       查看/关闭活动连接
   proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
+
+远程连接（tailcat 隧道，与代理功能独立）:
+  proxyd remote status|on|off|token      查看状态/开关服务端/打印完整 token
+  proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
+  proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
+  proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
+  proxyd ssh [-p 端口] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
+  proxyd scp [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
+  proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
 
 flags:
   -c <文件>      配置文件路径（默认 ~/.config/proxyd/config.yaml；命令行给的订阅地址会自动保存进去）

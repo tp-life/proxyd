@@ -28,6 +28,7 @@
 - 配置备份与恢复：Web 设置页默认导出打码 YAML，也可显式导出含凭据的完整备份；导入通过完整校验并原子落盘，重启后生效
 - 新版本提示：启动后异步检查官方 GitHub Releases，概览页仅在发现更新时提示；可用 `check-updates: false` 或设置页开关关闭
 - 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
+- 远程连接（周边功能，与代理独立）：内嵌 [tailcat](https://github.com/tailscale/tailcat) 隧道（WireGuard 端到端加密 + DERP 中继，无需 Tailscale 账号/客户端），把本机端口（如 SSH 22）暴露给持有 token 的对端；`proxyd ssh <远端>` 一键经隧道连接，`proxyd scp` 直接经隧道传文件，支持本地常驻转发（listen 可留空自动分配端口），详见 [手册](docs/manual.md#十远程连接tailcat-隧道)
 - REST API 与 Web 控制台：
   - `http://127.0.0.1:19091/` 内嵌 React 19 + Tailwind 4 Web 控制台（通过官方 Registry 集成 beUI Button、Switch、Tabs 与 Table 源码，不依赖 Radix UI；概览含实时速率条，节点页显示订阅流量/到期信息，活动连接页展示域名、入口、进程与出口链路）
   - `http://127.0.0.1:19090` mihomo external-controller（兼容 metacubexd / yacd 面板）
@@ -94,6 +95,13 @@ proxyd traffic                                            # 实时上/下行速�
 proxyd dns-preset [off|fake-ip|redir-host]   proxyd update-check [on|off]
 proxyd config export [--full] -o 备份.yaml | proxyd config import 备份.yaml
 proxyd refresh                   proxyd test
+
+# 远程连接（tailcat 隧道，与代理独立）
+proxyd remote on               proxyd remote serve 22      proxyd remote token
+proxyd remote remotes add nas tc...                        # 保存远端
+proxyd remote forwards add nas-ssh auto nas 22             # 本地常驻转发（listen 填 auto 自动分配端口）
+proxyd ssh root@nas            # 经隧道 SSH（纯客户端命令，无需守护进程）
+proxyd scp ./file nas:/tmp/    # 经隧道 scp 传文件（对端需 serve 22）
 ```
 
 启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：侧边栏以 Clash Verge 风格拆分为 运行概况 / 代理节点 / 订阅管理 / 代理入口 / 策略分组 / 访问规则 / 运行日志 / 活动连接 / 系统设置。控制台可查看实时流量趋势、搜索与筛选节点、启停和编辑订阅、开关逐节点端口映射、编辑分组与自定义规则、暂停连接或日志刷新，以及一键切换 规则/全局/直连 模式。系统设置采用页内分区导航，可管理主端口、自动选优、TUN、系统代理、开机自启与配置备份；配置导入会先展示差异预览，确认摘要未变化后才原子写入。常规状态每 10 秒刷新，活动连接页停留期间每 2 秒更新；并提供 `⌘K` / `Ctrl+K` 命令面板执行跳页、刷新、测速与模式切换。
@@ -174,4 +182,4 @@ make web          # 构建 React 控制台到 internal/api/dist，供 Go embed �
 make build        # 只构建 Go 二进制，使用已生成的前端 dist，不强制依赖 Node
 ```
 
-项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端）、`internal/config`（配置）、`internal/subscribe`（订阅拉取与解析、手动节点解析）、`internal/ruleurl`（规则 URL 拉取与解析）、`internal/node`（节点模型与 nodes.json 快照）、`internal/pool`（健康检测与端口分配）、`internal/core`（mihomo 配置生成与内嵌运行）、`internal/app`（调度编排）、`internal/api`（自有 REST API 与 Web 控制台 embed 产物）、`web`（React 控制台源码）、`internal/sysproxy`（系统代理开关）、`internal/tunperm`（TUN 跨平台权限检测）、`internal/autostart`（开机自启）。
+项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端；`cli.go` 提供共享 apiClient，功能按域拆分为 `proxy_*.go`、`system.go`、`remote.go`）、`internal/config`（配置；`config.go` + `proxy.go`/`remote.go`）、`internal/proxy`（代理域包：`subscribe` 订阅拉取与解析、`ruleurl` 规则 URL 拉取与解析、`node` 节点模型与 nodes.json 快照、`pool` 健康检测与端口分配、`core` mihomo 配置生成与内嵌运行、`sysproxy` 系统代理开关、`tunperm` TUN 跨平台权限检测）、`internal/remote`（tailcat 隧道远程连接，独立周边模块）、`internal/app`（调度编排；`app.go` 内核：生命周期/持久化/版本检查 + `proxy_*.go` 域逻辑）、`internal/api`（自有 REST API 与 Web 控制台 embed 产物；`api.go` Server 外壳 + 各域 `proxy_*.go`/`system.go`/`remote.go` 路由文件）、`web`（React 控制台源码；`main.jsx` App 外壳 + `pages/`/`hooks/`/`lib/`/`components/`）、`internal/autostart`（开机自启）。

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"proxyd/internal/config"
-	"proxyd/internal/node"
-	"proxyd/internal/subscribe"
+	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/subscribe"
 )
 
 // TestUpdateSubscriptionRenameOnlySkipsFetch 验证启用中的订阅在 URL/类型未变化时改名

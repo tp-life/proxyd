@@ -26,9 +26,9 @@ import (
 	"proxyd/internal/api"
 	"proxyd/internal/app"
 	"proxyd/internal/config"
-	"proxyd/internal/node"
-	"proxyd/internal/pool"
-	"proxyd/internal/sysproxy"
+	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
+	"proxyd/internal/proxy/sysproxy"
 )
 
 // fakeSocks5 是一个最小 SOCKS5 服务器：无论客户端请求连接哪里，

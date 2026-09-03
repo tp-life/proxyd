@@ -42,28 +42,28 @@
 
 ## 第二批：新 UI 上落地高感知功能
 
-- [x] **B1 订阅流量/到期信息**：`internal/subscribe/fetch.go` 解析 `subscription-userinfo` 响应头（upload/download/total/expire）并随缓存持久化 → overview API 带 userinfo → 新 UI 节点页订阅标题行显示"已用 87G/500G · 到期日期"（<7 天标黄）；CLI `subs list` 同步显示
+- [x] **B1 订阅流量/到期信息**：`internal/proxy/subscribe/fetch.go` 解析 `subscription-userinfo` 响应头（upload/download/total/expire）并随缓存持久化 → overview API 带 userinfo → 新 UI 节点页订阅标题行显示"已用 87G/500G · 到期日期"（<7 天标黄）；CLI `subs list` 同步显示
 - [x] **B2 日志面板**：内存环形缓冲（~1000 条）挂到日志输出（注意 daemon 模式落文件需同时进缓冲）→ `GET /api/logs?tail=N&level=` → 新 UI「日志」页 + CLI `proxyd logs`
 - [x] **B3 实时速率条**：概览页顶部，数据源 mihomo `/traffic`（自有 API 以 HTTP 流代理，后端附加 `secret` 鉴权）
-- [x] **A2 分组类型 + 按订阅生成组**：`internal/config/config.go` Group 加 `type: url-test|fallback|load-balance` 与 `subscription: <订阅名>`（成员=该订阅当前可用节点，刷新自动跟随）→ `internal/core/gen.go` 生成对应 proxy-groups → 新 UI 分组表单（Multi Select + 类型下拉 + 按订阅选项）+ CLI `groups add` 参数
+- [x] **A2 分组类型 + 按订阅生成组**：`internal/config/config.go` Group 加 `type: url-test|fallback|load-balance` 与 `subscription: <订阅名>`（成员=该订阅当前可用节点，刷新自动跟随）→ `internal/proxy/core/gen.go` 生成对应 proxy-groups → 新 UI 分组表单（Multi Select + 类型下拉 + 按订阅选项）+ CLI `groups add` 参数
   - **待决策**：存量配置无 `type` 的默认值——倾向 url-test（行为不变），新 UI 创建时默认推荐 fallback，手册注明
 - **验证**：B1 mock 带 userinfo 头响应单测；A2 补 gen_test 用例；B2/B3 API 单测；完整命令见本批完成记录
 
 ## 第三批：TUN 模式
 
 - [x] `internal/config/config.go`：`tun:` 段透传 + mihomo `enable` 开关（默认 system/auto-route/auto-detect-interface/dns-hijack；API 请求字段使用 `enabled`）
-- [x] `internal/core/gen.go` 输出 tun 段；API + 新 UI 设置页开关 + CLI `proxyd tun on|off|status`（对齐 sysproxy 形态，并二次确认 listener 实际状态）
+- [x] `internal/proxy/core/gen.go` 输出 tun 段；API + 新 UI 设置页开关 + CLI `proxyd tun on|off|status`（对齐 sysproxy 形态，并二次确认 listener 实际状态）
 - [x] **权限处理**（主要工作量）：macOS sudo / Linux setcap / Windows 管理员，权限不足给明确指引
 - [x] 手册写清 TUN 与 system-proxy 的关系、与 DNS 预设的联动
 - **验证**：开启后 curl 走代理、关闭恢复；UDP 应用验证
 
 ## 第四批：打磨项
 
-- [x] **A3 DNS 预设**：`dns-preset: off|fake-ip|redir-host` 三档，手写 `dns:` 优先；TUN 模式默认建议 fake-ip。落点 `internal/core/gen.go`
+- [x] **A3 DNS 预设**：`dns-preset: off|fake-ip|redir-host` 三档，手写 `dns:` 优先；TUN 模式默认建议 fake-ip。落点 `internal/proxy/core/gen.go`
 - [x] **B4 配置导出/导入**：设置页导出 config.yaml（可选 token 打码）+ 导入恢复。落点 `internal/api/api.go`
 - [x] **B5 首次运行引导**：无配置无订阅时打印三行引导。落点 `cmd/proxyd/main.go`
 - [x] **B6 版本检查**：启动异步查 GitHub Releases，概览页提示，可配置关闭
-- [x] **A5 include 过滤**：与 exclude 对称的正则。落点 `internal/subscribe/merge.go`
+- [x] **A5 include 过滤**：与 exclude 对称的正则。落点 `internal/proxy/subscribe/merge.go`
 - [x] **A4 链式代理透传**（可选）：透传订阅节点 `dialer-proxy`，处理跨订阅同名重写、节点身份、proxy-only 依赖与两阶段完整链路测速；支持指向节点/策略组。mihomo 已移除 `relay` 组，按官方迁移方向不再生成该类型；不做 UI
 - [x] **B3b 连接面板**（可选）：基于 mihomo `/connections`，独立高频 API 代理（后端附加 secret）+ 活动连接页，查看域名/入口端口/进程/出口链，支持搜索、协议筛选和关闭连接
 

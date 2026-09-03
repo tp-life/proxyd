@@ -152,6 +152,13 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd config path` | 打印当前使用的配置文件绝对路径 |
 | `proxyd config export [--full] [-o 文件]` | 导出配置；默认打码（隐藏凭据），`--full` 完整备份；默认打印到标准输出 |
 | `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
+| `proxyd remote status\|on\|off\|token` | 远程连接（tailcat 隧道）：查看状态、热开关服务端、打印完整本机 token（见「十、远程连接」） |
+| `proxyd remote serve [端口,...]` | 查看/设置经隧道暴露的本机端口 |
+| `proxyd remote remotes list\|add <名> <token>\|del <名>` | 管理保存的远端（token 命名别名） |
+| `proxyd remote forwards list\|add <名> <监听> <远端> <端口>\|del <名>\|on\|off <名>` | 管理本地常驻转发；监听地址可填 `auto`（或留空），自动从 10022 起分配空闲端口 |
+| `proxyd ssh <远端>` / `proxyd scp <源> <目标>` | 经隧道直连 SSH / scp 传文件（纯客户端命令，远端可填保存的名称或 token，见「十、远程连接」） |
+
+`proxyd ssh`、`proxyd scp` 与 `proxyd remote pipe` 是例外：它们是**纯客户端命令**，不经过本地 API、不需要守护进程运行（直接读配置文件解析远端名）。
 
 `-c` 等 flag 必须放在子命令参数之前（Go flag 解析遇位置参数即停止）；写在后面的 `-c` 会被检测到并直接报错，避免静默操作到默认配置对应的实例。
 
@@ -396,6 +403,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `main-auto` / `main-node` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
 | 系统代理开关、节点正则过滤、周期等 | `system-proxy` / `include` / `exclude` / `refresh-interval` / ... |
+| 远程连接（隧道开关、暴露端口、远端与转发） | `remote`（token 属凭据，导出默认打码） |
 
 **状态目录**（`state-dir`，默认 `~/.local/state/proxyd`）——运行时状态，删了只会丢缓存/快照，不影响配置：
 
@@ -407,6 +415,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
 | `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
+| `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token |
 | `cache.db`、`geo*` 等 | mihomo 自身的缓存与 geo 数据文件 |
 
 ## 九、配置文件参考
@@ -456,9 +465,75 @@ external-controller: 127.0.0.1:19090   # mihomo API
 api-listen: 127.0.0.1:19091            # Web 控制台
 # secret: ...             # mihomo API 鉴权
 state-dir: ~/.local/state/proxyd       # 状态目录（快照/缓存/pid/日志/geo），见「八、存储布局」
+
+remote:                     # 远程连接（tailcat 隧道），与代理功能独立，详见「十、远程连接」
+  enabled: false            # 隧道服务端开关
+  serve: [22]               # 经隧道暴露的本机端口
+  remotes: []               # 保存的远端：name + token
+  forwards: []              # 本地常驻转发：listen → remote:remote-port；listen 可留空或填 "auto" 自动分配端口
 ```
 
-## 十、常见问题
+## 十、远程连接（tailcat 隧道）
+
+「远程连接」是与代理功能**完全独立**的周边模块：内嵌 [tailcat](https://github.com/tailscale/tailcat)（Tailscale 数据面，无控制面），在两台机器之间建立 WireGuard 端到端加密隧道，NAT 打洞失败时走 DERP 中继。**不需要 Tailscale 账号、不需要安装 Tailscale 客户端、不需要 root/TUN 权限**，也不经过 mihomo——代理节点、规则、端口映射与它互不影响。
+
+典型场景：把家里 NAS 的 SSH 安全暴露给外网的自己，无需公网 IP / 端口映射 / frp。
+
+### 概念
+
+- **token（连接凭据）**：服务端启动后生成 `tc...` 字符串，由服务端 WireGuard 公钥 + DERP 区域信息派生。谁拿到 token 谁就能连到服务端的暴露端口——**像密码一样保管**（Web/CLI 默认只显示摘要，配置导出默认打码）。
+- **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。
+- **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。可在 `remote.region` 填自建 derper 主机名脱离公共中继。
+
+### 服务端：暴露本机端口
+
+```sh
+proxyd remote on              # 开启隧道服务端（热开关，自动持久化）
+proxyd remote serve 22        # 设置暴露端口（可逗号分隔多个）
+proxyd remote token           # 打印完整 token，发给要连接的人
+```
+
+隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
+
+### 客户端：连接远端
+
+```sh
+# 先保存远端 token（只需一次；也可直接用 token 不保存）
+proxyd remote remotes add nas tc...
+
+# 方式一：直接 SSH（调用系统 ssh，隧道作为 ProxyCommand；无需 proxyd 守护进程）
+proxyd ssh nas                # 等价 ssh 到 nas 的 22 端口
+proxyd ssh root@nas -p 2222   # 指定用户/远端端口；其余参数原样透传 ssh
+proxyd ssh nas ls -la         # 带远端命令
+
+# 文件传输直接用 proxyd scp（包装系统 scp，注入 -o ProxyCommand='proxyd remote pipe <token> 22'；
+# 远端操作数以对端名称/token 作主机名；因此对端需 serve 22 端口。无独立的文件传输功能）
+proxyd scp ./file nas:/tmp/           # 上传
+proxyd scp tc-xxxx:/var/log/a.log ./  # 也可直接用 token 不保存远端
+proxyd scp -r ./dir nas:/tmp/         # 其余 scp 选项原样透传
+
+# 方式二：本地常驻转发（守护进程内运行，适合长期挂载）
+proxyd remote forwards add nas-ssh 127.0.0.1:2222 nas 22
+proxyd remote forwards add nas-ssh auto nas 22   # listen 留空或填 auto：自动从 10022 起分配空闲本地端口
+                                                  #（跳过已被现有转发占用的端口；API 响应与配置落盘均为实际地址）
+ssh -p 2222 localhost         # 之后任何 TCP 客户端都能用这条转发
+```
+
+SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
+
+Web 控制台「远程连接」页每个对端都有「连接」对话框，给出两种方式的现成命令：**方式一**一键创建/启用指向对端 22 端口的本地 SSH 转发，并提供可复制的 `ssh 用户@127.0.0.1 -p 端口` 与 `scp -P 端口 ...` 命令；**方式二** proxyd CLI 直连，给出 `proxyd ssh <token>`、`proxyd scp ...` 命令以及可写进 ssh config 的 ProxyCommand 片段。
+
+### 与 tailcat CLI 的互通
+
+proxyd 的 token 与官方 `tailcat` CLI 完全互通：对方可以用 `tailcat ssh <token>` 连你的 `proxyd remote serve 22`，你也可以 `proxyd ssh <tailcat token>` 连官方服务端。
+
+### 限制
+
+- tailcat 上游不承诺 API 与 wire format 稳定性，proxyd 锁定依赖版本升级；跨版本互联失败时先对齐版本。
+- 公共 DERP 中继限速，大流量场景（如长时间文件传输）建议自建 derper。
+- 文件传输通过 `proxyd scp`（包装系统 scp 走隧道）完成，不提供独立的文件传输子协议；不含 tailcat cp/recv、SOCKS、exit-node 与客户端白名单。
+
+## 十一、常见问题
 
 - **启动后没有映射端口**：看日志——订阅拉取失败会用缓存与 nodes.json 快照；全部节点测速失败检查 `health-url` 是否可达。
 - **geo 下载慢/失败**：已内置镜像，仍失败可在配置 `geox-url` 换源；失败不影响代理本体（自动降级）。

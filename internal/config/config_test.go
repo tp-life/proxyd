@@ -590,3 +590,96 @@ func TestCheckGroup(t *testing.T) {
 		}
 	}
 }
+
+// minimalValidConfig 返回通过 Validate 的最小配置，供 remote 段校验测试复用。
+func minimalValidConfig() *Config {
+	return &Config{
+		Subscriptions: []Subscription{{Name: "a", URL: "https://example.com/sub"}},
+		Listen:        "127.0.0.1",
+		PortRange:     [2]int{42000, 42010},
+		MixedPort:     41999,
+		Mode:          "rule",
+		Rules:         []string{"MATCH,PROXY"},
+		APIListen:     "127.0.0.1:19091",
+	}
+}
+
+func TestRemoteConfigValidate(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Remote = RemoteConfig{
+		Enabled: true,
+		Serve:   []int{22},
+		Remotes: []RemotePeer{{Name: "nas", Token: "tcAAA"}},
+		Forwards: []RemoteForward{
+			{Name: "nas-ssh", Listen: "127.0.0.1:2222", Remote: "nas", RemotePort: 22},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid remote section rejected: %v", err)
+	}
+
+	bad := []RemoteConfig{
+		{Serve: []int{0}},      // 端口越界
+		{Serve: []int{22, 22}}, // 端口重复
+		{Remotes: []RemotePeer{{Name: "", Token: "tcA"}}},                                              // 空名称
+		{Remotes: []RemotePeer{{Name: "a", Token: ""}}},                                                // 空 token
+		{Remotes: []RemotePeer{{Name: "a", Token: "tcA"}, {Name: "a", Token: "tcB"}}},                  // 名称重复
+		{Forwards: []RemoteForward{{Name: "", Listen: "127.0.0.1:2222", Remote: "x", RemotePort: 22}}}, // 转发空名称
+		{Forwards: []RemoteForward{{Name: "f", Listen: "127.0.0.1:2222", Remote: "", RemotePort: 22}}}, // 空 remote
+		{Forwards: []RemoteForward{{Name: "f", Listen: "127.0.0.1:2222", Remote: "x", RemotePort: 0}}}, // 远端端口越界
+		{Forwards: []RemoteForward{{Name: "f", Listen: "bad addr", Remote: "x", RemotePort: 22}}},      // 监听地址非法
+		{Forwards: []RemoteForward{ // 转发重名
+			{Name: "f", Listen: "127.0.0.1:2222", Remote: "x", RemotePort: 22},
+			{Name: "f", Listen: "127.0.0.1:2223", Remote: "x", RemotePort: 22},
+		}},
+		{Forwards: []RemoteForward{ // 监听重复（"2223" 归一化为 127.0.0.1:2223）
+			{Name: "f1", Listen: "2223", Remote: "x", RemotePort: 22},
+			{Name: "f2", Listen: "127.0.0.1:2223", Remote: "x", RemotePort: 22},
+		}},
+	}
+	for i, r := range bad {
+		c := minimalValidConfig()
+		c.Remote = r
+		if err := c.Validate(); err == nil {
+			t.Errorf("bad[%d]: expected error, got nil (%+v)", i, r)
+		}
+	}
+}
+
+func TestNormalizeRemoteListen(t *testing.T) {
+	cases := map[string]string{
+		"2222":           "127.0.0.1:2222",
+		"127.0.0.1:2222": "127.0.0.1:2222",
+		" 0.0.0.0:8022 ": "0.0.0.0:8022",
+	}
+	for in, want := range cases {
+		got, err := NormalizeRemoteListen(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeRemoteListen(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "abc", "127.0.0.1:99999"} {
+		if _, err := NormalizeRemoteListen(bad); err == nil {
+			t.Errorf("NormalizeRemoteListen(%q): expected error", bad)
+		}
+	}
+}
+
+func TestRemoteRedaction(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.Remote = RemoteConfig{
+		Remotes:  []RemotePeer{{Name: "nas", Token: "tcSECRET"}},
+		Forwards: []RemoteForward{{Name: "f", Listen: "2222", Remote: "tcRAWTOKEN", RemotePort: 22}},
+	}
+	redacted := cfg.RedactedCopy()
+	if redacted.Remote.Remotes[0].Token != redactValue {
+		t.Errorf("remote token not redacted: %q", redacted.Remote.Remotes[0].Token)
+	}
+	if redacted.Remote.Forwards[0].Remote != redactValue {
+		t.Errorf("raw token in forward not redacted: %q", redacted.Remote.Forwards[0].Remote)
+	}
+	// 原配置不被修改。
+	if cfg.Remote.Remotes[0].Token != "tcSECRET" {
+		t.Error("RedactedCopy mutated the source config")
+	}
+}

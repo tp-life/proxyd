@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"proxyd/internal/config"
-	"proxyd/internal/node"
-	"proxyd/internal/pool"
+	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
 )
 
 // subscriptionTestNode 构造订阅设置事务测试使用的最小 socks5 节点。
