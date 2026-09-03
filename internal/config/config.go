@@ -365,6 +365,10 @@ type Config struct {
 
 	// Remote 「远程连接」周边模块（tailcat 隧道），与代理功能独立；默认关闭。
 	Remote RemoteConfig `yaml:"remote,omitempty" json:"remote"`
+
+	// migratedLegacy 记录 Parse 是否执行过兼容迁移（不参与序列化），
+	// 供启动路径把迁移结果一次性写回配置文件。
+	migratedLegacy bool
 }
 
 // Defaults applied by Load.
@@ -459,7 +463,7 @@ func Parse(raw []byte) (*Config, error) {
 	if err := yaml.Unmarshal(raw, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	cfg.migrate()
+	cfg.migratedLegacy = cfg.migrate()
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -469,18 +473,29 @@ func Parse(raw []byte) (*Config, error) {
 
 // migrate 兼容旧版本配置：mode: auto（已废弃的模式）迁移为 rule + 开启 auto-port；
 // 旧默认 HTTP 探测地址迁移为 HTTPS（用户显式自定义的其他地址不动）。
-func (c *Config) migrate() {
+// 返回是否发生了迁移，供启动路径把迁移结果一次性写回配置文件。
+func (c *Config) migrate() bool {
+	migrated := false
 	if c.Mode == "auto" {
 		log.Printf("[config] mode: auto 已改为独立端口：迁移为 mode: rule + auto-port: %d", DefaultAutoPort)
 		c.Mode = "rule"
 		if c.AutoPort == 0 {
 			c.AutoPort = DefaultAutoPort
 		}
+		migrated = true
 	}
 	if c.HealthURL == legacyHealthURL {
 		log.Printf("[config] health-url 旧默认值 %s 易被节点劫持导致探测失败，迁移为 %s", legacyHealthURL, defaultHealthURL)
 		c.HealthURL = defaultHealthURL
+		migrated = true
 	}
+	return migrated
+}
+
+// MigrationApplied 报告本次 Parse 是否执行过兼容迁移。
+// 为 true 时启动路径应把配置写回文件，避免每次启动重复迁移与告警。
+func (c *Config) MigrationApplied() bool {
+	return c.migratedLegacy
 }
 
 // applyDefaults 为缺失字段补齐运行默认值，并保留用户可显式关闭的布尔设置。

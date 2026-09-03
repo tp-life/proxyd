@@ -104,6 +104,8 @@ type App struct {
 }
 
 // New 创建 App，并在配置已开启 TUN 时提前校验当前进程权限。
+// 若加载时执行过兼容迁移（见 Config.MigrationApplied）且 cfgPath 非空，
+// 会把迁移后的配置一次性写回文件，避免每次启动重复迁移与告警。
 //
 // 参数：
 //   - cfg: *config.Config，已经完成默认值和结构校验的运行配置。
@@ -147,6 +149,15 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		a.includeRe = re
 	}
 	a.initRemote()
+	// 兼容迁移（如旧默认 health-url）此前只在内存生效，这里一次性写回配置文件，
+	// 避免每次启动重复迁移并打印告警。写失败不阻断启动，仅降级为下次再试。
+	if cfgPath != "" && cfg.MigrationApplied() {
+		if err := cfg.Save(cfgPath); err != nil {
+			log.Printf("[config] 迁移后的配置写回 %s 失败（下次启动将重试）: %v", cfgPath, err)
+		} else {
+			log.Printf("[config] 已将迁移后的配置写回 %s", cfgPath)
+		}
+	}
 	return a, nil
 }
 
