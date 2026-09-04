@@ -451,17 +451,18 @@ export function RemotePage({
   }
 
   /**
-   * openSSHPort 一键把 22 端口并入暴露列表，供对端经隧道 SSH 登录本机。
+   * openSSHPort 一键把 SSH 服务端口并入暴露列表。
    *
-   * 参数说明：无。
+   * 参数说明：无；SSH 使用系统约定的 TCP 22 端口。
    * 返回值说明：返回 Promise<void>。
-   * 可能的异常/错误情况：后端校验失败由 saveServe toast；22 已在列表时不重复提交。
+   * 可能的异常/错误情况：后端校验失败由 saveServe toast；端口已在列表时不重复提交。
    */
   async function openSSHPort() {
-    if (serve.includes(22)) {
+    const port = 22;
+    if (serve.includes(port)) {
       return;
     }
-    await saveServe([...serve, 22].sort((a, b) => a - b));
+    await saveServe([...serve, port].sort((a, b) => a - b));
   }
 
   /**
@@ -1312,7 +1313,7 @@ function PeerConnectDialog({ name, forwards, fetchPeerToken, createSSHForward, t
     <>
       <DialogHeader>
         <DialogTitle>连接到 {name}</DialogTitle>
-        <DialogDescription>通过 tailcat 隧道 SSH 登录该设备；文件传输直接使用 scp，走同一隧道。</DialogDescription>
+        <DialogDescription>SSH 与文件传输都通过同一条 tailcat 加密隧道，优先 NAT 穿透直连。</DialogDescription>
       </DialogHeader>
       <div className="dialog-form">
         <Field label="登录用户" hint="可选；填写后命令会带上 user@ 前缀">

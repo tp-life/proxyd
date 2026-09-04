@@ -121,6 +121,8 @@ func (s *Server) Start() error {
 	s.registerControllerRoutes(mux)
 	// 「远程连接」周边模块路由（/api/remote*）。
 	s.registerRemoteRoutes(mux)
+	// 「远程桌面」应用模块路由（/api/desktop*）。
+	s.registerDesktopRoutes(mux)
 	mux.HandleFunc("GET /", s.handleStatic)
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {

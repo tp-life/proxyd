@@ -800,10 +800,14 @@ func TestNormalizeRemoteListen(t *testing.T) {
 
 func TestRemoteRedaction(t *testing.T) {
 	cfg := minimalValidConfig()
+	desktopToken := "tcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	cfg.Remote = RemoteConfig{
 		Remotes:  []RemotePeer{{Name: "nas", Token: "tcSECRET"}},
 		Forwards: []RemoteForward{{Name: "f", Listen: "2222", Remote: "tcRAWTOKEN", RemotePort: 22}},
 	}
+	cfg.Desktop = DesktopConfig{Connections: []DesktopConnection{{
+		Name: "旧桌面档案", Remote: desktopToken, Protocol: DesktopProtocolRDP, RemotePort: 3389,
+	}}}
 	redacted := cfg.RedactedCopy()
 	if redacted.Remote.Remotes[0].Token != redactValue {
 		t.Errorf("remote token not redacted: %q", redacted.Remote.Remotes[0].Token)
@@ -811,8 +815,14 @@ func TestRemoteRedaction(t *testing.T) {
 	if redacted.Remote.Forwards[0].Remote != redactValue {
 		t.Errorf("raw token in forward not redacted: %q", redacted.Remote.Forwards[0].Remote)
 	}
+	if redacted.Desktop.Connections[0].Remote != redactValue {
+		t.Errorf("桌面档案中的疑似 token 未打码: %q", redacted.Desktop.Connections[0].Remote)
+	}
 	// 原配置不被修改。
 	if cfg.Remote.Remotes[0].Token != "tcSECRET" {
 		t.Error("RedactedCopy mutated the source config")
+	}
+	if cfg.Desktop.Connections[0].Remote != desktopToken {
+		t.Error("RedactedCopy 修改了源桌面配置")
 	}
 }

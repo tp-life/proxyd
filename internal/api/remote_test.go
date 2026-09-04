@@ -41,7 +41,10 @@ func newRemoteTestServer(t *testing.T) (*Server, string) {
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { server.Shutdown(t.Context()) })
+	t.Cleanup(func() {
+		server.Shutdown(t.Context())
+		a.Shutdown()
+	})
 	return server, server.ln.Addr().String()
 }
 

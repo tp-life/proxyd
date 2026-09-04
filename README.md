@@ -30,6 +30,7 @@
 - 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
 - 现代化只读 TUI：`proxyd ls` 复用 Web 控制台的本地 API，集中展示概览、节点、订阅、入口、规则、连接、远程隧道与日志；不会调用任何写接口，来源地址和凭据仅显示安全摘要
 - 远程连接（周边功能，与代理独立）：内嵌 [tailcat](https://github.com/tailscale/tailcat) 隧道（WireGuard 端到端加密 + DERP 中继，无需 Tailscale 账号/客户端），把本机端口（如 SSH 22）暴露给持有 token 的对端；`proxyd ssh <远端>` 一键经隧道连接，`proxyd scp` 直接经隧道传文件，支持本地常驻转发（listen 可留空自动分配端口），详见 [手册](docs/manual.md#十远程连接tailcat-隧道)
+- 独立远程桌面管理：Web「远程桌面」页分别提供服务端 RDP/VNC 监听检测与隧道开放，以及客户端连接档案、临时会话和系统客户端唤起；连接档案不保存密码或 token 副本
 - REST API 与 Web 控制台：
   - `http://127.0.0.1:19091/` 内嵌 React 19 + Tailwind 4 Web 控制台（通过官方 Registry 集成 beUI Button、Switch、Tabs 与 Table 源码，不依赖 Radix UI；概览含实时速率条，节点页显示订阅流量/到期信息，活动连接页展示域名、入口、进程与出口链路）
   - `http://127.0.0.1:19090` mihomo external-controller（兼容 metacubexd / yacd 面板）
@@ -104,9 +105,11 @@ proxyd remote remotes add nas tc...                        # 保存远端
 proxyd remote forwards add nas-ssh auto nas 22             # 本地常驻转发（listen 填 auto 自动分配端口）
 proxyd ssh root@nas            # 经隧道 SSH（纯客户端命令，无需守护进程）
 proxyd scp ./file nas:/tmp/    # 经隧道 scp 传文件（对端需 serve 22）
+proxyd desk rdp office-pc      # 临时转发远端 3389 并打开本机 RDP 客户端；退出后自动清理
+proxyd desk vnc mac-studio     # 临时转发远端 5900 并打开本机 VNC 客户端；退出后自动清理
 ```
 
-启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：侧边栏以 Clash Verge 风格拆分为 运行概况 / 代理节点 / 订阅管理 / 代理入口 / 策略分组 / 访问规则 / 运行日志 / 活动连接 / 系统设置。控制台可查看实时流量趋势、搜索与筛选节点、启停和编辑订阅、开关逐节点端口映射、编辑分组与自定义规则、暂停连接或日志刷新，以及一键切换 规则/全局/直连 模式。系统设置采用页内分区导航，可管理主端口、自动选优、TUN、系统代理、开机自启与配置备份；配置导入会先展示差异预览，确认摘要未变化后才原子写入。常规状态每 10 秒刷新，活动连接页停留期间每 2 秒更新；并提供 `⌘K` / `Ctrl+K` 命令面板执行跳页、刷新、测速与模式切换。
+启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：侧边栏除代理与系统管理外，还把「远程连接」（tailcat/SSH/通用端口转发）和「远程桌面」（RDP/VNC 服务与连接档案）拆成两个独立页面。远程桌面服务端页会分别展示操作系统服务是否真实监听、端口是否已通过隧道开放；客户端页保存不含密码的常用连接并按需建立临时回环转发。控制台还可查看实时流量趋势、搜索与筛选节点、启停和编辑订阅、管理映射/分组/规则、暂停连接或日志刷新，以及一键切换规则/全局/直连模式。系统设置采用页内分区导航，可管理主端口、自动选优、TUN、系统代理、开机自启与配置备份；配置导入会先展示差异预览，确认摘要未变化后才原子写入。常规状态每 10 秒刷新，活动连接页停留期间每 2 秒更新；并提供 `⌘K` / `Ctrl+K` 命令面板执行跳页、刷新、测速与模式切换。
 
 偏好终端时可运行 **`proxyd ls`**。TUI 每 3 秒读取与 Web 控制台同源的只读接口，并通过实时流量流更新速率；支持数字键或 `h/l` 切页、`j/k` 滚动、`r` 立即刷新、`?` 查看帮助、`q` 退出。它不提供切换、编辑、测速、刷新订阅或关闭连接等操作。
 
@@ -151,6 +154,7 @@ PORT   NODE              SUBSCRIPTION   DELAY
 - `system-proxy`：true 时 serve 启动即把系统代理指向主端口，退出自动恢复
 - `tun`：完整透传 mihomo TUN 段；默认关闭，`stack: system`、自动路由/出口识别、劫持 `0.0.0.0:53`，可通过 Web 或 `proxyd tun` 热切换
 - `dns-preset`：`off | fake-ip | redir-host`，默认 off；配置了手写 `dns:` 时整段优先于预设
+- `desktop`：远程桌面服务端口与客户端连接档案；是否开放仍以 `remote.serve` 为唯一事实来源，连接档案只引用 `remote.remotes` 名称且不保存密码
 - `mode`：`rule | global | direct`
 - `custom-rules`：追加式自定义规则，生成时前置到 `rules` 之前（如 `DOMAIN-SUFFIX,example.com,DIRECT`，策略可填节点名/分组名）
 - `rule-urls`：远程规则源（`name`/`url`），支持 mihomo 规则文本与 gfwlist（base64），内容跟随订阅刷新拉取并缓存到 `state-dir`，不写回配置文件
@@ -186,4 +190,4 @@ make web          # 构建 React 控制台到 internal/api/dist，供 Go embed �
 make build        # 只构建 Go 二进制，使用已生成的前端 dist，不强制依赖 Node
 ```
 
-项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端；`cli.go` 提供共享 apiClient，功能按域拆分为 `proxy_*.go`、`system.go`、`remote.go`）、`internal/config`（配置；`config.go` + `proxy.go`/`remote.go`）、`internal/proxy`（代理域包：`subscribe` 订阅拉取与解析、`ruleurl` 规则 URL 拉取与解析、`node` 节点模型与 nodes.json 快照、`pool` 健康检测与端口分配、`core` mihomo 配置生成与内嵌运行、`sysproxy` 系统代理开关、`tunperm` TUN 跨平台权限检测）、`internal/remote`（tailcat 隧道远程连接，独立周边模块）、`internal/app`（调度编排；`app.go` 内核：生命周期/持久化/版本检查 + `proxy_*.go` 域逻辑）、`internal/api`（自有 REST API 与 Web 控制台 embed 产物；`api.go` Server 外壳 + 各域 `proxy_*.go`/`system.go`/`remote.go` 路由文件）、`web`（React 控制台源码；`main.jsx` App 外壳 + `pages/`/`hooks/`/`lib/`/`components/`）、`internal/autostart`（开机自启）。
+项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端；`cli.go` 提供共享 apiClient，功能按域拆分）、`internal/config`（配置；含独立 `remote.go`/`desktop.go`）、`internal/proxy`（代理域）、`internal/remote`（tailcat 隧道唯一实现点）、`internal/desktop`（不依赖 tailcat/HTTP 的桌面会话模型与回收规则）、`internal/app`（用例和配置事务编排）、`internal/api`（各垂直模块 REST 路由与 Web embed 产物）、`web`（React 控制台源码；远程连接与远程桌面各自拥有独立 page/hook）、`internal/autostart`（开机自启）。

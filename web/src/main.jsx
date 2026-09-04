@@ -25,6 +25,7 @@ import {
   Link2,
   ListFilter,
   Menu,
+  Monitor,
   Moon,
   Network,
   RefreshCw,
@@ -47,6 +48,7 @@ import { ToastViewport } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyState } from "@/components/EmptyState";
 import { useConnectionsFeed } from "@/hooks/useConnectionsFeed";
+import { useDesktopFeed } from "@/hooks/useDesktopFeed";
 import { useRemoteFeed } from "@/hooks/useRemoteFeed";
 import { useToast } from "@/hooks/useToast";
 import { useTrafficStream } from "@/hooks/useTrafficStream";
@@ -86,8 +88,31 @@ function loadRemotePage() {
   return import("@/pages/RemotePage").then(mapRemotePageModule);
 }
 
-// Remote 页面与更大的 xterm 运行时形成两级懒加载，首页不会携带远程终端相关实现。
+/**
+ * mapDesktopPageModule 把 DesktopPage 命名导出适配为 React.lazy 默认导出。
+ *
+ * 参数说明：module 为动态加载后的桌面页面 ES 模块。
+ * 返回值说明：返回 `{default: React.ComponentType}`。
+ * 可能的异常/错误情况：构建产物缺少 DesktopPage 时，React 会报告无效组件。
+ */
+function mapDesktopPageModule(module) {
+  return { default: module.DesktopPage };
+}
+
+/**
+ * loadDesktopPage 按需加载独立远程桌面页面。
+ *
+ * 参数说明：无。
+ * 返回值说明：返回动态 import Promise，首次进入页面时才下载对应代码。
+ * 可能的异常/错误情况：静态资源加载失败时由现有 React 错误处理路径呈现。
+ */
+function loadDesktopPage() {
+  return import("@/pages/DesktopPage").then(mapDesktopPageModule);
+}
+
+// Remote 与 Desktop 页面分别懒加载；Remote 内更大的 xterm 运行时继续保持第二级懒加载。
 const RemotePage = lazy(loadRemotePage);
+const DesktopPage = lazy(loadDesktopPage);
 
 const NAV_ITEMS = [
   { id: "overview", label: "运行概况", shortLabel: "概况", group: "概览", icon: Activity },
@@ -99,6 +124,7 @@ const NAV_ITEMS = [
   { id: "connections", label: "活动连接", shortLabel: "连接", group: "连接与日志", icon: Link2 },
   { id: "logs", label: "运行日志", shortLabel: "日志", group: "连接与日志", icon: Terminal },
   { id: "remote", label: "远程连接", shortLabel: "远程", group: "远程访问", icon: Laptop },
+  { id: "desktop", label: "远程桌面", shortLabel: "桌面", group: "远程访问", icon: Monitor },
   { id: "settings", label: "系统设置", shortLabel: "设置", group: "系统", icon: Settings },
 ];
 
@@ -357,6 +383,19 @@ function App() {
    * 接口失败时由 hook 内部承接到错误条带；调用方无需额外捕获。
    */
   const remote = useRemoteFeed(activeView, requestConfirmation, showToast);
+
+  /**
+   * useDesktopFeed 接入独立远程桌面页的数据与会话生命周期。
+   *
+   * 功能说明：
+   * 只有 desktop 视图可见时才探测本机桌面端口和轮询临时会话；远程连接页不会因此
+   * 增加额外请求。服务配置、保存档案与临时隧道操作统一由 Hook 提供。
+   *
+   * 参数说明：activeView 控制启停；requestConfirmation 处理删除确认；showToast 呈现结果。
+   * 返回值说明：返回 DesktopPage 所需的状态和操作集合。
+   * 可能的异常/错误情况：接口失败由 Hook 保留旧快照并通过 error/toast 呈现。
+   */
+  const desktop = useDesktopFeed(activeView, requestConfirmation, showToast);
 
   /**
    * importConfig 上传 YAML 配置，后端校验并原子替换配置文件。
@@ -850,6 +889,11 @@ function App() {
             {activeView === "remote" && (
               <Suspense fallback={<EmptyState title="正在加载远程连接页面" detail="首次进入时按需加载远程管理与终端入口。" />}>
                 <RemotePage {...remote} />
+              </Suspense>
+            )}
+            {activeView === "desktop" && (
+              <Suspense fallback={<EmptyState title="正在加载远程桌面页面" detail="首次进入时按需加载桌面服务与连接管理入口。" />}>
+                <DesktopPage {...desktop} onNavigateRemote={() => setActiveView("remote")} />
               </Suspense>
             )}
             {activeView === "settings" && (

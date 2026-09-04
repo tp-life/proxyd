@@ -111,6 +111,8 @@ func main() {
 			err = cmdSSH(os.Args[2:])
 		case "scp":
 			err = cmdSCP(os.Args[2:])
+		case "desk", "desktop":
+			err = cmdDesk(os.Args[2:])
 		case "traffic":
 			err = cmdTraffic(os.Args[2:])
 		case "ls":
@@ -202,6 +204,7 @@ usage:
   proxyd remote genkey                   生成应急客户端身份（公钥录入对端白名单，私钥自行保存）
   proxyd ssh [-p 端口] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
   proxyd scp [--client-key 私钥] [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
+  proxyd desk [-c 配置] [--client-key 私钥] <rdp|vnc> <远端名|token>   临时转发并打开本机远程桌面客户端
   proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
 
 flags:

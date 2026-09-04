@@ -48,7 +48,7 @@ func DefaultPath() string {
 }
 
 // DefaultStateDir 是配置未指定 state-dir 时使用的默认状态目录
-//（~/.local/state/proxyd），供无法加载配置的纯客户端命令（remote pipe）兜底。
+// （~/.local/state/proxyd），供无法加载配置的纯客户端命令（remote pipe）兜底。
 func DefaultStateDir() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(home, ".local", "state", "proxyd")
@@ -120,6 +120,7 @@ func (c *Config) RedactedCopy() *Config {
 	out.GeoXUrl = redactConfigMap(c.GeoXUrl)
 	out.DNS = redactConfigMap(c.DNS)
 	out.Remote = c.Remote.Clone()
+	out.Desktop = c.Desktop.Clone()
 	for i := range out.Remote.Remotes {
 		if out.Remote.Remotes[i].Token != "" {
 			out.Remote.Remotes[i].Token = redactValue
@@ -129,6 +130,13 @@ func (c *Config) RedactedCopy() *Config {
 		// Remote 字段通常是 remotes 名称；用户也可能直接填 tc... token，按凭据打码。
 		if strings.HasPrefix(out.Remote.Forwards[i].Remote, "tc") {
 			out.Remote.Forwards[i].Remote = redactValue
+		}
+	}
+	for i := range out.Desktop.Connections {
+		// 当前校验禁止桌面档案直接保存 token；这里继续做纵深脱敏，保护通过旧版本、
+		// 手工构造或尚未校验配置进入导出路径的疑似 tailcat 凭据。
+		if looksLikeTailcatToken(out.Desktop.Connections[i].Remote) {
+			out.Desktop.Connections[i].Remote = redactValue
 		}
 	}
 	return &out
@@ -366,6 +374,10 @@ type Config struct {
 	// Remote 「远程连接」周边模块（tailcat 隧道），与代理功能独立；默认关闭。
 	Remote RemoteConfig `yaml:"remote,omitempty" json:"remote"`
 
+	// Desktop 「远程桌面」应用模块；保存服务端推荐端口与客户端连接档案，
+	// 底层 token 和端口开放仍由 Remote 作为唯一事实来源。
+	Desktop DesktopConfig `yaml:"desktop,omitempty" json:"desktop"`
+
 	// migratedLegacy 记录 Parse 是否执行过兼容迁移（不参与序列化），
 	// 供启动路径把迁移结果一次性写回配置文件。
 	migratedLegacy bool
@@ -556,6 +568,7 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	c.TUN.ApplyDefaults()
+	c.Desktop.ApplyDefaults()
 	// geo 下载地址：默认镜像 + 用户按键覆盖
 	merged := make(map[string]any, len(DefaultGeoXUrl))
 	for k, v := range DefaultGeoXUrl {
@@ -726,6 +739,9 @@ func (c *Config) Validate() error {
 		seenGrpPort[g.Port] = true
 	}
 	if err := c.checkRemote(); err != nil {
+		return err
+	}
+	if err := c.Desktop.Validate(); err != nil {
 		return err
 	}
 	return nil

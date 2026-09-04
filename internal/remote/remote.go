@@ -232,6 +232,23 @@ func (m *Manager) Close() {
 	}
 }
 
+// StartTransientForward 使用管理器持久化的客户端身份启动一条临时本地转发。
+//
+// 参数说明：
+//   - token: string，远端完整 tailcat token。
+//   - remotePort: int，远端实际 TCP 服务端口。
+//
+// 返回值说明：*TransientForward 和 error；成功对象由调用方负责 Close。
+//
+// 错误情况：token/端口非法、客户端身份文件不可用或本机回环监听失败时返回错误。
+// 身份文件读取失败时沿用 remote 既有降级语义，使用临时身份继续尝试连接。
+func (m *Manager) StartTransientForward(token string, remotePort int) (*TransientForward, error) {
+	m.mu.Lock()
+	clientKey := m.clientKeyLocked()
+	m.mu.Unlock()
+	return StartTransientForward(token, remotePort, clientKey)
+}
+
 // ResolveToken 把 remotes 名称解析为 token；以 "tc" 开头的输入按 token 原样返回。
 func ResolveToken(remotes []config.RemotePeer, nameOrToken string) (string, error) {
 	nameOrToken = strings.TrimSpace(nameOrToken)

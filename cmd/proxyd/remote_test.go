@@ -105,3 +105,54 @@ func TestFormatRemoteExpiry(t *testing.T) {
 		t.Fatalf("不足一分钟应显示 <1m，got %q", got)
 	}
 }
+
+// TestParseDesktopOptions 验证 desk 命令会解析配置、身份、协议和远端参数。
+//
+// 参数说明：
+//   - t: *testing.T，Go 单元测试上下文。
+//
+// 返回值说明：无；合法输入和主要错误边界均符合约定时测试通过。
+//
+// 错误情况：flag 丢失、协议未规范化、参数数量错误或非法协议被接受时测试失败。
+func TestParseDesktopOptions(t *testing.T) {
+	options, err := parseDesktopOptions([]string{"-c", "/tmp/proxyd.yaml", "--client-key", "privkey:test", "RDP", "office-pc"})
+	if err != nil {
+		t.Fatalf("解析合法 desk 参数失败: %v", err)
+	}
+	if options.configFile != "/tmp/proxyd.yaml" || options.protocol != "rdp" || options.remoteTarget != "office-pc" || options.clientKey != "privkey:test" {
+		t.Fatalf("desk 参数解析结果错误: %+v", options)
+	}
+	spacedName, err := parseDesktopOptions([]string{"vnc", "办公室", "主机"})
+	if err != nil || spacedName.remoteTarget != "办公室 主机" {
+		t.Fatalf("含空格远端名解析 = %q, %v；期望重新拼接完整名称", spacedName.remoteTarget, err)
+	}
+	vnc, err := parseDesktopProtocol(" VNC ")
+	if err != nil || vnc != desktopProtocolVNC || vnc.port() != 5900 || desktopProtocolRDP.port() != 3389 {
+		t.Fatalf("桌面协议端口映射错误: vnc=%q/%d rdp=%d err=%v", vnc, vnc.port(), desktopProtocolRDP.port(), err)
+	}
+	if _, err := parseDesktopOptions([]string{"rdp"}); err == nil {
+		t.Fatal("缺少远端参数时应返回用法错误")
+	}
+	if _, err := parseDesktopOptions([]string{"spice", "office-pc"}); err == nil {
+		t.Fatal("非法协议应被拒绝")
+	}
+}
+
+// TestResolveDesktopToken 验证 desk 支持直接 token，且直接模式不依赖配置文件存在。
+//
+// 参数说明：
+//   - t: *testing.T，Go 单元测试上下文。
+//
+// 返回值说明：无；合法 token 原样返回且非法 token 被拒绝时测试通过。
+//
+// 错误情况：解析过程错误读取不存在的配置，或绕过 token 格式校验时测试失败。
+func TestResolveDesktopToken(t *testing.T) {
+	token := newSCPTestToken(t)
+	got, err := resolveDesktopToken("/path/that/does/not/exist", token)
+	if err != nil || got != token {
+		t.Fatalf("直接 token 解析 = %q, %v；期望原样返回", got, err)
+	}
+	if _, err := resolveDesktopToken("/path/that/does/not/exist", "tc-invalid"); err == nil {
+		t.Fatal("非法直接 token 应被拒绝")
+	}
+}

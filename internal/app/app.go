@@ -16,6 +16,7 @@ import (
 
 	"proxyd/internal/autostart"
 	"proxyd/internal/config"
+	"proxyd/internal/desktop"
 	"proxyd/internal/proxy/core"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
@@ -106,6 +107,12 @@ type App struct {
 	// 内存读写片段，无法覆盖“克隆 → 调和运行态 → 落盘 → 失败回滚”的跨阶段过程；
 	// 若两个 API 并发修改，不加此锁会出现后一次变更被前一次持久化覆盖的问题。
 	remoteMutationMu sync.Mutex
+
+	// desktop 管理独立于配置文件的临时桌面会话；底层转发通过端口接口委托给 remote。
+	// desktopMutationMu 串行化桌面档案与服务端口配置事务，跨 remote 的服务开放事务
+	// 固定按 desktopMutationMu → remoteMutationMu 的顺序取锁，避免并发更新覆盖或死锁。
+	desktop           *desktop.Manager
+	desktopMutationMu sync.Mutex
 }
 
 // New 创建 App，并在配置已开启 TUN 时提前校验当前进程权限。
@@ -118,14 +125,19 @@ type App struct {
 //
 // 返回值：
 //   - *App：初始化完成的应用编排器。
-//   - error：exclude 正则无效或配置要求启用 TUN 但进程权限不足时返回错误。
+//   - error：桌面配置/正则无效，或配置要求启用 TUN 但进程权限不足时返回错误。
 //
-// 错误情况：权限错误包含 macOS sudo、Linux setcap 或 Windows 管理员操作指引，
-// 让服务在创建 API 和修改系统路由之前失败，避免出现“控制台已启动但 TUN 不工作”的半运行状态。
+// 错误情况：桌面配置在创建任何运行资源前校验；权限错误包含 macOS sudo、Linux
+// setcap 或 Windows 管理员操作指引，让服务在创建 API 和修改系统路由之前失败，
+// 避免出现“控制台已启动但 TUN 不工作”的半运行状态。
 func New(cfg *config.Config, cfgPath string) (*App, error) {
 	// app.New 既接收 config.Load 的结果，也被 e2e/嵌入调用方直接使用。
-	// 这里补一次幂等默认值，保证后续持久化和状态 API 都看到完整 TUN 配置。
+	// 这里补一次幂等默认值，保证后续持久化和状态 API 都看到完整 TUN/桌面配置。
 	cfg.TUN.ApplyDefaults()
+	cfg.Desktop.ApplyDefaults()
+	if err := cfg.Desktop.Validate(); err != nil {
+		return nil, fmt.Errorf("远程桌面配置无效: %w", err)
+	}
 	if cfg.TUN.Enable {
 		if err := tunperm.Require(); err != nil {
 			return nil, fmt.Errorf("配置已开启 TUN，但当前进程无法创建 TUN 设备: %w", err)
@@ -154,6 +166,7 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		a.includeRe = re
 	}
 	a.initRemote()
+	a.initDesktop()
 	// 兼容迁移（如旧默认 health-url）此前只在内存生效，这里一次性写回配置文件，
 	// 避免每次启动重复迁移并打印告警。写失败不阻断启动，仅降级为下次再试。
 	if cfgPath != "" && cfg.MigrationApplied() {
@@ -444,6 +457,12 @@ func (a *App) Run(ctx context.Context) error {
 		// TUN 配置要求全局接管系统路由；如果首次应用后 listener 仍未生效，继续以
 		// “看似开启、实际关闭”的状态运行会造成流量泄漏，因此把启动失败上抛给 CLI。
 		if a.cfg.TUN.Enable && !a.runner.TUNEnabled() {
+			// remote 已在首次刷新前启动，desktop 管理器也可能已被 API 创建会话。致命
+			// 启动路径不会进入下方 ctx.Done 分支，因此必须在返回前按依赖顺序显式释放，
+			// 否则会残留 tailcat listener、临时桌面端口和后台协程。
+			a.stopDesktop()
+			a.stopRemote()
+			a.runner.Shutdown()
 			return fmt.Errorf("TUN 未能启动，服务已停止以避免流量绕过代理: %w", err)
 		}
 		log.Printf("[refresh] initial refresh failed: %v", err)
@@ -459,6 +478,7 @@ func (a *App) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			a.stopDesktop()
 			a.stopRemote()
 			a.runner.Shutdown()
 			return nil
@@ -480,8 +500,9 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown 关闭远程连接模块与内嵌的 mihomo 核心。
+// Shutdown 关闭远程桌面会话、远程连接模块与内嵌的 mihomo 核心。
 func (a *App) Shutdown() {
+	a.stopDesktop()
 	a.stopRemote()
 	a.runner.Shutdown()
 }

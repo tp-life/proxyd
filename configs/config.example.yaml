@@ -122,3 +122,17 @@ rules:
 # 传文件，远端操作数填对端名称/token；无独立文件传输功能），均为纯客户端命令，无需本地守护进程。
 # 服务端密钥保存在 state-dir/remote/server.private.json（0600）：文件在则 token 重启不变；
 # 删除后下次启动生成全新 token（旧 token 永久失效）；可用 proxyd remote keyfile export/import 安全迁移身份。
+
+# ---- 远程桌面（独立管理界面，数据通道复用上方 remote 隧道）----
+# 服务端口应填写操作系统 RDP/VNC 服务真实监听值；Web 会探测 127.0.0.1:端口，但不会替你
+# 开启 Windows 远程桌面、macOS 屏幕共享或第三方 VNC 服务。是否允许对端访问仍统一写入
+# remote.serve，desktop 段不保存第二份 exposed 开关，避免两个配置源漂移。
+# desktop:
+#   rdp-port: 3389             # Windows / Linux RDP 建议端口，可按系统实际配置修改
+#   vnc-port: 5900             # macOS 屏幕共享 / 通用 VNC 建议端口，可修改
+#   connections:               # Web 客户端保存的常用连接；不保存密码，也不复制 token
+#     - name: 办公室电脑
+#       remote: office         # 引用 remote.remotes 中的名称；远端暂时删除时档案仍保留
+#       protocol: rdp          # rdp | vnc
+#       remote-port: 3389      # 对端桌面服务真实端口；省略时按协议补默认值
+#       username: DOMAIN\\user # 可选；密码仍由系统 RDP/VNC 客户端安全存储或每次询问

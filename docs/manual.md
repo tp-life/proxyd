@@ -161,8 +161,9 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd remote remotes list\|add <名> <token>\|del <名>` | 管理保存的远端；列表会探测在线状态、连接路径与 RTT |
 | `proxyd remote forwards list\|add <名> <监听> <远端> <端口>\|del <名>\|on\|off <名>` | 管理本地常驻转发；监听地址可填 `auto`（或留空），自动从 10022 起分配空闲端口 |
 | `proxyd ssh <远端>` / `proxyd scp <源> <目标>` | 经隧道直连 SSH / scp 传文件（纯客户端命令，远端可填保存的名称或 token，见「十、远程连接」） |
+| `proxyd desk <rdp\|vnc> <远端>` | 创建临时回环转发并打开当前用户的系统远程桌面客户端；窗口退出后自动清理 |
 
-`proxyd ssh`、`proxyd scp` 与 `proxyd remote pipe` 是例外：它们是**纯客户端命令**，不经过本地 API、不需要守护进程运行（直接读配置文件解析远端名）。
+`proxyd ssh`、`proxyd scp`、`proxyd desk` 与 `proxyd remote pipe` 是例外：它们是**纯客户端命令**，不经过本地 API、不需要守护进程运行（直接读配置文件解析远端名）。
 
 `-c` 等 flag 必须放在子命令参数之前（Go flag 解析遇位置参数即停止）；写在后面的 `-c` 会被检测到并直接报错，避免静默操作到默认配置对应的实例。
 
@@ -200,6 +201,8 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 - **访问规则**：搜索、新增、编辑、删除和调整自定义规则顺序；规则 URL 保持只读内容视图并可展开查看可读原文（优先缓存，无缓存时现场拉取；整体 Base64 gfwlist 自动解码）
 - **运行日志**：查看进程内约 1000 条环形缓冲日志，支持搜索、暂停刷新、复制和下载
 - **活动连接**：仅在页面打开且未暂停时每 2 秒读取 mihomo 连接快照；按域名/IP/进程/出口链搜索，查看入口端口、累计流量与开始时间，并可关闭单条或全部连接
+- **远程连接**：管理 tailcat 服务端身份、SSH、客户端白名单、远端 token 和通用 TCP 转发；“服务端 / 客户端”页签只处理隧道与 SSH，不再混放桌面配置
+- **远程桌面**：独立的“服务端 / 客户端”页签；服务端检测 RDP/VNC 是否在本机真实监听并控制隧道开放，客户端保存不含密码的连接档案、建立临时回环转发并打开系统客户端
 - **系统设置**：使用页内分区导航管理主端口、`main-auto`、`main-node`、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN、系统代理、开机自启，以及带差异预览的配置导入
 - 页面每 10 秒自动刷新数据；`⌘K` / `Ctrl+K` 命令面板支持跳页、刷新、测速和模式切换
 
@@ -253,6 +256,11 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 | `POST /api/groups` `{"name":"hk","port":43000,"type":"fallback","subscription":"airport-a"}` | 新增节点分组；`type` 支持 `url-test/fallback/load-balance`，成员可来自 `nodes` 或 `subscription` |
 | `PUT /api/groups/{name}` | 编辑分组端口、类型与成员来源；为保护 `dialer-proxy` 引用，暂不支持在线改名 |
 | `DELETE /api/groups/{name}` | 删除节点分组 |
+| `GET /api/desktop` | 返回 RDP/VNC 本机监听与隧道开放状态、已保存连接和当前临时会话；不返回 token 或密码 |
+| `POST /api/desktop/services/{rdp\|vnc}` | 原子更新协议实际服务端口及其 `remote.serve` 开放状态，失败时同时回滚桌面配置和 remote 运行态 |
+| `POST /api/desktop/connections` / `PUT` / `DELETE` | 新增、更新或删除不含密码的桌面连接档案；远端字段引用 `remote.remotes` 名称 |
+| `POST /api/desktop/sessions` / `DELETE /api/desktop/sessions/{id}` | 创建（或复用）和断开临时桌面回环转发；遗忘的会话会按首次连接宽限、空闲期和最长寿命自动回收 |
+| `GET /api/desktop/sessions/{id}/rdp` | 下载不含密码的临时 `.rdp` 文件；VNC 会话由状态接口返回 `vnc://127.0.0.1:端口` |
 | `GET /ports` | 端口映射表（兼容旧接口） |
 
 ### mihomo API（`external-controller`，默认 19090）
@@ -410,6 +418,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
 | 系统代理开关、节点正则过滤、周期等 | `system-proxy` / `include` / `exclude` / `refresh-interval` / ... |
 | 远程连接（隧道开关、暴露端口、远端与转发） | `remote`（token 属凭据，导出默认打码） |
+| 远程桌面（服务端口与不含密码的连接档案） | `desktop`（开放状态仍以 `remote.serve` 为准） |
 
 **状态目录**（`state-dir`，默认 `~/.local/state/proxyd`）——运行时状态，删了只会丢缓存/快照，不影响配置：
 
@@ -489,6 +498,16 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
   # allow-restricted: false # 过期清扫后防止空列表退化为开放模式的内部状态，通常无需手工设置
   remotes: []               # 保存的远端：name + token
   forwards: []              # 本地常驻转发：listen → remote:remote-port；listen 可留空或填 "auto" 自动分配端口
+
+desktop:                    # 独立远程桌面管理；数据通道复用 remote，不经过 mihomo
+  rdp-port: 3389            # 本机操作系统 RDP 服务真实端口
+  vnc-port: 5900            # 本机屏幕共享 / VNC 服务真实端口
+  connections:              # 客户端常用连接；只引用远端名称，不保存 token 副本或密码
+    - name: 办公室电脑
+      remote: office        # 引用 remote.remotes 中的 name
+      protocol: rdp         # rdp | vnc
+      remote-port: 3389     # 对端真实桌面端口；省略时使用协议默认值
+      username: DOMAIN\\user # 可选，密码继续由系统桌面客户端管理
 ```
 
 ## 十、远程连接（tailcat 隧道）
@@ -510,6 +529,11 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
 proxyd remote on              # 同时开启隧道服务端与 builtin-ssh（单事务热切换并持久化）
 proxyd remote serve 22        # 设置暴露端口（可逗号分隔多个）
 proxyd remote token           # 打印完整 token，发给要连接的人
+
+# 远程桌面也可直接用 CLI 操作 remote.serve；Web 推荐到独立「远程桌面 → 服务端」页，
+# 页面会同时检测系统端口是否真实监听，避免只开放端口却没有运行桌面服务。
+proxyd remote serve 22,3389   # Windows RDP
+proxyd remote serve 22,5900   # macOS 屏幕共享或其它 VNC 服务
 ```
 
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
@@ -565,6 +589,11 @@ proxyd scp ./file nas:/tmp/           # 上传
 proxyd scp tc-xxxx:/var/log/a.log ./  # 也可直接用 token 不保存远端
 proxyd scp -r ./dir nas:/tmp/         # 其余 scp 选项原样透传
 
+# 远程桌面：纯客户端命令，随机绑定 127.0.0.1 端口且不写入配置
+proxyd desk rdp office-pc      # 转发远端 3389，打开 Windows/macOS/Linux 已安装的 RDP 客户端
+proxyd desk vnc mac-studio     # 转发远端 5900，macOS 直接打开系统“屏幕共享”
+# 客户端窗口退出或 Ctrl+C 后，临时 listener、活动连接与 tailcat 客户端全部释放
+
 # 方式二：本地常驻转发（守护进程内运行，适合长期挂载）
 proxyd remote forwards add nas-ssh 127.0.0.1:2222 nas 22
 proxyd remote forwards add nas-ssh auto nas 22   # listen 留空或填 auto：自动从 10022 起分配空闲本地端口
@@ -574,7 +603,11 @@ ssh -p 2222 localhost         # 之后任何 TCP 客户端都能用这条转发
 
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
-Web 控制台「远程连接」页按「服务端 / 客户端」两个页签组织（选中项会被记住，下次打开页面自动恢复）。每个对端都有「连接」对话框，给出两种方式的现成命令：**方式一**一键创建/启用指向对端 22 端口的本地 SSH 转发，并提供可复制的 `ssh 用户@127.0.0.1 -p 端口` 与 `scp -P 端口 ...` 命令；**方式二** proxyd CLI 直连，给出 `proxyd ssh <token>`、`proxyd scp ...` 命令以及可写进 ssh config 的 ProxyCommand 片段。设备列表还有「终端」按钮：在本机 Web Terminal 已开启时，一键打开浏览器终端并自动执行 `proxyd ssh <名称>` 直连对端（同样受「SSH 携带 TERM」统一开关控制）。
+Web 控制台把两类任务分为两个侧边栏页面。「远程连接」继续按“服务端 / 客户端”管理 tailcat 身份、SSH、token 和通用端口转发；设备的“连接”对话框只提供 SSH/scp 用法，不再混放 RDP/VNC。「远程桌面」则专门管理桌面：服务端按 RDP/VNC 展示“系统服务是否真实监听”和“隧道是否开放”两个状态，端口可按操作系统实际配置修改；客户端保存常用连接档案，一键创建守护进程内的临时转发并下载 `.rdp` 文件或打开 `vnc://` 系统处理器。档案不保存密码，token 也只在 `remote.remotes` 保留一份。
+
+Web 临时会话绑定在**运行 proxyd 的机器**的 `127.0.0.1`，因此一键打开系统客户端只适合浏览器与 proxyd 同机的场景；若通过局域网远程访问 Web，页面会显示警告。纯 CLI 的 `proxyd desk` 仍从当前登录用户会话启动 GUI，适合不希望由 root/system 开机守护进程直接拉起桌面窗口的场景。Web 会话若始终没有客户端连接、客户端断开后长期空闲或超过最长寿命，会由单个清扫协程自动关闭 listener、活动连接和 tailcat 客户端。
+
+RDP/VNC 的应用层流量进入临时 TCP 转发后仍由 tailcat 承载：DERP 负责初始引导与打洞失败兜底，magicsock 会持续尝试 NAT 穿透；成功后升级为 WireGuard 点对点直连。RDP 可以在 TCP-only 模式运行，但中继路径的延迟与吞吐通常不如直连。服务端应同时保留 RDP/VNC 自身账号认证，并用 `remote allow --ports 3389,5900` 将桌面端口限制给可信客户端。
 
 ### 与 tailcat CLI 的互通
 
