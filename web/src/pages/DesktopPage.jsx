@@ -319,16 +319,38 @@ export function DesktopPage({
         <EmptyState title="正在加载远程桌面状态" detail="正在检测本机桌面服务并读取保存的连接。" />
       ) : (
         <Tabs onValueChange={handleTabChange} value={activeTab}>
-          <TabsList aria-label="远程桌面管理分组">
-            <TabsTrigger value="server">
-              <span className="tabs-trigger-title">服务端</span>
-              <span className="tabs-trigger-detail">让别人连接本机：检测系统桌面服务、配置实际端口并控制隧道开放</span>
-            </TabsTrigger>
-            <TabsTrigger value="client">
-              <span className="tabs-trigger-title">客户端</span>
-              <span className="tabs-trigger-detail">从本机连接其他设备：保存常用连接、按需建立临时转发并打开系统客户端</span>
-            </TabsTrigger>
-          </TabsList>
+          {/*
+           * 远程桌面与远程连接都以“本机扮演的连接角色”划分内容，因此复用相同的
+           * 角色导航视觉。独立标题、方向标签与图标共同强调这里是一级分类入口，
+           * 避免用户把“服务端 / 客户端”误认为下面面板中的普通文字标题。
+           */}
+          <nav className="remote-role-navigation" aria-labelledby="desktop-role-navigation-title">
+            <div className="remote-role-navigation-heading">
+              <div>
+                <span className="remote-role-navigation-kicker">分类导航</span>
+                <strong id="desktop-role-navigation-title">选择桌面角色</strong>
+              </div>
+              <span>本机可以共享桌面或连接远程桌面</span>
+            </div>
+            <TabsList className="remote-role-tabs-list" aria-label="远程桌面角色">
+              <TabsTrigger className="remote-role-tab" value="server">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Server size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">服务端</span>
+                  <span className="remote-role-tab-direction">接受连接</span>
+                </span>
+                <span className="tabs-trigger-detail">让别人连接本机：检测系统桌面服务、配置实际端口并控制隧道开放</span>
+              </TabsTrigger>
+              <TabsTrigger className="remote-role-tab" value="client">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Laptop size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">客户端</span>
+                  <span className="remote-role-tab-direction">发起连接</span>
+                </span>
+                <span className="tabs-trigger-detail">从本机连接其他设备：保存常用连接、按需建立临时转发并打开系统客户端</span>
+              </TabsTrigger>
+            </TabsList>
+          </nav>
 
           <TabsContent forceMount value="server">
             <div className="grid gap-4">
