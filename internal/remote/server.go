@@ -25,6 +25,10 @@ import (
 // 配置 key-file 时改用该路径（可指向 tailcat genkey 生成的密钥，使两边 token 一致）。
 const serverKeyRelPath = "remote/server.private.json"
 
+// autoRegionDiscoveryTimeout 限制自动 DERP 地图获取与就近区域探测时间。
+// 该流程位于服务启动和 remote 配置事务的同步路径，必须有上界。
+const autoRegionDiscoveryTimeout = 15 * time.Second
+
 // serverKeyPath 返回服务端密钥的实际路径：配置 key-file 时展开 ~/ 后使用，
 // 否则用内置托管路径 <stateDir>/remote/server.private.json。
 func (m *Manager) serverKeyPath(cfg config.RemoteConfig) string {
@@ -56,7 +60,9 @@ func (m *Manager) autoRegionLocked(cfg config.RemoteConfig) (*tailcfg.DERPRegion
 	if cfg.DERPMapURL != "" {
 		opts = append(opts, tailcat.DERPMapURL(cfg.DERPMapURL))
 	}
-	if err := ci.Expand(context.Background(), opts...); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), autoRegionDiscoveryTimeout)
+	defer cancel()
+	if err := ci.Expand(ctx, opts...); err != nil {
 		return nil, fmt.Errorf("探测 DERP 区域失败: %w", err)
 	}
 	m.autoRegion = ci.Region[0]
@@ -130,15 +136,16 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 		servePorts[uint16(p)] = true
 		s.ServedTCPPorts = append(s.ServedTCPPorts, filter.PortRange{First: uint16(p), Last: uint16(p)})
 	}
-	// 内嵌免密 SSH：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证，
-	// 与 tailcat serve 的 no-auth-ssh 同模型），覆盖对 127.0.0.1:22 的转发，
-	// 无需系统 sshd。host key 由 tailcat 库生成于用户配置目录 tailcat/ssh 下。
+	// 内嵌免密 SSH：隧道 22 端口由本模块的可取消 shell handler 直接处理
+	// （隧道即认证），覆盖对 127.0.0.1:22 的转发，无需系统 sshd。
+	// 不再使用 tailcat 内置 handler：上游实现在客户端异常断开时不终止
+	// shell，会残留 PTY、子进程和处理协程。host key 持久化在 state-dir/remote。
 	var sshHandler func(net.Conn)
 	if cfg.BuiltinSSH {
-		if !tailcat.SupportsSSHServer() {
-			return fmt.Errorf("当前平台不支持内嵌 SSH 服务")
+		sshHandler, err = localShellSSHHandler(m.stateDir)
+		if err != nil {
+			return err
 		}
-		sshHandler = s.SSHConnHandler(tailcat.SSHOptions{Shell: true})
 		if !servePorts[22] {
 			s.ServedTCPPorts = append(s.ServedTCPPorts, filter.PortRange{First: 22, Last: 22})
 		}
@@ -204,7 +211,16 @@ func allowKeys(entries []config.RemoteAllowEntry) []string {
 	return keys
 }
 
-// relay 双向拷贝两个连接，任一端结束后两边都关闭。
+// relay 双向拷贝两个连接，任一端结束后关闭两边，并等待另一个拷贝协程退出。
+//
+// 参数说明：
+//   - a: net.Conn，双向转发的一端。
+//   - b: net.Conn，双向转发的另一端。
+//
+// 返回值说明：无；两个 io.Copy 均退出后返回。
+//
+// 错误情况：转发错误不向上返回；关闭两端会解除另一个方向的阻塞，
+// 等待第二个完成信号可保证函数返回时不残留持有连接的拷贝协程。
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(a, b); done <- struct{}{} }()
@@ -212,6 +228,7 @@ func relay(a, b net.Conn) {
 	<-done
 	_ = a.Close()
 	_ = b.Close()
+	<-done
 }
 
 // ValidateKeyFile 校验自定义服务端密钥文件：已存在时必须能解析为 tailcat 密钥

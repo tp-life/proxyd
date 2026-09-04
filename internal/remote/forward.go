@@ -30,9 +30,9 @@ type forwardRunner struct {
 	ln     net.Listener
 	client *tailcat.Client
 	done   chan struct{}
-	active atomic.Int64
 	ctx    context.Context
 	cancel context.CancelFunc
+	active atomic.Int64
 
 	stopOnce sync.Once
 	connMu   sync.Mutex
@@ -43,22 +43,25 @@ type forwardRunner struct {
 	lastErr string
 }
 
-// newForwardRunner 构造一条具有独立生命周期的转发 runner。
+// newForwardRunner 构造一条尚未监听、具有独立生命周期的本地转发。
 //
 // 参数说明：
-//   - name: string，转发名称，用于日志和错误定位。
+//   - name: string，配置中的转发名称，用于状态与日志定位。
 //   - listen: string，本地 TCP 监听地址。
-//   - token: tailcat.ConnBlob，远端 tailcat 连接凭据。
-//   - port: uint16，隧道远端的目标端口。
-//   - logf: func，记录运行错误的日志函数。
-//   - clientKey: key.NodePrivate，用于对端白名单验证的客户端身份。
-//   - dial: func，可选的测试拨号器；nil 表示启动时创建真实 tailcat 客户端。
+//   - token: tailcat.ConnBlob，远端身份与 DERP 信息。
+//   - port: uint16，远端目标端口。
+//   - logf: func(string, ...any)，日志回调；nil 时使用静默回调。
+//   - clientKey: key.NodePrivate，本机客户端身份；零值使用临时身份。
+//   - dial: func(context.Context) (net.Conn, error)，测试注入拨号器；nil 使用 tailcat。
 //
-// 返回值说明：*forwardRunner，尚未启动监听的转发器。
+// 返回值说明：*forwardRunner，调用方还需调用 start。
 //
-// 错误情况：本函数不执行 I/O，不返回错误；监听错误由 start 返回。
+// 错误情况：构造阶段不执行 I/O，不返回错误；监听或拨号错误由 start/handle 处理。
 func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, logf func(string, ...any), clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
 	ctx, cancel := context.WithCancel(context.Background())
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	return &forwardRunner{
 		name:      name,
 		listen:    listen,
@@ -83,6 +86,7 @@ func (r *forwardRunner) specEqual(listen string, token tailcat.ConnBlob, port ui
 func (r *forwardRunner) start() error {
 	ln, err := net.Listen("tcp", r.listen)
 	if err != nil {
+		r.cancel()
 		return fmt.Errorf("监听 %s 失败: %w", r.listen, err)
 	}
 	r.ln = ln
@@ -116,8 +120,8 @@ func (r *forwardRunner) acceptLoop() {
 			r.setLastError(err.Error())
 			return
 		}
-		// Accept 与 stop 可能同时发生。先登记连接，使 stop 能够及时
-		// 关闭已接受但尚未进入 handle 的套接字，避免此竞态窗口泄漏连接。
+		// Accept 与 stop 可能同时完成。只有成功登记的连接才允许启动
+		// handler；停止标记已设置时立即关闭，避免 stop 快照之后漏入连接。
 		if !r.trackConnection(conn) {
 			_ = conn.Close()
 			return
@@ -127,7 +131,15 @@ func (r *forwardRunner) acceptLoop() {
 	}
 }
 
-// handle 处理一条本地连接：拨远端隧道端口并双向拷贝。
+// handle 处理一条已登记的本地连接：拨远端隧道端口并双向拷贝。
+//
+// 参数说明：
+//   - local: net.Conn，acceptLoop 已加入活动连接集合的本地连接。
+//
+// 返回值说明：无；连接结束后减少 active 并移除两端连接。
+//
+// 错误情况：拨号错误在正常运行期间写入状态；stop 引发的 context.Canceled
+// 是预期生命周期事件，不污染 lastErr，也不输出误导日志。
 func (r *forwardRunner) handle(local net.Conn) {
 	defer r.active.Add(-1)
 	defer r.releaseConnection(local)
@@ -136,10 +148,7 @@ func (r *forwardRunner) handle(local net.Conn) {
 	// 超时；真实 tailcat dialer 和测试 dialer 都应响应 context 取消。
 	upstream, err := r.dial(r.ctx)
 	if err != nil {
-		select {
-		case <-r.done:
-			// 主动停止导致的 context 取消属于正常生命周期，不污染运行错误。
-		default:
+		if r.ctx.Err() == nil {
 			r.setLastError(err.Error())
 			r.logf("[remote] 转发 %s 拨号失败: %v", r.name, err)
 		}

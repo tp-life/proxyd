@@ -10,6 +10,20 @@ const plistLabel = "com.proxyd"
 
 // 平台自启项内容的纯渲染函数：与写文件/注册动作分离，供各平台实现与单元测试共用。
 
+// plistEscape 编码 plist XML 文本中的保留字符。
+//
+// 参数说明：
+//   - s: string，待嵌入 plist 的原始文本。
+//
+// 返回值说明：string，&、<、> 已替换为实体引用的文本。
+//
+// 错误情况：无；plist 是 XML 文本而不是 shell 命令，仍必须编码保留字符，
+// 否则用户名或路径中的这些字符会让 launchd 拒绝整个服务定义。
+func plistEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+	return r.Replace(s)
+}
+
 // RenderPlist 生成 macOS 系统级 LaunchDaemon plist 内容。
 //
 // 参数说明：
@@ -23,12 +37,7 @@ const plistLabel = "com.proxyd"
 //
 // 错误情况：无；所有外部文本都会执行 XML 转义，文件写入与 launchctl 错误由调用方处理。
 func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
-	// plist 是 XML 文本而不是 shell 命令；仍必须编码保留字符，否则用户名或路径中的
-	// &、<、> 会让 launchd 拒绝整个服务定义。
-	esc := func(s string) string {
-		r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-		return r.Replace(s)
-	}
+	esc := plistEscape
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

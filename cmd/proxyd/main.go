@@ -225,8 +225,9 @@ examples:
 //     位置参数中的新订阅地址按 URL 去重后合并进去；
 //  2. 否则用位置参数的订阅地址走快捷配置（默认端口区间/规则/周期）。
 //
-// persist 为 true 时（serve）把合并结果写回配置文件，实现"给一次地址以后直接用"。
-// 返回配置与配置文件路径。
+// persist 为 true 时（serve/start）把合并结果写回配置文件，实现"给一次地址以后直接用"，
+// 并使用首次启动加载模式，让外层在监听网络前有机会补录 api-secret。
+// 返回配置与配置文件路径；文件、解析、完整校验或保存失败时返回错误。
 func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 	fs := flag.NewFlagSet("proxyd", flag.ExitOnError)
 	cfgFile := fs.String("c", config.DefaultPath(), "配置文件路径")
@@ -253,7 +254,13 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 		return cfg, *cfgFile, nil
 	}
 
-	cfg, err := config.Load(*cfgFile)
+	var cfg *config.Config
+	var err error
+	if persist {
+		cfg, err = config.LoadForAPISecretBootstrap(*cfgFile)
+	} else {
+		cfg, err = config.Load(*cfgFile)
+	}
 	if err != nil {
 		return nil, "", err
 	}
@@ -281,8 +288,14 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 			log.Printf("[proxyd] 保存配置失败（不影响本次运行）: %v", err)
 		}
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, "", err
+	var validateErr error
+	if persist {
+		validateErr = cfg.ValidateForAPISecretBootstrap()
+	} else {
+		validateErr = cfg.Validate()
+	}
+	if validateErr != nil {
+		return nil, "", validateErr
 	}
 	return cfg, *cfgFile, nil
 }
@@ -369,19 +382,24 @@ func cmdServe(args []string) error {
 		apiSrv.Shutdown(shutdownCtx)
 	}()
 
-	// 配置开启系统代理时启动即应用，退出时恢复关闭
+	// 配置开启系统代理时启动即应用。退出清理必须无条件注册，并在执行时读取
+	// App 当前快照：服务可能启动时关闭、随后由 Web/CLI 热开启；若只在启动配置
+	// 为 true 时登记 defer，正常 stop 后操作系统仍会指向已经退出的代理端口。
 	if cfg.SystemProxy {
 		if err := sysproxy.On("127.0.0.1", cfg.MixedPort); err != nil {
 			log.Printf("[sysproxy] 应用系统代理失败: %v", err)
 		} else {
 			log.Printf("[sysproxy] 系统代理已指向 127.0.0.1:%d（退出时自动关闭）", cfg.MixedPort)
-			defer func() {
-				if err := sysproxy.Off(); err != nil {
-					log.Printf("[sysproxy] 关闭系统代理失败（可手动 proxyd sysproxy off）: %v", err)
-				}
-			}()
 		}
 	}
+	defer func() {
+		if !a.Config().SystemProxy {
+			return
+		}
+		if err := sysproxy.Off(); err != nil {
+			log.Printf("[sysproxy] 关闭系统代理失败（可手动 proxyd sysproxy off）: %v", err)
+		}
+	}()
 	return a.Run(ctx)
 }
 

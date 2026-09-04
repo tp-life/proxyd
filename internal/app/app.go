@@ -113,6 +113,14 @@ type App struct {
 	// 固定按 desktopMutationMu → remoteMutationMu 的顺序取锁，避免并发更新覆盖或死锁。
 	desktop           *desktop.Manager
 	desktopMutationMu sync.Mutex
+
+	// systemProxyMu 串行化系统代理开关与主端口重绑的完整事务。
+	// 单独的 a.mu 只能保护内存字段，无法覆盖 OS 代理变更、mihomo
+	// 热更新与磁盘持久化三个阶段，因此需要独立的用例级互斥锁。
+	systemProxyMu sync.Mutex
+	// systemProxy 是应用层调用操作系统代理的端口；生产环境使用
+	// platformSystemProxy，测试可注入确定性失败以验证回滚语义。
+	systemProxy systemProxyController
 }
 
 // New 创建 App，并在配置已开启 TUN 时提前校验当前进程权限。
@@ -144,12 +152,13 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		}
 	}
 	a := &App{
-		cfg:       cfg,
-		cfgPath:   cfgPath,
-		runner:    core.NewRunner(cfg.StateDir),
-		imported:  map[string][]string{},
-		ruleStats: map[string]RuleURLStat{},
-		subInfos:  map[string]subscribe.UserInfo{},
+		cfg:         cfg,
+		cfgPath:     cfgPath,
+		runner:      core.NewRunner(cfg.StateDir),
+		imported:    map[string][]string{},
+		ruleStats:   map[string]RuleURLStat{},
+		subInfos:    map[string]subscribe.UserInfo{},
+		systemProxy: platformSystemProxy{},
 	}
 	if cfg.Exclude != "" {
 		re, err := regexp.Compile(cfg.Exclude)
@@ -368,8 +377,20 @@ func normalizeBuildVersion(raw string) string {
 	return semver.Canonical(candidate)
 }
 
-// Config 返回只读用的运行配置。
-func (a *App) Config() *config.Config { return a.cfg }
+// Config 返回当前运行配置的并发安全深快照。
+//
+// 参数说明：无。
+//
+// 返回值说明：*config.Config，与 App 内部配置不共享可变切片、指针或 map；
+// 调用方可跨越 a.mu 锁的生命周期执行 JSON 编码和列表遍历。
+//
+// 错误情况：无；App.New 保证内部 cfg 非 nil。返回快照而不是裸指针，
+// 避免 API 读取与并发配置事务互相竞争或调用方意外改写运行态。
+func (a *App) Config() *config.Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Clone()
+}
 
 // SetAutostart 注册/移除开机自启项（OS 级状态，不写入配置文件）。macOS 使用
 // system LaunchDaemon，并以当前用户身份运行实际服务，因此无需登录即可启动。
@@ -450,10 +471,17 @@ func (a *App) persistLocked() error {
 // 错误情况：版本检查失败只写状态和日志，不影响启动；普通首次订阅刷新失败会保留快照，
 // 只有 TUN 实际未启用可能造成流量绕过时才停止服务。
 func (a *App) Run(ctx context.Context) error {
-	go a.startVersionCheck(ctx)
+	// Run 是 App 运行期资源的所有者。无论是收到退出信号，
+	// 还是首次 TUN 应用失败提前返回，都必须取消后台任务并关闭
+	// remote/mihomo，避免嵌入式调用方在 Run 返回后仍留有端口和协程。
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer a.Shutdown()
+
+	go a.startVersionCheck(runCtx)
 	a.restoreSnapshot()
 	a.startRemote()
-	if err := a.Refresh(ctx, true); err != nil {
+	if err := a.Refresh(runCtx, true); err != nil {
 		// TUN 配置要求全局接管系统路由；如果首次应用后 listener 仍未生效，继续以
 		// “看似开启、实际关闭”的状态运行会造成流量泄漏，因此把启动失败上抛给 CLI。
 		if a.cfg.TUN.Enable && !a.runner.TUNEnabled() {
@@ -477,17 +505,14 @@ func (a *App) Run(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			a.stopDesktop()
-			a.stopRemote()
-			a.runner.Shutdown()
+		case <-runCtx.Done():
 			return nil
 		case <-refreshTick.C:
-			if err := a.Refresh(ctx, true); err != nil {
+			if err := a.Refresh(runCtx, true); err != nil {
 				log.Printf("[refresh] %v", err)
 			}
 		case <-healthTick.C:
-			if err := a.Refresh(ctx, false); err != nil {
+			if err := a.Refresh(runCtx, false); err != nil {
 				log.Printf("[health] %v", err)
 			}
 		case now := <-remoteAllowCleanupTick.C:

@@ -157,6 +157,9 @@ func TestRemoteAPI(t *testing.T) {
 		t.Fatalf("add forward: %d", code)
 	}
 	code, st = remoteAPIReq(t, "GET", base+"/api/remote", nil)
+	if code != http.StatusOK {
+		t.Fatalf("get remote state after adding forward: %d", code)
+	}
 	forwards, _ := st["forwards"].([]any)
 	if len(forwards) != 1 {
 		t.Fatalf("forwards: %v", st)
@@ -237,15 +240,16 @@ func TestRemoteAPIPersistsConfig(t *testing.T) {
 	}
 }
 
-// TestRemoteWebTerminalSafetyAPI 验证默认 404、builtin-ssh 引导与非回环二次确认门。
+// TestRemoteWebTerminalSafetyAPI 验证默认 404 与非回环二次确认门。
 //
 // 参数说明：
 //   - t: *testing.T，Go 测试上下文。
 //
 // 返回值说明：无；断言失败时由 testing 标记用例失败。
 //
-// 错误情况：仅启动回环 HTTP 测试服务，不建立 DERP 或真实 shell；失败表示高权限
-// Web 终端可能在未确认时暴露，或关闭状态仍泄露端点存在。
+// 错误情况：仅启动回环 HTTP 测试服务，不建立真实 shell；失败表示高权限 Web 终端
+// 可能在未确认时暴露，或关闭状态仍泄露端点存在。开启后终端不再要求服务端运行或
+// builtin-ssh：缺少 WebSocket 握手的普通 GET 应进入升级流程并以 426 拒绝。
 func TestRemoteWebTerminalSafetyAPI(t *testing.T) {
 	_, addr := newRemoteTestServer(t)
 	base := "http://" + addr
@@ -255,8 +259,8 @@ func TestRemoteWebTerminalSafetyAPI(t *testing.T) {
 	if code, status := remoteAPIReq(t, http.MethodPost, base+"/api/remote/web-terminal", map[string]bool{"enabled": true}); code != http.StatusOK || status["web_terminal"] != true {
 		t.Fatalf("回环 API 应允许直接开启 Web 终端，code=%d status=%v", code, status)
 	}
-	if code, _ := remoteAPIReq(t, http.MethodGet, base+"/api/remote/terminal", nil); code != http.StatusConflict {
-		t.Fatalf("builtin-ssh 未开启时应在升级前返回明确 409，got %d", code)
+	if code, _ := remoteAPIReq(t, http.MethodGet, base+"/api/remote/terminal", nil); code != http.StatusUpgradeRequired {
+		t.Fatalf("开启后缺少 WebSocket 握手的请求应进入升级流程（426），got %d", code)
 	}
 	if code, _ := remoteAPIReq(t, http.MethodPost, base+"/api/remote/web-terminal", map[string]bool{"enabled": false}); code != http.StatusOK {
 		t.Fatalf("关闭 Web 终端失败: %d", code)

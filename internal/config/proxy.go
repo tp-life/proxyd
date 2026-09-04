@@ -122,9 +122,9 @@ func (t *TUNConfig) ApplyDefaults() {
 // 参数：无；接收者为源 TUNConfig。
 //
 // 返回值：
-//   - TUNConfig：切片、布尔指针和 Extra map 均已复制的副本。
+//   - TUNConfig：切片、布尔指针和 Extra 嵌套容器均已复制的副本。
 //
-// 错误情况：无；Extra 中嵌套的复合值不会被当前开关逻辑修改，因此只复制第一层 map。
+// 错误情况：无；未知标量按值保留，map 与切片递归复制，确保跨锁快照安全。
 func (t TUNConfig) Clone() TUNConfig {
 	out := t
 	out.DNSHijack = append([]string(nil), t.DNSHijack...)
@@ -139,7 +139,7 @@ func (t TUNConfig) Clone() TUNConfig {
 	if t.Extra != nil {
 		out.Extra = make(map[string]any, len(t.Extra))
 		for key, value := range t.Extra {
-			out.Extra[key] = value
+			out.Extra[key] = cloneConfigValue(value)
 		}
 	}
 	return out
@@ -284,6 +284,41 @@ func (c *Config) checkGroup(g NodeGroup) error {
 	}
 	if g.Subscription != "" && !c.hasNodeSource(g.Subscription) {
 		return fmt.Errorf("分组 %q 引用的订阅 %q 不存在", g.Name, g.Subscription)
+	}
+	return nil
+}
+
+// CheckPortRange 校验节点一对一映射区间与其它本地入口的不变量。
+//
+// 参数说明：
+//   - lo: int，节点映射区间起始端口（包含）。
+//   - hi: int，节点映射区间结束端口（包含）。
+//
+// 返回值说明：error，区间合法且不覆盖任何保留入口时返回 nil。
+//
+// 错误情况：边界超出 1-65535、起点大于终点，或覆盖 mixed-port、
+// auto-port、api-listen、external-controller 或任一分组端口时返回错误。
+// 该领域校验同时供启动配置与运行时变更复用，避免两个入口的规则漂移。
+func (c *Config) CheckPortRange(lo, hi int) error {
+	if lo <= 0 || hi > 65535 || lo > hi {
+		return fmt.Errorf("节点映射区间 [%d, %d] 无效", lo, hi)
+	}
+	if c.MixedPort >= lo && c.MixedPort <= hi {
+		return fmt.Errorf("节点映射区间 [%d, %d] 与 mixed-port %d 冲突", lo, hi, c.MixedPort)
+	}
+	if c.AutoPort != 0 && c.AutoPort >= lo && c.AutoPort <= hi {
+		return fmt.Errorf("节点映射区间 [%d, %d] 与 auto-port %d 冲突", lo, hi, c.AutoPort)
+	}
+	if port := addrPort(c.APIListen); port >= lo && port <= hi {
+		return fmt.Errorf("节点映射区间 [%d, %d] 与 api-listen 端口 %d 冲突", lo, hi, port)
+	}
+	if port := addrPort(c.ExternalController); port >= lo && port <= hi {
+		return fmt.Errorf("节点映射区间 [%d, %d] 与 external-controller 端口 %d 冲突", lo, hi, port)
+	}
+	for _, group := range c.Groups {
+		if group.Port >= lo && group.Port <= hi {
+			return fmt.Errorf("节点映射区间 [%d, %d] 与分组 %q 端口 %d 冲突", lo, hi, group.Name, group.Port)
+		}
 	}
 	return nil
 }

@@ -20,7 +20,7 @@ func ParseClash(body []byte, subName string) ([]*node.Node, error) {
 		return nil, fmt.Errorf("解析 Clash 订阅失败: %w", err)
 	}
 	if doc.Proxies == nil {
-		return nil, errors.New("Clash 订阅缺少顶层 proxies 列表")
+		return nil, errors.New("clash 订阅缺少顶层 proxies 列表")
 	}
 	nodes := make([]*node.Node, 0, len(doc.Proxies))
 	for _, p := range doc.Proxies {

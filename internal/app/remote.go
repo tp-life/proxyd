@@ -102,7 +102,8 @@ func (a *App) RemoteAudit(tail int) []remote.AuditEntry {
 //
 // 返回值说明：*remote.TerminalSession 和 error；应用层不解释终端字节，只转交 API 适配层。
 //
-// 错误情况：Web 终端/builtin-ssh 未开启、服务端未运行、平台不支持或 SSH/PTY 初始化失败时返回错误。
+// 错误情况：Web 终端未开启、平台不支持或 SSH/PTY 初始化失败时返回错误。
+// 会话由 remote 模块自带的 shell 服务承载，不要求远程服务端运行或开启 builtin-ssh。
 func (a *App) OpenRemoteWebTerminal(ctx context.Context, size remote.TerminalSize) (*remote.TerminalSession, error) {
 	return a.remote.OpenWebTerminal(ctx, size)
 }

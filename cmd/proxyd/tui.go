@@ -480,6 +480,9 @@ func streamTUITrafficOnce(ctx context.Context, client *apiClient, program *tea.P
 	if err != nil {
 		return fmt.Errorf("构造实时流请求失败: %w", err)
 	}
+	// 实时流为了保留 context 取消语义直接持有请求；认证仍必须复用
+	// apiClient 的统一入口，否则配置 api-secret 后只有 TUI 流量面板持续 401。
+	client.applyManagementAuth(request)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("实时流连接失败: %w", err)

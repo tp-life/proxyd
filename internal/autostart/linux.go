@@ -45,7 +45,10 @@ func off() error {
 	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
-	_, _ = run("systemctl", "--user", "disable", "--now", unitName)
+	// 只 disable 不 --now：正在运行的实例继续跑，重启后不再拉起。
+	if _, err := run("systemctl", "--user", "disable", unitName); err != nil {
+		return err
+	}
 	_ = os.Remove(path)
 	_, err = run("systemctl", "--user", "daemon-reload")
 	return err

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, CircleAlert, Copy, Download, Link2, Plus, RefreshCw, SquareTerminal, Terminal, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, Copy, Download, Laptop, Link2, Plus, RefreshCw, Server, SquareTerminal, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonLink } from "@/components/ui/button";
 import { Table } from "@/components/ui/data-table";
@@ -155,11 +155,11 @@ export function RemotePage({
   const tempPeer = peers.find((item) => item.key === status?.temp_key);
   const forwards = status?.forwards || [];
   const initialLoading = loading && !hasLoaded && !status;
-  const terminalAvailable = Boolean(status?.web_terminal && status?.builtin_ssh && status?.running);
+  const terminalAvailable = Boolean(status?.web_terminal);
 
   useEffect(() => {
     /*
-     * 开关关闭、内嵌 SSH 停止或服务退出时，当前浏览器会话不再具备成立条件。
+     * Web Terminal 开关关闭时，当前浏览器会话不再具备成立条件。
      * 主动关闭弹层可以立刻触发 WebSocket 清理，避免留下看似可用的失效终端。
      */
     if (!terminalAvailable) setTerminalSession(null);
@@ -213,7 +213,7 @@ export function RemotePage({
             <Button
               disabled={!terminalAvailable}
               size="sm"
-              title={terminalAvailable ? `打开 Web Terminal 并执行 ${buildSSHCommand(row.name)}` : "需先在「服务端」页签开启 Web Terminal 与内嵌免密 SSH，并确保服务运行中"}
+              title={terminalAvailable ? `打开 Web Terminal 并执行 ${buildSSHCommand(row.name)}` : "需先在「服务端」页签开启 Web Terminal"}
               variant="outline"
               type="button"
               onClick={() => setTerminalSession({ command: buildSSHCommand(row.name), target: row.name })}
@@ -536,16 +536,33 @@ export function RemotePage({
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
         <Tabs onValueChange={handleRemoteTabChange} value={remoteTab}>
-          <TabsList aria-label="远程连接分组">
-            <TabsTrigger value="server">
-              <span className="tabs-trigger-title">服务端</span>
-              <span className="tabs-trigger-detail">让别人连入本机：开启隧道服务、暴露本机端口、管理允许连入的客户端</span>
-            </TabsTrigger>
-            <TabsTrigger value="client">
-              <span className="tabs-trigger-title">客户端</span>
-              <span className="tabs-trigger-detail">从本机连到别的机器：保存对端 token、建立本地转发、复制 SSH/scp 命令</span>
-            </TabsTrigger>
-          </TabsList>
+          <nav className="remote-role-navigation" aria-labelledby="remote-role-navigation-title">
+            <div className="remote-role-navigation-heading">
+              <div>
+                <span className="remote-role-navigation-kicker">分类导航</span>
+                <strong id="remote-role-navigation-title">选择连接角色</strong>
+              </div>
+              <span>本机可以作为被连接端或主动连接端</span>
+            </div>
+            <TabsList className="remote-role-tabs-list" aria-label="远程连接角色">
+              <TabsTrigger className="remote-role-tab" value="server">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Server size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">服务端</span>
+                  <span className="remote-role-tab-direction">接受连接</span>
+                </span>
+                <span className="tabs-trigger-detail">让别人连入本机：开启隧道服务、暴露本机端口、管理允许连入的客户端</span>
+              </TabsTrigger>
+              <TabsTrigger className="remote-role-tab" value="client">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Laptop size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">客户端</span>
+                  <span className="remote-role-tab-direction">发起连接</span>
+                </span>
+                <span className="tabs-trigger-detail">从本机连到别的机器：保存对端 token、建立本地转发、复制 SSH/scp 命令</span>
+              </TabsTrigger>
+            </TabsList>
+          </nav>
 
           <TabsContent forceMount value="server">
             <section className="panel">
@@ -593,18 +610,12 @@ export function RemotePage({
                     <span>打开终端</span>
                   </Button>
                 )}
-                <span className="text-xs text-muted-foreground">默认关闭；会话以 proxyd 进程用户权限运行</span>
+                <span className="text-xs text-muted-foreground">默认关闭；会话以 proxyd 进程用户权限运行，独立于远程连接服务端</span>
               </div>
               {status?.web_terminal && status?.api_loopback === false && (
                 <p className="permission-note warn">
                   高风险：API 当前监听 {status?.api_listen || "非回环地址"}，能访问控制台的客户端可能获得本机 shell。建议仅绑定 127.0.0.1 或置于可信鉴权边界后。
                 </p>
-              )}
-              {status?.web_terminal && !status?.builtin_ssh && (
-                <p className="permission-note warn">打开终端前请先开启「内嵌免密 SSH 服务」。</p>
-              )}
-              {status?.web_terminal && status?.builtin_ssh && !status?.running && (
-                <p className="permission-note warn">打开终端前请先启动远程连接服务，并确认服务状态为运行中。</p>
               )}
               {status?.enabled && !status?.running && status?.error && (
                 <p className="permission-note warn">{status.error}</p>

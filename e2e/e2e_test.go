@@ -240,7 +240,11 @@ func TestEndToEnd(t *testing.T) {
 	for mixedPort >= lo && mixedPort <= lo+4 { // 保证主端口在映射区间外
 		mixedPort = freePort(t)
 	}
-	apiAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	apiPort := freePort(t)
+	for apiPort >= lo && apiPort <= lo+4 || apiPort == mixedPort {
+		apiPort = freePort(t)
+	}
+	apiAddr := fmt.Sprintf("127.0.0.1:%d", apiPort)
 	cfg := &config.Config{
 		Subscriptions:   []config.Subscription{{Name: "test", URL: sub.URL, Type: "clash"}},
 		Listen:          "127.0.0.1",
@@ -650,7 +654,7 @@ func TestEndToEnd(t *testing.T) {
 
 	// ---- 端口区间变更：节点端口迁移到新区间 ----
 	newLo := freePort(t)
-	for newLo >= lo && newLo <= lo+4 || newLo == cfg.MixedPort || newLo+1 == cfg.MixedPort {
+	for newLo >= lo && newLo <= lo+4 || newLo == cfg.MixedPort || newLo+1 == cfg.MixedPort || apiPort >= newLo && apiPort <= newLo+1 {
 		newLo = freePort(t)
 	}
 	resp, err = http.Post(base+"/api/port-range", "application/json",
@@ -686,6 +690,14 @@ func TestEndToEnd(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("conflict port-range accepted: status=%d", resp.StatusCode)
+	}
+	// 管理 API 不能落入节点映射区间。否则 mihomo listener 会绑定失败，
+	// 节点代理请求则可能被已监听的 Web API 接收并返回控制台 HTML。
+	resp, _ = http.Post(base+"/api/port-range", "application/json",
+		strings.NewReader(fmt.Sprintf(`{"range":"%d-%d"}`, apiPort, apiPort)))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("api-listen conflict port-range accepted: status=%d", resp.StatusCode)
 	}
 
 	// ---- 节点列表：全量节点带类型/失败原因/未分配状态 ----

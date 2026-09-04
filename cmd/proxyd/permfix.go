@@ -215,7 +215,16 @@ func unwritableEntries(dir string) ([]string, error) {
 // loadConfigOrRepair 包装 loadConfig：配置读取因权限不足失败时，先尝试交互修复
 // 属主再重试一次；修复未执行（非终端/用户取消）时返回原始错误，保留完整上下文。
 // persist 模式下还会探测配置文件可写性——可读但不可写时后续持久化只会静默失败，
-// 因此同样提前修复。
+// 因此同样提前修复；权限确认后执行 api-secret 首次交互引导并原子保存。
+//
+// 参数说明：
+//   - args: []string，serve/start 的配置与订阅参数。
+//   - persist: bool，是否允许配置合并、权限修复和首次口令保存。
+//
+// 返回值说明：*config.Config、配置路径和 error；成功配置可直接交给启动用例。
+//
+// 错误情况：配置读取、权限修复、可写性探测或 api-secret 引导失败时返回错误；
+// 无交互终端的非回环配置会被拒绝，避免后台进程启动后才发现管理面无法安全监听。
 func loadConfigOrRepair(args []string, persist bool) (*config.Config, string, error) {
 	cfg, cfgPath, err := loadConfig(args, persist)
 	if err != nil {
@@ -225,13 +234,21 @@ func loadConfigOrRepair(args []string, persist bool) (*config.Config, string, er
 		if rerr := offerConfigRepair(args); rerr != nil {
 			return nil, "", err
 		}
-		return loadConfig(args, persist)
+		cfg, cfgPath, err = loadConfig(args, persist)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	if persist && cfgPath != "" {
 		if perr := probeWritable(cfgPath); perr != nil && isPermission(perr) {
 			if rerr := offerConfigRepair(args); rerr != nil {
 				return nil, "", rerr
 			}
+		}
+	}
+	if persist {
+		if err := ensureAPISecret(cfg, cfgPath); err != nil {
+			return nil, "", err
 		}
 	}
 	return cfg, cfgPath, nil

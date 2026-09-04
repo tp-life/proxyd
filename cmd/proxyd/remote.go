@@ -861,9 +861,6 @@ func cmdRemoteWebTerminal(c *apiClient, args []string) error {
 	}
 	if enabled {
 		fmt.Printf("Web 终端已开启（api-listen %s）；该能力等价于当前用户 shell，仅在需要时开启\n", updated.APIListen)
-		if !updated.BuiltinSSH {
-			fmt.Println("提示：还需执行 proxyd remote builtin-ssh on，浏览器终端才能建立会话")
-		}
 		return nil
 	}
 	fmt.Println("Web 终端已关闭；新 WebSocket 会话将返回 404")

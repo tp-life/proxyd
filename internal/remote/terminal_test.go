@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/tailscale/tailcat"
 )
 
 // TestNormalizeTerminalSize 验证默认尺寸和恶意极值都会收敛到 PTY 安全范围。
@@ -34,30 +32,35 @@ func TestNormalizeTerminalSize(t *testing.T) {
 	}
 }
 
-// TestOpenWebTerminalGates 验证会话创建严格依次检查总开关、builtin-ssh 与运行中服务端。
+// TestOpenWebTerminalGates 验证会话创建只由 Web Terminal 总开关控制，
+// 不再要求远程服务端运行或开启 builtin-ssh。
 //
 // 参数说明：
 //   - t: *testing.T，Go 测试上下文。
 //
 // 返回值说明：无。
 //
-// 错误情况：任一前置条件未阻止创建时测试失败；测试不会越过服务端运行门，因此不生成 shell。
+// 错误情况：关闭状态未阻止创建、或开启后仍因服务端/内嵌 SSH 门槛失败时测试失败；
+// 平台不支持进程内 shell 服务时跳过。
 func TestOpenWebTerminalGates(t *testing.T) {
 	manager := NewManager(t.TempDir(), nil)
 	if _, err := manager.OpenWebTerminal(t.Context(), TerminalSize{}); !errors.Is(err, ErrWebTerminalDisabled) {
 		t.Fatalf("默认关闭应返回 ErrWebTerminalDisabled，got %v", err)
 	}
+	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
+		t.Skip("当前平台不支持进程内 shell 服务")
+	}
 	manager.cfg.WebTerminal = true
-	if _, err := manager.OpenWebTerminal(t.Context(), TerminalSize{}); !errors.Is(err, ErrBuiltinSSHRequired) {
-		t.Fatalf("未开启 builtin-ssh 应返回 ErrBuiltinSSHRequired，got %v", err)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	session, err := manager.OpenWebTerminal(ctx, TerminalSize{})
+	if err != nil {
+		t.Fatalf("开启后不应再要求服务端运行或 builtin-ssh: %v", err)
 	}
-	manager.cfg.BuiltinSSH = true
-	if _, err := manager.OpenWebTerminal(t.Context(), TerminalSize{}); !errors.Is(err, ErrRemoteServerNotRunning) {
-		t.Fatalf("服务端未运行应返回 ErrRemoteServerNotRunning，got %v", err)
-	}
+	_ = session.Close()
 }
 
-// TestOpenWebTerminalPTY 验证 Web Terminal 会真正进入 tailcat builtin-ssh 的 PTY shell，
+// TestOpenWebTerminalPTY 验证 Web Terminal 会真正进入进程内 SSH 服务的 PTY shell，
 // 并把 TERM 与浏览器窗口尺寸传到子进程。
 //
 // 参数说明：
@@ -65,20 +68,14 @@ func TestOpenWebTerminalGates(t *testing.T) {
 //
 // 返回值说明：无。
 //
-// 错误情况：平台不支持内嵌 SSH 时跳过；SSH 握手、PTY、输入输出、TERM 或窗口缩放任一
-// 环节失败时测试失败。超时会由 context 主动关闭会话，避免遗留登录 shell。
+// 错误情况：平台不支持进程内 shell 服务时跳过；SSH 握手、PTY、输入输出、TERM 或窗口
+// 缩放任一环节失败时测试失败。超时会由 context 主动关闭会话，避免遗留登录 shell。
 func TestOpenWebTerminalPTY(t *testing.T) {
-	if !tailcat.SupportsSSHServer() {
-		t.Skip("当前平台未编译 tailcat SSH 服务")
+	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
+		t.Skip("当前平台不支持进程内 shell 服务")
 	}
-
-	// tailcat 首次握手会在用户配置目录生成 SSH host key。测试改用临时 HOME，既验证
-	// 首次生成路径，又不读取或修改开发机上的真实 host key。
-	t.Setenv("HOME", t.TempDir())
 	manager := NewManager(t.TempDir(), nil)
 	manager.cfg.WebTerminal = true
-	manager.cfg.BuiltinSSH = true
-	manager.srv = &tailcat.Server{}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()

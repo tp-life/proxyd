@@ -312,6 +312,7 @@ dns:
   nameserver:
     - quic://dns.example.com:853?token=quic-secret
 secret: controller-secret
+api-secret: management-secret
 port-range: [42000, 42010]
 rules:
   - MATCH,PROXY
@@ -325,7 +326,7 @@ rules:
 		t.Fatalf("ExportYAML(masked): %v", err)
 	}
 	maskedText := string(masked)
-	for _, leaked := range []string{"alice", "password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret"} {
+	for _, leaked := range []string{"alice", "password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret", "management-secret"} {
 		if strings.Contains(maskedText, leaked) {
 			t.Errorf("打码导出泄露 %q:\n%s", leaked, maskedText)
 		}
@@ -339,10 +340,132 @@ rules:
 		t.Fatalf("ExportYAML(backup): %v", err)
 	}
 	backupText := string(backup)
-	for _, original := range []string{"alice:password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret"} {
+	for _, original := range []string{"alice:password", "path-secret", "sub-secret", "region=hk", "encoded-node-secret", "rules-secret", "provider-secret", "bearer-secret", "quic-secret", "controller-secret", "management-secret"} {
 		if !strings.Contains(backupText, original) {
 			t.Errorf("完整备份缺少 %q:\n%s", original, backupText)
 		}
+	}
+}
+
+// TestValidateRequiresAPISecretForNonLoopback 验证管理面绑定到非回环地址时，
+// 配置必须显式提供 api-secret，回环默认仍保持无口令的本机兼容性。
+//
+// 参数说明：
+//   - t: *testing.T，负责组装最小合法配置并断言校验结果。
+//
+// 返回值说明：无。
+//
+// 错误情况：非回环无口令被放行，或增加口令后仍被拒绝时测试失败。
+func TestValidateRequiresAPISecretForNonLoopback(t *testing.T) {
+	cfg := &Config{
+		Subscriptions: []Subscription{{Name: "a", URL: "https://example.com/sub"}},
+		Listen:        "127.0.0.1",
+		PortRange:     [2]int{42000, 42010},
+		MixedPort:     41999,
+		Mode:          "rule",
+		Rules:         []string{"MATCH,PROXY"},
+		APIListen:     "0.0.0.0:19091",
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "api-secret") {
+		t.Fatalf("非回环无口令配置应失败，got %v", err)
+	}
+	cfg.APISecret = "management-secret"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("非回环配置 api-secret 后应通过，got %v", err)
+	}
+}
+
+// TestLoadForAPISecretBootstrapOnlyRelaxesMissingSecret 验证首次启动加载入口只暂时
+// 放行缺少管理口令，不会绕过其它结构校验，普通 Load 仍保持严格安全边界。
+//
+// 参数说明：
+//   - t: *testing.T，负责创建临时配置并报告断言失败。
+//
+// 返回值说明：无。
+//
+// 错误情况：严格加载错误放行、引导加载仍拒绝缺失口令，或引导加载错误放行非法端口时测试失败。
+func TestLoadForAPISecretBootstrapOnlyRelaxesMissingSecret(t *testing.T) {
+	path := writeTemp(t, validYAML+"\napi-listen: 0.0.0.0:19091\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "api-secret") {
+		t.Fatalf("普通 Load 应拒绝非回环无口令配置，got %v", err)
+	}
+	cfg, err := LoadForAPISecretBootstrap(path)
+	if err != nil {
+		t.Fatalf("首次启动加载应暂时允许缺少口令: %v", err)
+	}
+	if cfg.APIListen != "0.0.0.0:19091" || cfg.APISecret != "" {
+		t.Fatalf("首次启动加载改变了管理配置: listen=%q secret=%q", cfg.APIListen, cfg.APISecret)
+	}
+
+	invalidPath := writeTemp(t, validYAML+"\napi-listen: 0.0.0.0:19091\nmixed-port: 42000\n")
+	if _, err := LoadForAPISecretBootstrap(invalidPath); err == nil || !strings.Contains(err.Error(), "mixed-port") {
+		t.Fatalf("首次启动加载不应放宽端口校验，got %v", err)
+	}
+}
+
+// TestConfigCloneDoesNotShareMutableState 验证应用层跨锁返回的配置快照不会与
+// 运行配置共享切片、布尔指针或透传字段中的嵌套容器。
+//
+// 参数说明：
+//   - t: *testing.T，负责构造包含所有可变形态的配置并检查隔离性。
+//
+// 返回值说明：无。
+//
+// 错误情况：修改快照后任一原字段发生变化，或 nil 接收者没有返回 nil 时测试失败。
+func TestConfigCloneDoesNotShareMutableState(t *testing.T) {
+	subscriptionEnabled := true
+	subscriptionMapping := true
+	portMapping := true
+	checkUpdates := true
+	forwardEnabled := true
+	source := &Config{
+		Subscriptions: []Subscription{{
+			Name:        "source",
+			Enabled:     &subscriptionEnabled,
+			PortMapping: &subscriptionMapping,
+		}},
+		ManualNodes:  []string{"node"},
+		PortMapping:  &portMapping,
+		Rules:        []string{"MATCH,PROXY"},
+		CustomRules:  []string{"DOMAIN,example.com,DIRECT"},
+		RuleURLs:     []RuleURL{{Name: "rules", URL: "https://example.com"}},
+		Groups:       []NodeGroup{{Name: "group", Nodes: []string{"node"}}},
+		CheckUpdates: &checkUpdates,
+		DNS: map[string]any{
+			"nameserver": []any{map[string]any{"address": "1.1.1.1"}},
+		},
+		TUN: TUNConfig{Extra: map[string]any{
+			"route-exclude-address": []any{"10.0.0.0/8"},
+		}},
+		Remote: RemoteConfig{Forwards: []RemoteForward{{Name: "forward", Enabled: &forwardEnabled}}},
+	}
+
+	clone := source.Clone()
+	*clone.Subscriptions[0].Enabled = false
+	*clone.Subscriptions[0].PortMapping = false
+	clone.ManualNodes[0] = "changed"
+	*clone.PortMapping = false
+	clone.Rules[0] = "MATCH,DIRECT"
+	clone.CustomRules[0] = "DOMAIN,changed.example,DIRECT"
+	clone.RuleURLs[0].Name = "changed"
+	clone.Groups[0].Nodes[0] = "changed"
+	*clone.CheckUpdates = false
+	clone.DNS["nameserver"].([]any)[0].(map[string]any)["address"] = "8.8.8.8"
+	clone.TUN.Extra["route-exclude-address"].([]any)[0] = "192.168.0.0/16"
+	*clone.Remote.Forwards[0].Enabled = false
+
+	if !*source.Subscriptions[0].Enabled || !*source.Subscriptions[0].PortMapping ||
+		source.ManualNodes[0] != "node" || !*source.PortMapping ||
+		source.Rules[0] != "MATCH,PROXY" || source.CustomRules[0] != "DOMAIN,example.com,DIRECT" ||
+		source.RuleURLs[0].Name != "rules" || source.Groups[0].Nodes[0] != "node" ||
+		!*source.CheckUpdates || source.DNS["nameserver"].([]any)[0].(map[string]any)["address"] != "1.1.1.1" ||
+		source.TUN.Extra["route-exclude-address"].([]any)[0] != "10.0.0.0/8" ||
+		!*source.Remote.Forwards[0].Enabled {
+		t.Fatalf("修改快照污染了原配置: %+v", source)
+	}
+	var absent *Config
+	if absent.Clone() != nil {
+		t.Fatal("nil Config.Clone 应返回 nil")
 	}
 }
 
@@ -554,6 +677,48 @@ func TestCheckMixedPort(t *testing.T) {
 		if err := cfg.CheckMixedPort(port); err == nil {
 			t.Errorf("CheckMixedPort(%s=%d): expected error", name, port)
 		}
+	}
+}
+
+// TestCheckPortRangeRejectsReservedPorts 验证节点映射区间不能覆盖任何已有入口。
+//
+// 参数说明：
+//   - t: *testing.T，Go 单元测试上下文。
+//
+// 返回值说明：无；合法新区间通过且全部保留端口冲突被拒绝时测试成功。
+//
+// 错误情况：区间边界非法，或覆盖 mixed-port、auto-port、api-listen、
+// external-controller 及节点分组端口却未返回错误时测试失败。
+func TestCheckPortRangeRejectsReservedPorts(t *testing.T) {
+	cfg := &Config{
+		PortRange:          [2]int{42000, 42100},
+		MixedPort:          41999,
+		AutoPort:           41998,
+		APIListen:          "127.0.0.1:19091",
+		ExternalController: "127.0.0.1:19090",
+		Groups:             []NodeGroup{{Name: "hk", Port: 43000}},
+	}
+	if err := cfg.CheckPortRange(44000, 44010); err != nil {
+		t.Fatalf("合法节点映射区间被拒绝: %v", err)
+	}
+	cases := []struct {
+		name string
+		lo   int
+		hi   int
+	}{
+		{name: "边界非法", lo: 0, hi: 10},
+		{name: "主端口", lo: 41999, hi: 42005},
+		{name: "自动选优端口", lo: 41995, hi: 41998},
+		{name: "管理 API", lo: 19091, hi: 19092},
+		{name: "mihomo 控制器", lo: 19089, hi: 19090},
+		{name: "节点分组", lo: 42999, hi: 43001},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if err := cfg.CheckPortRange(testCase.lo, testCase.hi); err == nil {
+				t.Fatalf("CheckPortRange(%d, %d) 未拒绝保留端口冲突", testCase.lo, testCase.hi)
+			}
+		})
 	}
 }
 

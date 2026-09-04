@@ -15,6 +15,11 @@ import (
 	"strings"
 )
 
+// maxConnectionsResponseBytes 限制单次连接快照占用的内存。
+// 正常连接列表远小于该值；读取时会额外保留一个字节，用于区分“刚好到达上限”
+// 和“已被 LimitReader 静默截断”，避免把残缺 JSON 作为 200 响应发送给客户端。
+const maxConnectionsResponseBytes = 32 << 20
+
 // registerControllerRoutes 注册 mihomo external-controller 的受控代理路由。
 func (s *Server) registerControllerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/traffic", s.handleTraffic)
@@ -90,9 +95,10 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 //
 // 错误情况：
 //   - external-controller 缺失或 URL 非法时返回 500，明确区分为本地配置错误。
-//   - 上游不可达或返回非 2xx 时返回稳定 502，不泄漏 secret 或上游正文。
+//   - 上游不可达、返回非 2xx、响应体中途断开、超过大小上限或 JSON 非法时返回稳定 502，
+//     不泄漏 secret、上游正文或底层网络细节。
 //   - 内存来自后台 watcher 缓存（mihomo `/memory` 是一秒一跳的常驻流，不能同步拉取），
-//     尚未采集到时省略该字段；上游 JSON 解析失败时原样透传，连接列表本身不受影响。
+//     尚未采集到时省略该字段。
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.doControllerRequest(r.Context(), http.MethodGet, "/connections", r.URL.Query())
 	if err != nil {
@@ -105,9 +111,29 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 连接数量可能很多，但仍给一个上限，避免异常上游把内存打爆。
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil && r.Context().Err() == nil {
-		log.Printf("[api] proxy controller connections response read failed: %v", err)
+	// 多读取一个字节是刻意的：io.LimitReader 达到限制时不会返回错误，
+	// 如果只读上限本身，就无法发现上游其实还有未读取的数据。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConnectionsResponseBytes+1))
+	if err != nil {
+		// /connections 是单个 JSON 文档，不同于可重连的 /traffic 流。
+		// 如果上游在传输中途断开，body 只是一段不完整 JSON；继续以
+		// 200 透传会把网络故障伪装成前端解析错误，因此必须在尚未
+		// 写出响应头时明确转换为 502。
+		if r.Context().Err() == nil {
+			log.Printf("[api] proxy controller connections response read failed: %v", err)
+		}
+		http.Error(w, "connections upstream response read failed", http.StatusBadGateway)
+		return
+	}
+	if len(body) > maxConnectionsResponseBytes {
+		http.Error(w, "connections upstream response too large", http.StatusBadGateway)
+		return
+	}
+	// 完整读取并不等于内容有效：没有 Content-Length 的上游也可能在 JSON 中间
+	// 干净地返回 EOF。先验证再写响应头，确保客户端不会收到无法解析的 200。
+	if !json.Valid(body) {
+		http.Error(w, "connections upstream response invalid", http.StatusBadGateway)
+		return
 	}
 	out := enrichConnectionsWithMemory(body, s.memoryBytes.Load())
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
@@ -206,7 +232,10 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 //   - setup 阶段错误表示 proxyd 本地 external-controller 配置无效；execute 阶段错误表示上游不可达。
 //   - 这里不判断状态码，因为不同 handler 对成功状态的接受范围可能不同。
 func (s *Server) doControllerRequest(ctx context.Context, method, endpoint string, query neturl.Values) (*http.Response, error) {
-	target, err := mihomoEndpointURL(s.app.Config().ExternalController, endpoint, query)
+	// Config 返回一次一致快照；controller 地址与 secret 必须来自同一版本，
+	// 避免未来配置导入支持热切换后组合出不匹配的地址和凭据。
+	cfg := s.app.Config()
+	target, err := mihomoEndpointURL(cfg.ExternalController, endpoint, query)
 	if err != nil {
 		return nil, fmt.Errorf("setup controller request: %w", err)
 	}
@@ -214,7 +243,7 @@ func (s *Server) doControllerRequest(ctx context.Context, method, endpoint strin
 	if err != nil {
 		return nil, fmt.Errorf("setup controller request: %w", err)
 	}
-	if secret := strings.TrimSpace(s.app.Config().Secret); secret != "" {
+	if secret := strings.TrimSpace(cfg.Secret); secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	resp, err := http.DefaultClient.Do(req)

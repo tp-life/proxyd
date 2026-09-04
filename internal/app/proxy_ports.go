@@ -9,7 +9,6 @@ import (
 
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
-	"proxyd/internal/proxy/sysproxy"
 )
 
 // Assignments 返回当前端口映射的只读快照（供 API 使用）。
@@ -88,9 +87,21 @@ func (a *App) SetMainNode(key string) error {
 	return err
 }
 
-// SetMainPort 修改主端口（mixed-port），校验冲突后持久化并热更新；
-// 系统代理当前已开启时自动重新绑定到新端口。
+// SetMainPort 以事务方式修改主端口、mihomo 运行态与系统代理指向。
+//
+// 参数说明：
+//   - port: int，新的 mixed-port，必须位于 1..65535 且不与其它入口冲突。
+//
+// 返回值说明：error，运行态、OS 代理与磁盘配置全部提交时为 nil。
+//
+// 错误情况：端口冲突、mihomo 热更新、系统代理重绑或持久化失败时返回；
+// 任一阶段失败都恢复旧端口的内存、mihomo 和 OS 状态，回滚错误不会被吞掉。
 func (a *App) SetMainPort(port int) error {
+	a.systemProxyMu.Lock()
+	defer a.systemProxyMu.Unlock()
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	if err := a.cfg.CheckMixedPort(port); err != nil {
 		a.mu.Unlock()
@@ -100,46 +111,63 @@ func (a *App) SetMainPort(port int) error {
 	a.cfg.MixedPort = port
 	sysOn := a.cfg.SystemProxy
 	a.mu.Unlock()
-	if err := a.Regenerate(); err != nil {
-		a.mu.Lock()
-		a.cfg.MixedPort = old
-		a.mu.Unlock()
-		_ = a.Regenerate()
-		return err
+	if err := a.regenerateCurrentLocked(); err != nil {
+		return a.rollbackMainPortLocked(old, sysOn, err)
 	}
 	if sysOn {
-		if err := sysproxy.On("127.0.0.1", port); err != nil {
-			log.Printf("[sysproxy] 主端口已改为 %d，但系统代理重绑失败: %v（可 proxyd sysproxy off 后重开）", port, err)
-		} else {
-			log.Printf("[sysproxy] 系统代理已跟随主端口重新指向 127.0.0.1:%d", port)
+		if err := a.applySystemProxy(true, port); err != nil {
+			return a.rollbackMainPortLocked(old, true, err)
 		}
 	}
 	a.mu.Lock()
-	err := a.persistLocked()
+	persistErr := a.persistLocked()
 	a.mu.Unlock()
-	return err
+	if persistErr != nil {
+		return a.rollbackMainPortLocked(old, sysOn, persistErr)
+	}
+	if sysOn {
+		log.Printf("[sysproxy] 系统代理已跟随主端口重新指向 127.0.0.1:%d", port)
+	}
+	return nil
+}
+
+// rollbackMainPortLocked 恢复主端口变更前的内存、mihomo 与系统代理状态。
+//
+// 参数说明：
+//   - oldPort: int，事务开始时的主端口。
+//   - systemProxyWasEnabled: bool，事务开始时系统代理是否开启。
+//   - cause: error，触发回滚的原始错误。
+//
+// 返回值说明：error，始终包含 cause；回滚失败时通过 errors.Join 合并。
+//
+// 错误情况：旧 mihomo 配置或旧 OS 代理无法恢复时不会伪装成回滚成功。
+// 调用方必须同时持有 refreshing 与 systemProxyMu，防止回滚期间插入新的端口事务。
+func (a *App) rollbackMainPortLocked(oldPort int, systemProxyWasEnabled bool, cause error) error {
+	a.mu.Lock()
+	a.cfg.MixedPort = oldPort
+	a.mu.Unlock()
+	joined := cause
+	if rollbackErr := a.regenerateCurrentLocked(); rollbackErr != nil {
+		joined = errors.Join(joined, fmt.Errorf("恢复旧主端口运行态失败: %w", rollbackErr))
+	}
+	if systemProxyWasEnabled {
+		if rollbackErr := a.applySystemProxy(true, oldPort); rollbackErr != nil {
+			joined = errors.Join(joined, fmt.Errorf("恢复旧系统代理端口失败: %w", rollbackErr))
+		}
+	}
+	return joined
 }
 
 // SetPortRange 修改节点映射端口区间并持久化，随后用当前节点
 // （沿用最近一次测速结果，不重新拉订阅/测速）重新分配端口并热更新。
 func (a *App) SetPortRange(lo, hi int) error {
-	if lo <= 0 || hi > 65535 || lo > hi {
-		return fmt.Errorf("invalid port range [%d, %d]", lo, hi)
-	}
 	a.mu.Lock()
-	if a.cfg.MixedPort >= lo && a.cfg.MixedPort <= hi {
+	// 端口冲突是配置领域不变量，运行时变更必须与启动校验共用
+	// 同一规则。特别是 API 和 mihomo 控制端口，一旦落入映射区间，
+	// 节点 listener 会绑定失败，而请求可能误入管理面。
+	if err := a.cfg.CheckPortRange(lo, hi); err != nil {
 		a.mu.Unlock()
-		return fmt.Errorf("新区间 [%d, %d] 与主端口 %d 冲突", lo, hi, a.cfg.MixedPort)
-	}
-	if a.cfg.AutoPort != 0 && a.cfg.AutoPort >= lo && a.cfg.AutoPort <= hi {
-		a.mu.Unlock()
-		return fmt.Errorf("新区间 [%d, %d] 与 auto-port %d 冲突", lo, hi, a.cfg.AutoPort)
-	}
-	for _, g := range a.cfg.Groups {
-		if g.Port >= lo && g.Port <= hi {
-			a.mu.Unlock()
-			return fmt.Errorf("新区间 [%d, %d] 与分组 %q 端口 %d 冲突", lo, hi, g.Name, g.Port)
-		}
+		return err
 	}
 	old := a.cfg.PortRange
 	a.cfg.PortRange = [2]int{lo, hi}

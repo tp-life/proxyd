@@ -1,8 +1,8 @@
 package remote
 
-// 本文件实现浏览器终端到进程内 builtin-ssh 的会话适配。
-// WebSocket、HTTP 与页面状态不进入本层；本层只负责建立一次性 loopback SSH、申请 PTY、
-// 转发字节流和同步窗口大小，从而把 tailcat/SSH 的不稳定实现细节隔离在 remote 模块内。
+// 本文件实现浏览器终端到进程内 SSH shell 服务的会话适配。
+// WebSocket、HTTP 与页面状态不进入本层；本层只负责建立一次性令牌回环 SSH、申请 PTY、
+// 转发字节流和同步窗口大小，从而把 SSH/PTY 的平台实现细节隔离在 remote 模块内。
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tailscale/tailcat"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -30,11 +29,7 @@ const (
 
 var (
 	// ErrWebTerminalDisabled 表示高权限浏览器终端入口尚未显式开启。
-	ErrWebTerminalDisabled = errors.New("Web 终端未开启")
-	// ErrBuiltinSSHRequired 表示浏览器终端依赖的进程内 SSH 服务尚未开启。
-	ErrBuiltinSSHRequired = errors.New("Web 终端需要先开启内嵌免密 SSH")
-	// ErrRemoteServerNotRunning 表示没有可供内存 loopback 复用的运行中 tailcat 服务端。
-	ErrRemoteServerNotRunning = errors.New("远程连接服务端未运行")
+	ErrWebTerminalDisabled = errors.New("web 终端未开启")
 )
 
 // TerminalSize 是浏览器与 PTY 之间传递的字符网格尺寸值对象。
@@ -104,7 +99,9 @@ func (w *terminalReadyWriter) Write(data []byte) (int, error) {
 	return w.writer.Write(data)
 }
 
-// OpenWebTerminal 经内存 loopback 连接当前运行中的 tailcat builtin-ssh，并申请交互 PTY。
+// OpenWebTerminal 经令牌回环连接进程内 Web Terminal SSH 服务，并申请交互 PTY。
+// 该服务独立于 tailcat 隧道服务端运行：只使用远程连接客户端功能（不开服务端、
+// 不开 builtin-ssh）时浏览器终端依然可用。
 //
 // 参数说明：
 //   - ctx: context.Context，浏览器请求生命周期；取消后会主动关闭 shell 与 SSH 传输。
@@ -112,30 +109,23 @@ func (w *terminalReadyWriter) Write(data []byte) (int, error) {
 //
 // 返回值说明：*TerminalSession 和 error；成功会话已完成 SSH 握手、PTY 请求与 Shell 启动。
 //
-// 错误情况：Web 终端关闭、builtin-ssh 关闭、remote 服务端未运行、当前平台不支持 SSH、
-// host key 初始化失败、握手/PTY/Shell 启动失败或请求取消时返回错误，所有半建连接都会关闭。
+// 错误情况：Web 终端关闭、当前平台不支持、host key 初始化失败、握手/PTY/Shell 启动失败
+// 或请求取消时返回错误，所有半建连接都会关闭。
 func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*TerminalSession, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	m.mu.Lock()
 	cfg := m.cfg.Clone()
-	server := m.srv
 	m.mu.Unlock()
 	if !cfg.WebTerminal {
 		return nil, ErrWebTerminalDisabled
 	}
-	if !cfg.BuiltinSSH {
-		return nil, ErrBuiltinSSHRequired
-	}
-	if server == nil {
-		return nil, ErrRemoteServerNotRunning
-	}
-	if !tailcat.SupportsSSHServer() {
-		return nil, fmt.Errorf("当前平台不支持 Web 终端依赖的内嵌 SSH")
-	}
 
-	handler := server.SSHConnHandler(tailcat.SSHOptions{Shell: true})
+	handler, err := localShellSSHHandler(m.stateDir)
+	if err != nil {
+		return nil, err
+	}
 	clientSide, err := openAuthenticatedLoopback(ctx, handler)
 	if err != nil {
 		return nil, err

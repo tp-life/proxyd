@@ -200,7 +200,7 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
     function handleSocketError() {
       if (!active) return;
       setPhase("error");
-      setMessage("终端连接失败，请检查 Web Terminal、内嵌 SSH 与远程服务状态");
+      setMessage("终端连接失败，请确认 Web Terminal 已开启");
     }
 
     /**

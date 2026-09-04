@@ -90,6 +90,102 @@ func (c *Config) ExportYAML(maskTokens bool) ([]byte, error) {
 	return yaml.Marshal(target)
 }
 
+// Clone 返回与原配置不共享可变切片、指针和透传 map 的深快照。
+//
+// 参数说明：无；接收者为需要快照的完整配置，可为 nil。
+//
+// 返回值说明：*Config，nil 接收者返回 nil；其余情况返回可独立读取或修改的副本。
+//
+// 错误情况：无；配置中的任意透传值只包含 YAML 可表达的 map、切片与标量，
+// 未知标量按值复制。该快照用于跨锁读取，必须复制嵌套容器以避免 JSON/YAML
+// 编码期间与配置事务发生数据竞争。
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Subscriptions = make([]Subscription, len(c.Subscriptions))
+	for index, subscription := range c.Subscriptions {
+		out.Subscriptions[index] = subscription
+		if subscription.Enabled != nil {
+			enabled := *subscription.Enabled
+			out.Subscriptions[index].Enabled = &enabled
+		}
+		if subscription.PortMapping != nil {
+			enabled := *subscription.PortMapping
+			out.Subscriptions[index].PortMapping = &enabled
+		}
+	}
+	out.ManualNodes = append([]string(nil), c.ManualNodes...)
+	if c.PortMapping != nil {
+		enabled := *c.PortMapping
+		out.PortMapping = &enabled
+	}
+	out.Rules = append([]string(nil), c.Rules...)
+	out.CustomRules = append([]string(nil), c.CustomRules...)
+	out.RuleURLs = append([]RuleURL(nil), c.RuleURLs...)
+	out.Groups = make([]NodeGroup, len(c.Groups))
+	for index, group := range c.Groups {
+		out.Groups[index] = group
+		out.Groups[index].Nodes = append([]string(nil), group.Nodes...)
+	}
+	out.RuleProviders = cloneConfigMap(c.RuleProviders)
+	out.DNS = cloneConfigMap(c.DNS)
+	out.TUN = c.TUN.Clone()
+	if c.CheckUpdates != nil {
+		enabled := *c.CheckUpdates
+		out.CheckUpdates = &enabled
+	}
+	out.GeoXUrl = cloneConfigMap(c.GeoXUrl)
+	out.Remote = c.Remote.Clone()
+	out.Desktop = c.Desktop.Clone()
+	return &out
+}
+
+// cloneConfigMap 递归复制 YAML 透传配置中的容器。
+//
+// 参数说明：
+//   - source: map[string]any，DNS、rule-provider、geox-url 或 TUN 扩展字段。
+//
+// 返回值说明：map[string]any，nil 输入返回 nil；嵌套 map/切片均不与输入共享。
+//
+// 错误情况：无；未知标量类型按值返回，符合配置解码后的只读值语义。
+func cloneConfigMap(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = cloneConfigValue(value)
+	}
+	return out
+}
+
+// cloneConfigValue 复制单个 YAML 透传值中的嵌套容器。
+//
+// 参数说明：
+//   - value: any，YAML 解码产生的 map、切片或标量。
+//
+// 返回值说明：any；容器返回深副本，标量保持原值。
+//
+// 错误情况：无；配置运行期不会原地修改未知标量对象。
+func cloneConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneConfigMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index, item := range typed {
+			out[index] = cloneConfigValue(item)
+		}
+		return out
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
+}
+
 // RedactedCopy 创建隐藏已知凭据字段的配置副本。
 //
 // 参数：无；接收者为源 Config。
@@ -100,27 +196,28 @@ func (c *Config) ExportYAML(maskTokens bool) ([]byte, error) {
 // 错误情况：无；无法按 URL 解析的节点字符串会整体替换为 `<masked>`，
 // 避免为了保持格式而意外泄露编码凭据。
 func (c *Config) RedactedCopy() *Config {
-	out := *c
+	out := c.Clone()
+	if out == nil {
+		return nil
+	}
 	if out.Secret != "" {
 		out.Secret = redactValue
 	}
-	out.Subscriptions = append([]Subscription(nil), c.Subscriptions...)
+	if out.APISecret != "" {
+		out.APISecret = redactValue
+	}
 	for i := range out.Subscriptions {
 		out.Subscriptions[i].URL = redactSourceURL(out.Subscriptions[i].URL)
 	}
-	out.ManualNodes = append([]string(nil), c.ManualNodes...)
 	for i := range out.ManualNodes {
 		out.ManualNodes[i] = redactURL(out.ManualNodes[i])
 	}
-	out.RuleURLs = append([]RuleURL(nil), c.RuleURLs...)
 	for i := range out.RuleURLs {
 		out.RuleURLs[i].URL = redactSourceURL(out.RuleURLs[i].URL)
 	}
-	out.RuleProviders = redactConfigMap(c.RuleProviders)
-	out.GeoXUrl = redactConfigMap(c.GeoXUrl)
-	out.DNS = redactConfigMap(c.DNS)
-	out.Remote = c.Remote.Clone()
-	out.Desktop = c.Desktop.Clone()
+	out.RuleProviders = redactConfigMap(out.RuleProviders)
+	out.GeoXUrl = redactConfigMap(out.GeoXUrl)
+	out.DNS = redactConfigMap(out.DNS)
 	for i := range out.Remote.Remotes {
 		if out.Remote.Remotes[i].Token != "" {
 			out.Remote.Remotes[i].Token = redactValue
@@ -139,7 +236,7 @@ func (c *Config) RedactedCopy() *Config {
 			out.Desktop.Connections[i].Remote = redactValue
 		}
 	}
-	return &out
+	return out
 }
 
 const redactValue = "***"
@@ -368,6 +465,9 @@ type Config struct {
 	// APIListen is proxyd's own API (port mapping table). Default 127.0.0.1:19091.
 	// Kept separate from external-controller because mihomo's router cannot be extended.
 	APIListen string `yaml:"api-listen"`
+	// APISecret 是 proxyd 管理面 HTTP Basic 口令；用户名固定为 proxyd。
+	// 非回环 APIListen 必须配置，避免凭据导出、配置变更与 Web Terminal 裸露。
+	APISecret string `yaml:"api-secret,omitempty"`
 
 	StateDir string `yaml:"state-dir"` // mapping snapshot + cache; default ~/.local/state/proxyd
 
@@ -442,7 +542,7 @@ func Quick(urls []string, portRange string) (*Config, error) {
 	return cfg, nil
 }
 
-// Load 读取配置文件并调用 Parse 完成迁移、默认值和结构校验。
+// Load 读取配置文件并调用 Parse 完成迁移、默认值和完整结构校验。
 //
 // 参数：
 //   - path: string，YAML 配置文件路径。
@@ -453,11 +553,40 @@ func Quick(urls []string, portRange string) (*Config, error) {
 //
 // 错误情况：读取失败以 `read config` 包装，其余错误由 Parse 返回。
 func Load(path string) (*Config, error) {
+	return load(path, false)
+}
+
+// LoadForAPISecretBootstrap 读取首次启动配置，并暂时允许缺少 api-secret。
+//
+// 参数说明：
+//   - path: string，待读取的 YAML 配置文件路径。
+//
+// 返回值说明：
+//   - *Config：完成迁移、默认值以及除 api-secret 之外全部校验的配置。
+//   - error：文件读取、YAML 解析或其它配置约束不满足时返回错误。
+//
+// 错误情况：该入口只供 CLI 在进程监听网络之前补录并保存 api-secret；
+// 它不会放宽端口、订阅、远程连接等其它校验，API Server 启动边界仍会拒绝
+// 没有口令的非回环监听，避免调用方忘记完成引导后暴露管理面。
+func LoadForAPISecretBootstrap(path string) (*Config, error) {
+	return load(path, true)
+}
+
+// load 统一配置文件读取，并选择是否允许 CLI 完成首次口令引导。
+//
+// 参数说明：
+//   - path: string，YAML 配置文件路径。
+//   - allowMissingAPISecret: bool，仅首次交互引导时允许非回环监听暂缺口令。
+//
+// 返回值说明：*Config 与 error，语义分别与 Load、LoadForAPISecretBootstrap 一致。
+//
+// 错误情况：读取错误增加 read config 上下文；解析与校验错误保持原始原因。
+func load(path string, allowMissingAPISecret bool) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	return Parse(raw)
+	return parse(raw, allowMissingAPISecret)
 }
 
 // Parse 从 YAML 字节解析配置，供文件加载和配置导入共用同一校验路径。
@@ -471,13 +600,27 @@ func Load(path string) (*Config, error) {
 //
 // 错误情况：不会写文件或修改运行配置，调用方可在成功后再执行原子 Save。
 func Parse(raw []byte) (*Config, error) {
+	return parse(raw, false)
+}
+
+// parse 执行 YAML 解码、兼容迁移、默认值填充和指定严格度的结构校验。
+//
+// 参数说明：
+//   - raw: []byte，完整 YAML 文本。
+//   - allowMissingAPISecret: bool，是否只跳过“非回环必须有口令”这一条校验。
+//
+// 返回值说明：*Config 与 error；成功配置可供引导或正常运行入口继续使用。
+//
+// 错误情况：YAML 语法错误以 parse config 包装；其余错误来自统一 validate，
+// 不会因为首次口令引导而放宽无关配置约束。
+func parse(raw []byte, allowMissingAPISecret bool) (*Config, error) {
 	cfg := &Config{}
 	if err := yaml.Unmarshal(raw, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	cfg.migratedLegacy = cfg.migrate()
 	cfg.applyDefaults()
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.validate(allowMissingAPISecret); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -626,8 +769,40 @@ func (c *Config) PortMappingEnabledFor(subscription string) bool {
 	return true
 }
 
-// Validate checks the config for structural errors.
+// Validate 检查完整配置结构，包括非回环管理 API 的口令要求。
+//
+// 参数说明：无。
+//
+// 返回值说明：error，全部配置约束通过时为 nil。
+//
+// 错误情况：订阅、端口、监听地址、管理面认证或各垂直模块配置非法时返回错误；
+// 本函数不修改配置，也不执行网络或文件 I/O。
 func (c *Config) Validate() error {
+	return c.validate(false)
+}
+
+// ValidateForAPISecretBootstrap 在 CLI 首次录入口令前校验其它全部配置约束。
+//
+// 参数说明：无。
+//
+// 返回值说明：error，除暂缺 api-secret 外的配置全部合法时为 nil。
+//
+// 错误情况：只跳过非回环管理监听的口令要求；端口、订阅和所有模块配置错误仍返回。
+// 调用方补齐口令后必须使用 Validate 完成最终校验，且不得在此阶段启动网络监听。
+func (c *Config) ValidateForAPISecretBootstrap() error {
+	return c.validate(true)
+}
+
+// validate 按首次启动引导所需的严格度执行统一配置校验。
+//
+// 参数说明：
+//   - allowMissingAPISecret: bool，仅为 true 时允许非回环 api-listen 暂缺口令。
+//
+// 返回值说明：error，当前严格度下全部约束通过时为 nil。
+//
+// 错误情况：除 api-secret 的临时例外外，所有错误与 Validate 完全一致；
+// 调用方必须在启动任何管理监听前补齐口令并再次调用 Validate。
+func (c *Config) validate(allowMissingAPISecret bool) error {
 	if len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
 		return fmt.Errorf("at least one subscription or manual node is required")
 	}
@@ -655,14 +830,17 @@ func (c *Config) Validate() error {
 		}
 	}
 	lo, hi := c.PortRange[0], c.PortRange[1]
-	if lo <= 0 || hi > 65535 || lo > hi {
-		return fmt.Errorf("invalid port-range [%d, %d]", lo, hi)
+	if c.MixedPort < 0 || c.MixedPort > 65535 {
+		return fmt.Errorf("mixed-port %d 超出 0-65535", c.MixedPort)
 	}
-	if c.MixedPort < 0 || c.MixedPort > 65535 || (c.MixedPort >= lo && c.MixedPort <= hi) {
-		return fmt.Errorf("mixed-port %d must be outside port-range", c.MixedPort)
+	if err := c.CheckPortRange(lo, hi); err != nil {
+		return err
 	}
 	if p := addrPort(c.APIListen); p == c.MixedPort {
 		return fmt.Errorf("mixed-port %d 与 api-listen 冲突", c.MixedPort)
+	}
+	if !allowMissingAPISecret && !IsLoopbackAPIListen(c.APIListen) && strings.TrimSpace(c.APISecret) == "" {
+		return fmt.Errorf("非回环 api-listen %q 必须配置 api-secret 以保护管理接口", c.APIListen)
 	}
 	if net.ParseIP(c.Listen) == nil {
 		if _, err := net.ResolveIPAddr("ip", c.Listen); err != nil {

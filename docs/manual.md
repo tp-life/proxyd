@@ -175,7 +175,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
-`off` 移除对应项；macOS/Linux 服务管理器会同时停止由该自启项托管的实例，Windows 不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
+`off` 移除对应项，但**不影响正在运行的实例**：macOS 只删除 plist（launchd 内存中的定义保留到本次开机结束，进程继续运行，重启后不再拉起）；Linux 只 `disable` 不停止服务；Windows 同样不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
 
 ### 配置备份与恢复
 
@@ -207,6 +207,17 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 - 页面每 10 秒自动刷新数据；`⌘K` / `Ctrl+K` 命令面板支持跳页、刷新、测速和模式切换
 
 ### 自有 API（`api-listen`，默认 19091）
+
+默认只监听回环地址，可不配置认证。一旦将 `api-listen` 设为 `0.0.0.0`、
+普通网卡地址或其它非回环地址，必须同时配置 `api-secret`；服务会对 Web 页面、
+`healthz`、所有 `/api/*` 及 WebSocket 终端统一要求 HTTP Basic 认证，用户名固定为
+`proxyd`、密码为 `api-secret`。CLI 会从配置文件自动携带凭据。Basic Auth 本身不加密
+传输内容；跨主机访问时应放在 HTTPS 反向代理之后，并同时用防火墙或可信内网限制来源。
+
+从交互终端首次执行 `proxyd serve`、`proxyd start` 或 `proxyd autostart on` 时，如果
+配置中尚无 `api-secret`，CLI 会隐藏输入并要求确认，将至少 6 个字符的口令原子写回
+当前配置文件。后续启动直接读取已保存值，不再提示。LaunchDaemon、自动重启等无终端
+场景不会等待输入：回环监听兼容旧配置继续启动，非回环监听缺少口令则明确拒绝启动。
 
 | 接口 | 说明 |
 |---|---|
@@ -431,6 +442,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
 | `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token。配置 `remote.key-file` 时改用指定路径，此文件不再使用 |
+| `remote/ssh_host_ed25519_key` | Web Terminal 与 builtin-ssh 共用的 SSH host key（0600）；首次使用时原子生成，重启后保持稳定 |
 | `cache.db`、`geo*` 等 | mihomo 自身的缓存与 geo 数据文件 |
 
 ## 九、配置文件参考
@@ -478,6 +490,8 @@ groups:                     # 可选，节点分组端口（支持 url-test/fall
     subscription: airport-a
 external-controller: 127.0.0.1:19090   # mihomo API
 api-listen: 127.0.0.1:19091            # Web 控制台
+# api-secret: ...        # proxyd 管理面 HTTP Basic 口令（用户名 proxyd）；
+                         # api-listen 非回环时必填，本地回环也可选开启
 # secret: ...             # mihomo API 鉴权
 state-dir: ~/.local/state/proxyd       # 状态目录（快照/缓存/pid/日志/geo），见「八、存储布局」
 
@@ -490,8 +504,8 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
                             # 缺省用内置托管密钥 state-dir/remote/server.private.json
   # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
                             # 无需系统 sshd；持有 token 即可登录，建议配合白名单
-  # web-terminal: false      # 浏览器本机 shell，默认关闭且依赖 enabled + builtin-ssh；
-                            # 非回环 api-listen 上开启必须二次确认
+  # web-terminal: false      # 浏览器本机 shell，默认关闭；独立于远程服务端运行（不开
+                            # 服务端也可用），非回环 api-listen 上开启必须二次确认
   # allow: [{name: 家里, key: nodekey:..., expires-at: 2026-09-10T12:00:00Z, ports: [22]}]
                             # 客户端最小权限白名单：name/expires-at/ports 均可省；
                             # ports 为空=可访问全部 serve 端口，兼容旧写法 ["nodekey:..."]
@@ -540,12 +554,12 @@ proxyd remote serve 22,5900   # macOS 屏幕共享或其它 VNC 服务
 
 **内嵌免密 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
 
-**Web Terminal**（`remote.web-terminal`）把同一套内嵌 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，必须同时满足远程服务运行中与 `builtin-ssh` 已开启；Web 服务状态卡开启后才显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
+**Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
-Web Terminal 等价于把 **proxyd 进程用户的本机 shell** 交给控制台访问者，因此安全边界比普通只读状态页高得多。`api-listen` 为非回环地址（例如 `0.0.0.0:19091`）时，Web 开启动作必须在危险确认框中再次确认；CLI 会在交互终端提示，自动化环境必须显式执行 `proxyd remote web-terminal on --yes`。优先保持 `api-listen: 127.0.0.1:19091`；若确需远程暴露控制台，应在外层增加可信鉴权和网络访问控制，并仅在使用期间开启 Web Terminal。
+Web Terminal 等价于把 **proxyd 进程用户的本机 shell** 交给控制台访问者，因此安全边界比普通只读状态页高得多。`api-listen` 为非回环地址（例如 `0.0.0.0:19091`）时，除了必须配置 `api-secret` 的统一认证，Web 开启动作仍会在危险确认框中再次确认；CLI 会在交互终端提示，自动化环境必须显式执行 `proxyd remote web-terminal on --yes`。优先保持 `api-listen: 127.0.0.1:19091`；若确需远程暴露控制台，仍应在网络边界增加访问控制，并仅在使用期间开启 Web Terminal。
 
 ```sh
-proxyd remote web-terminal          # 查看开关、API 监听范围与依赖状态
+proxyd remote web-terminal          # 查看开关与 API 监听范围
 proxyd remote web-terminal on       # 回环监听直接开启；非回环监听要求交互确认
 proxyd remote web-terminal on --yes # 非交互环境显式承担非回环暴露风险
 proxyd remote web-terminal off      # 关闭入口，新的 WebSocket 握手立即返回 404

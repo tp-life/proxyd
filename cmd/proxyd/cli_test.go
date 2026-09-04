@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,33 @@ import (
 	"proxyd/internal/api"
 	"proxyd/internal/app"
 )
+
+// TestAPIClientSendsManagementCredentials 验证 CLI 从配置加载的 api-secret
+// 会以固定用户名 proxyd 的 HTTP Basic 凭据附加到每次管理请求。
+//
+// 参数说明：
+//   - t: *testing.T，提供 HTTP 模拟服务、清理与断言报告。
+//
+// 返回值说明：无。
+//
+// 错误情况：Authorization 缺失、用户名/口令错误，或 CLI 无法读取响应时测试失败。
+func TestAPIClientSendsManagementCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "proxyd" || password != "management-secret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client := &apiClient{base: server.URL, secret: "management-secret"}
+	text, err := client.getText("/api/test")
+	if err != nil || text != "ok" {
+		t.Fatalf("CLI 认证请求结果 text=%q err=%v", text, err)
+	}
+}
 
 func TestParseAutoPortArg(t *testing.T) {
 	cases := []struct {

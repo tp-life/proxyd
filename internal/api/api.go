@@ -4,6 +4,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"proxyd/internal/app"
+	"proxyd/internal/config"
 )
 
 // webDistFS 是前端构建产物的内嵌文件系统。
@@ -108,6 +111,9 @@ func (s *Server) SetRestarter(fn func() error) {
 //   - `/api/connections` 与 `/api/traffic` 都是对 external-controller 的受控代理，统一由后端附加 secret，
 //     这样 Web/CLI 无需持有凭据，也避免并发开发时在多个入口各自复制鉴权逻辑。
 func (s *Server) Start() error {
+	if !config.IsLoopbackAPIListen(s.addr) && strings.TrimSpace(s.app.Config().APISecret) == "" {
+		return fmt.Errorf("非回环 api-listen %q 必须配置 api-secret 以保护管理接口", s.addr)
+	}
 	mux := http.NewServeMux()
 	// 代理域路由，按关注点分散在各 proxy_*.go 的 register 方法中。
 	s.registerProxySubscriptionRoutes(mux)
@@ -132,13 +138,44 @@ func (s *Server) Start() error {
 	// ReadHeaderTimeout 防止慢速请求头长期占用连接；IdleTimeout 只回收请求间的空闲
 	// keep-alive。不能设置全局 WriteTimeout，因为 /api/traffic 是合法的常驻流式响应。
 	s.srv = &http.Server{
-		Handler:           mux,
+		Handler:           s.requireManagementAuth(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       apiIdleTimeout,
 	}
 	go func() { _ = s.srv.Serve(ln) }()
 	s.startMemoryWatcher()
 	return nil
+}
+
+// requireManagementAuth 在配置了 api-secret 时为整个管理面增加 HTTP Basic 认证。
+//
+// 参数说明：
+//   - next: http.Handler，包含 Web 静态页、healthz、所有 /api/* 与 WebSocket 终端。
+//
+// 返回值说明：http.Handler；api-secret 为空时原样返回 next，
+// 非空时返回要求用户名 proxyd 和配置口令的中间件。
+//
+// 错误情况：缺少或错误凭据统一返回 401，且不进入下游 handler；
+// 用户名和口令均先做 SHA-256 再常量时间比较，避免直接比较泄露口令前缀。
+func (s *Server) requireManagementAuth(next http.Handler) http.Handler {
+	secret := s.app.Config().APISecret
+	if secret == "" {
+		return next
+	}
+	expectedUserHash := sha256.Sum256([]byte("proxyd"))
+	expectedSecretHash := sha256.Sum256([]byte(secret))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		usernameHash := sha256.Sum256([]byte(username))
+		passwordHash := sha256.Sum256([]byte(password))
+		if !ok || subtle.ConstantTimeCompare(usernameHash[:], expectedUserHash[:]) != 1 ||
+			subtle.ConstantTimeCompare(passwordHash[:], expectedSecretHash[:]) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="proxyd management", charset="UTF-8"`)
+			http.Error(w, "management authentication required", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Addr 返回实际监听地址（Start 传入 ":0" 时用于取回端口）。

@@ -265,7 +265,28 @@ func httpGet(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	return readLimitedResponseBody(resp.Body, maxBodySize)
+}
+
+// readLimitedResponseBody 在明确的内存上限内完整读取规则源响应体。
+//
+// 参数说明：
+//   - reader: io.Reader，上游规则源响应体。
+//   - limit: int64，允许返回的最大字节数，必须大于等于零。
+//
+// 返回值说明：[]byte 为完整正文；error 表示读取失败或正文超过限制。
+//
+// 错误情况：读取 limit+1 字节用于区分“正文刚好到上限”和“LimitReader
+// 静默截断”；超过限制时拒绝写缓存，避免只应用规则文件的前半部分。
+func readLimitedResponseBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("规则源响应体超过 %d 字节限制", limit)
+	}
+	return body, nil
 }
 
 // cachePath 返回规则源的缓存文件路径，文件名做安全清洗。

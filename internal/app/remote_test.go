@@ -232,6 +232,7 @@ func TestSetRemoteWebTerminalSafety(t *testing.T) {
 	}
 	cfg.StateDir = directory
 	cfg.APIListen = "0.0.0.0:19091"
+	cfg.APISecret = "test-management-secret"
 	application, err := New(cfg, configPath)
 	if err != nil {
 		t.Fatal(err)

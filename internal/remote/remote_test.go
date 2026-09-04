@@ -205,6 +205,115 @@ func TestForwardRunnerEcho(t *testing.T) {
 	}
 }
 
+// TestForwardRunnerStopReleasesResources 验证删除或禁用常驻转发时，已经建立的连接
+// 和尚未完成的远端拨号都会被主动取消，重复停止也不会 panic。
+//
+// 参数说明：
+//   - t: *testing.T，提供回环监听、内存连接和超时断言。
+//
+// 返回值说明：无。
+//
+// 错误情况：stop 后任一连接仍可阻塞读取、拨号 context 未取消、active 未归零，
+// 或连接追踪集合未清空时测试失败。
+func TestForwardRunnerStopReleasesResources(t *testing.T) {
+	t.Run("active connection", func(t *testing.T) {
+		upstream, peer := net.Pipe()
+		defer peer.Close()
+		dialStarted := make(chan struct{})
+		runner := newForwardRunner(
+			"active",
+			"127.0.0.1:0",
+			tailcat.ConnBlob("tcunused"),
+			22,
+			nil,
+			key.NodePrivate{},
+			func(context.Context) (net.Conn, error) {
+				close(dialStarted)
+				return upstream, nil
+			},
+		)
+		if err := runner.start(); err != nil {
+			t.Fatalf("启动转发失败: %v", err)
+		}
+		client, err := net.Dial("tcp", runner.ln.Addr().String())
+		if err != nil {
+			t.Fatalf("连接本地转发失败: %v", err)
+		}
+		defer client.Close()
+		select {
+		case <-dialStarted:
+		case <-time.After(time.Second):
+			t.Fatal("远端拨号未开始")
+		}
+
+		runner.stop()
+		runner.stop()
+		_ = client.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := client.Read(make([]byte, 1)); err == nil {
+			t.Fatal("stop 后本地活动连接仍未关闭")
+		}
+		_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := peer.Read(make([]byte, 1)); err == nil {
+			t.Fatal("stop 后远端活动连接仍未关闭")
+		}
+
+		deadline := time.Now().Add(time.Second)
+		for runner.active.Load() != 0 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if runner.active.Load() != 0 {
+			t.Fatalf("stop 后仍有 %d 个活动 handler", runner.active.Load())
+		}
+		// 连接集合使用独立互斥锁，与 lastErr 锁分离；这使慢连接收尾
+		// 不会阻塞运行错误读取，测试也必须遵守相同的同步边界。
+		runner.connMu.Lock()
+		remaining := len(runner.conns)
+		runner.connMu.Unlock()
+		if remaining != 0 {
+			t.Fatalf("stop 后连接追踪集合仍有 %d 项", remaining)
+		}
+	})
+
+	t.Run("in-flight dial", func(t *testing.T) {
+		dialStarted := make(chan struct{})
+		dialFinished := make(chan struct{})
+		runner := newForwardRunner(
+			"dialing",
+			"127.0.0.1:0",
+			tailcat.ConnBlob("tcunused"),
+			22,
+			nil,
+			key.NodePrivate{},
+			func(ctx context.Context) (net.Conn, error) {
+				close(dialStarted)
+				<-ctx.Done()
+				close(dialFinished)
+				return nil, ctx.Err()
+			},
+		)
+		if err := runner.start(); err != nil {
+			t.Fatalf("启动转发失败: %v", err)
+		}
+		client, err := net.Dial("tcp", runner.ln.Addr().String())
+		if err != nil {
+			t.Fatalf("连接本地转发失败: %v", err)
+		}
+		defer client.Close()
+		select {
+		case <-dialStarted:
+		case <-time.After(time.Second):
+			t.Fatal("远端拨号未开始")
+		}
+
+		runner.stop()
+		select {
+		case <-dialFinished:
+		case <-time.After(time.Second):
+			t.Fatal("stop 未取消在途拨号")
+		}
+	})
+}
+
 // applyForwardsOnly 用 Enabled=false 的配置走 Apply（不触网启动隧道服务端）。
 func applyForwardsOnly(t *testing.T, m *Manager, forwards []config.RemoteForward) {
 	t.Helper()
