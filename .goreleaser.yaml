@@ -1,0 +1,79 @@
+# 本文件定义 proxyd 的发布边界：只负责从已提交源码构建、归档和发布，
+# React 静态资源的一致性由 GitHub Actions 在进入 GoReleaser 前单独校验。
+version: 2
+
+project_name: proxyd
+
+builds:
+  - id: proxyd
+    main: ./cmd/proxyd
+    binary: proxyd
+
+    # mihomo/tailcat 在发布包中以纯 Go 方式交叉编译，避免目标机器依赖 libc 或本机 C 工具链。
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+    # 当前 Windows 发布范围沿用项目既有约定，仅发布 amd64；
+    # 如果后续验证 Windows arm64 的系统集成功能，再移除此排除项。
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+    # trimpath 去除构建机绝对路径；时间戳固定为提交时间，提升相同提交重复构建的一致性。
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: proxyd
+    ids:
+      - proxyd
+    formats:
+      - tar.gz
+
+    # Windows 用户通常没有 tar 工具，因此只对 Windows 改用 zip；macOS/Linux 保持 tar.gz。
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: true
+    builds_info:
+      owner: root
+      group: root
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: README.md
+      - src: configs/config.example.yaml
+        dst: configs/config.example.yaml
+
+# checksum 覆盖二进制归档和显式源码归档，供下载者校验文件完整性。
+checksum:
+  name_template: SHA256SUMS
+
+# 除 GitHub 自动提供的源码快照外，再发布一个进入校验和与 SLSA 证明范围的源码归档。
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+  prefix_template: "{{ .ProjectName }}-{{ .Version }}/"
+
+# Release notes 按提交时间排序，并过滤只影响内部流水线的提交，减少面向用户的噪声。
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^Merge '

@@ -45,8 +45,20 @@
 make              # 一次性完整构建：先构建 Web，再生成嵌入前端的 bin/proxyd
 make all          # 与 make 等价，适合在脚本或 CI 中显式调用
 make build        # 输出 bin/proxyd
-make release      # 交叉编译全部平台到 dist/
+make release      # 用 GoReleaser 生成本地快照包（需预先安装 GoReleaser v2）
 ```
+
+正式版本通过 tag 自动发布。以下命令会先确认工作区干净，重建 Web、运行全量 Go 测试，
+然后创建 annotated tag 并推送到 `origin`：
+
+```sh
+make tag TAG=v1.2.3
+```
+
+GitHub Actions 随后自动创建 Release，并上传 macOS（amd64/arm64）、Linux（amd64/arm64）、
+Windows（amd64）构建包、源码包和 `SHA256SUMS`。所有最终归档还会通过 GitHub Artifact
+Attestations 生成 SLSA provenance，可使用 `gh attestation verify <归档文件> --repo tp-life/proxyd`
+验证构建来源。
 
 ## 使用
 
