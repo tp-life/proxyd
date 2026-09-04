@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, CircleAlert, Copy, Download, Link2, Plus, RefreshCw, SquareTerminal, Terminal, Trash2, Upload, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CircleAlert, Copy, Download, Laptop, Link2, Plus, RefreshCw, Server, SquareTerminal, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonLink } from "@/components/ui/button";
 import { Table } from "@/components/ui/data-table";
@@ -535,16 +535,33 @@ export function RemotePage({
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
         <Tabs onValueChange={handleRemoteTabChange} value={remoteTab}>
-          <TabsList aria-label="远程连接分组">
-            <TabsTrigger value="server">
-              <span className="tabs-trigger-title">服务端</span>
-              <span className="tabs-trigger-detail">让别人连入本机：开启隧道服务、暴露本机端口、管理允许连入的客户端</span>
-            </TabsTrigger>
-            <TabsTrigger value="client">
-              <span className="tabs-trigger-title">客户端</span>
-              <span className="tabs-trigger-detail">从本机连到别的机器：保存对端 token、建立本地转发、复制 SSH/scp 命令</span>
-            </TabsTrigger>
-          </TabsList>
+          <nav className="remote-role-navigation" aria-labelledby="remote-role-navigation-title">
+            <div className="remote-role-navigation-heading">
+              <div>
+                <span className="remote-role-navigation-kicker">分类导航</span>
+                <strong id="remote-role-navigation-title">选择连接角色</strong>
+              </div>
+              <span>本机可以作为被连接端或主动连接端</span>
+            </div>
+            <TabsList className="remote-role-tabs-list" aria-label="远程连接角色">
+              <TabsTrigger className="remote-role-tab" value="server">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Server size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">服务端</span>
+                  <span className="remote-role-tab-direction">接受连接</span>
+                </span>
+                <span className="tabs-trigger-detail">让别人连入本机：开启隧道服务、暴露本机端口、管理允许连入的客户端</span>
+              </TabsTrigger>
+              <TabsTrigger className="remote-role-tab" value="client">
+                <span className="remote-role-tab-heading">
+                  <span className="remote-role-tab-icon"><Laptop size={18} aria-hidden="true" /></span>
+                  <span className="tabs-trigger-title">客户端</span>
+                  <span className="remote-role-tab-direction">发起连接</span>
+                </span>
+                <span className="tabs-trigger-detail">从本机连到别的机器：保存对端 token、建立本地转发、复制 SSH/scp 命令</span>
+              </TabsTrigger>
+            </TabsList>
+          </nav>
 
           <TabsContent forceMount value="server">
             <section className="panel">

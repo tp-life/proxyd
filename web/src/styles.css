@@ -444,6 +444,63 @@
     @apply hidden;
   }
 
+  /*
+   * 远程连接的两种角色会改变后续整组操作，不能只表现为普通文本按钮。
+   * 独立导航标题先说明这是分类入口，卡片式页签再用图标、方向标签和高对比选中态
+   * 强化“服务端 / 客户端”的角色边界，避免用户把它们误认为面板内的小标题。
+   */
+  .remote-role-navigation {
+    @apply grid gap-3 rounded-lg border bg-muted/35 p-3;
+  }
+  .remote-role-navigation-heading {
+    @apply flex items-end justify-between gap-4 px-1;
+  }
+  .remote-role-navigation-heading > div {
+    @apply grid gap-0.5;
+  }
+  .remote-role-navigation-heading strong {
+    @apply text-sm font-semibold text-foreground;
+  }
+  .remote-role-navigation-heading > span {
+    @apply text-xs text-muted-foreground;
+  }
+  .remote-role-navigation-kicker {
+    @apply font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-primary;
+  }
+  .remote-role-tabs-list {
+    @apply min-h-0 gap-2 overflow-visible border-0 bg-transparent p-0;
+  }
+  .remote-role-tab {
+    @apply min-h-[86px] gap-2 rounded-md border bg-card/55 px-4 py-3 transition-[color,background-color,border-color,box-shadow,transform] hover:border-primary/35 hover:bg-card;
+  }
+  .remote-role-tab[data-state="active"] {
+    @apply border-primary/65 bg-card shadow-[inset_3px_0_0_var(--primary),0_8px_24px_-18px_var(--primary)];
+  }
+  .remote-role-tab-heading {
+    @apply flex w-full items-center gap-2;
+  }
+  .remote-role-tab-icon {
+    @apply inline-flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground transition-colors;
+  }
+  .remote-role-tab[data-state="active"] .remote-role-tab-icon {
+    @apply border-primary/40 bg-primary/10 text-primary;
+  }
+  .remote-role-tab .tabs-trigger-title {
+    @apply text-base font-semibold text-foreground;
+  }
+  .remote-role-tab[data-state="active"] .tabs-trigger-title {
+    @apply text-primary;
+  }
+  .remote-role-tab-direction {
+    @apply ml-auto rounded-full border px-2 py-0.5 text-[10px] font-medium text-muted-foreground;
+  }
+  .remote-role-tab[data-state="active"] .remote-role-tab-direction {
+    @apply border-primary/35 bg-primary/10 text-primary;
+  }
+  .remote-role-tab .tabs-trigger-detail {
+    @apply pl-10 text-xs leading-5;
+  }
+
   /* Switch 的 Thumb 只反映 Root 的 data-state，避免视觉位置与受控业务值脱节。 */
   .switch {
     @apply relative inline-flex h-[22px] w-10 shrink-0 items-center rounded-full border border-input bg-muted outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50;
@@ -2699,6 +2756,19 @@
 }
 
 @media (max-width: 680px) {
+  /* 窄屏按纵向排列角色页签，避免长说明在双列卡片中被过度压缩。 */
+  .remote-role-navigation-heading {
+    @apply items-start;
+  }
+
+  .remote-role-navigation-heading > span {
+    @apply max-w-[11rem] text-right;
+  }
+
+  .remote-role-tabs-list {
+    @apply grid-flow-row grid-cols-1;
+  }
+
   .legacy-table.table-wrap {
     @apply border-0 bg-transparent;
   }
