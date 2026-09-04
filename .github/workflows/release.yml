@@ -1,0 +1,88 @@
+# tag 发布流水线：校验已提交的 Web 产物，测试 Go 代码，随后构建并证明跨平台发布包。
+name: 发布 Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# 默认只读，写 Release 和签发 provenance 的权限仅授予下方 release job。
+permissions: read-all
+
+# 同一个 tag 不并发发布，且不取消已经开始的发布，避免 Release 只上传部分资产。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: 校验发布 tag
+        shell: bash
+        run: |
+          # 仅允许带 v 前缀的 SemVer，避免误推送的 v* tag 创建无效 Release。
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "非法发布 tag：$GITHUB_REF_NAME；应使用 v1.2.3 或 v1.2.3-rc.1。" >&2
+            exit 1
+          fi
+
+      - name: 检出 tag 源码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # GoReleaser 需要完整 tag 历史生成版本和 changelog。
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建并校验 Web 静态资源
+        shell: bash
+        run: |
+          # npm ci 严格使用 lockfile；重新构建后必须与 tag 中提交的 embed 产物完全一致。
+          npm --prefix web ci
+          make web
+          if ! git diff --quiet -- internal/api/dist || [[ -n "$(git ls-files --others --exclude-standard -- internal/api/dist)" ]]; then
+            echo "internal/api/dist 与 web/src 构建结果不一致，请先运行 make 并提交产物。" >&2
+            git status --short -- internal/api/dist
+            exit 1
+          fi
+
+      - name: 运行 Go 测试
+        run: go test ./...
+
+      - name: 构建并创建 GitHub Release
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          # 固定 GoReleaser 版本，避免同一 tag 重跑时因工具升级产生不同资产。
+          version: v2.18.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成 SLSA 构建来源证明
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          # 对最终分发的压缩包、显式源码包和校验和签发同一份 provenance。
+          subject-path: |
+            ${{ github.workspace }}/dist/*.tar.gz
+            ${{ github.workspace }}/dist/*.zip
+            ${{ github.workspace }}/dist/SHA256SUMS
