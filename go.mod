@@ -6,8 +6,11 @@ require (
 	charm.land/bubbletea/v2 v2.0.6
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/metacubex/mihomo v1.19.30
+	github.com/tailscale/gliderssh v0.3.4-0.20260716005906-1a0f895faf28
 	github.com/tailscale/tailcat v0.4.0
+	github.com/u-root/u-root v0.14.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/sys v0.47.0
@@ -36,7 +39,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/coreos/go-iptables v0.8.0 // indirect
 	github.com/creachadair/msync v0.8.1 // indirect
-	github.com/creack/pty v1.1.24 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dunglas/httpsfv v1.0.2 // indirect
@@ -142,13 +144,11 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/stangelandcl/ppmd v0.1.1 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
-	github.com/tailscale/gliderssh v0.3.4-0.20260716005906-1a0f895faf28 // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976 // indirect
 	github.com/tailscale/wireguard-go v0.0.0-20260821191448-23d18d66172c // indirect
-	github.com/u-root/u-root v0.14.0 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect

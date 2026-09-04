@@ -5,6 +5,7 @@ package autostart
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,26 @@ func legacyPlistPath(account serviceAccount) string {
 	return filepath.Join(account.HomeDir, "Library", "LaunchAgents", plistLabel+".plist")
 }
 
+// daemonLoaded 报告 system 域中是否已注册本服务的 LaunchDaemon。
+//
+// 参数说明：无。
+//
+// 返回值说明：bool，launchctl print 能查询到服务定义时为 true。
+//
+// 错误情况：无；查询失败按未注册处理，让调用方走完整 bootstrap 流程。
+func daemonLoaded() bool {
+	_, err := run("/bin/launchctl", "print", "system/"+plistLabel)
+	return err == nil
+}
+
+// runDeferred 经 /bin/sh 在后台延迟约 1 秒执行固定命令并立即返回。
+// 声明为变量以便测试替换。命令与 run/renderShellCommand 共用同一引用规则；
+// 子 shell 脱离父进程标准流，父进程退出不影响其执行。
+var runDeferred = func(name string, args ...string) {
+	script := "( sleep 1; " + renderShellCommand(privilegedCommand{Name: name, Args: args}) + " ) >/dev/null 2>&1 &"
+	_ = exec.Command("/bin/sh", "-c", script).Start()
+}
+
 // on 安装系统级 LaunchDaemon 并立即启动服务。
 //
 // 参数说明：
@@ -75,7 +96,8 @@ func legacyPlistPath(account serviceAccount) string {
 // 返回值说明：error，plist 安装、system 域注册与旧 LaunchAgent 清理全部成功时为 nil。
 //
 // 错误情况：目录/临时文件创建、管理员授权、launchctl bootstrap 或旧项清理失败时
-// 返回错误。管理员取消授权不会绕过系统权限模型。
+// 返回错误。管理员取消授权不会绕过系统权限模型。服务已注册时只刷新 plist 文件，
+// 不重复 bootout/bootstrap，避免终止可能正在处理本次请求的当前进程。
 func on(opt Options) error {
 	account, err := currentServiceAccount()
 	if err != nil {
@@ -100,47 +122,52 @@ func on(opt Options) error {
 		return fmt.Errorf("关闭 LaunchDaemon 临时文件失败: %w", err)
 	}
 
-	// 先卸载可能存在的旧 daemon，再以 root:wheel、0644 安装新 plist。bootstrap
-	// system 会立即启动 RunAtLoad 服务；enable 清除用户曾通过 launchctl 设置的禁用标记。
+	// 已注册的服务只做 plist 文件刷新：launchd 内存中的定义与当前进程参数同源，
+	// 重启或下次开机自然加载新文件。未注册时 bootstrap 会立即启动 RunAtLoad 服务；
+	// enable 清除用户曾通过 launchctl 设置的禁用标记。
 	commands := []privilegedCommand{
-		{Name: "/bin/launchctl", Args: []string{"bootout", "system/" + plistLabel}, IgnoreError: true},
 		{Name: "/usr/bin/install", Args: []string{"-o", "root", "-g", "wheel", "-m", "0644", temporaryPath, daemonPlistPath}},
-		{Name: "/bin/launchctl", Args: []string{"enable", "system/" + plistLabel}},
-		{Name: "/bin/launchctl", Args: []string{"bootstrap", "system", daemonPlistPath}},
 	}
-	if err := runPrivileged(commands...); err != nil {
-		return err
+	if !daemonLoaded() {
+		commands = append(commands,
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"enable", "system/" + plistLabel}},
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"bootstrap", "system", daemonPlistPath}},
+		)
 	}
-	if err := removeLegacyLaunchAgent(account); err != nil {
+	if err := runPrivileged(account, commands...); err != nil {
+		return fmt.Errorf("注册系统 LaunchDaemon 失败: %w", err)
+	}
+	// 旧 LaunchAgent 需要连实例一起停掉，否则与新 bootstrap 的 LaunchDaemon 双实例运行；
+	// 延迟 bootout 让本次请求（可能正由旧实例处理）先返回。
+	if err := removeLegacyLaunchAgent(account, true); err != nil {
 		return fmt.Errorf("系统 LaunchDaemon 已启用，但旧 LaunchAgent 清理失败: %w", err)
 	}
 	return nil
 }
 
-// off 卸载并删除系统级 LaunchDaemon，同时清理旧版登录自启项。
+// off 卸载系统级开机自启项，同时清理旧版登录自启项。
 //
 // 参数说明：无。
 //
 // 返回值说明：error，目标不存在或系统项与旧项均清理成功时为 nil。
 //
-// 错误情况：账户解析、管理员授权、launchctl 卸载或 plist 删除失败时返回错误。
+// 错误情况：账户解析、管理员授权或 plist 删除失败时返回错误。
+// 只删除 plist 文件而不 bootout：launchd 内存中的服务定义保留到本次开机结束，
+// 正在运行的实例（可能就是处理本次请求的本进程）不受影响，重启后不再拉起。
 func off() error {
 	account, err := currentServiceAccount()
 	if err != nil {
 		return err
 	}
 	if _, statErr := os.Stat(daemonPlistPath); statErr == nil {
-		commands := []privilegedCommand{
-			{Name: "/bin/launchctl", Args: []string{"bootout", "system/" + plistLabel}, IgnoreError: true},
-			{Name: "/bin/rm", Args: []string{"-f", daemonPlistPath}},
-		}
-		if err := runPrivileged(commands...); err != nil {
-			return err
+		command := privilegedCommand{Name: "/bin/rm", Args: []string{"-f", daemonPlistPath}}
+		if err := runPrivileged(account, command); err != nil {
+			return fmt.Errorf("卸载系统 LaunchDaemon 失败: %w", err)
 		}
 	} else if !os.IsNotExist(statErr) {
 		return fmt.Errorf("查询 LaunchDaemon 失败: %w", statErr)
 	}
-	return removeLegacyLaunchAgent(account)
+	return removeLegacyLaunchAgent(account, false)
 }
 
 // status 报告系统级 LaunchDaemon plist 是否已安装。
@@ -161,15 +188,19 @@ func status() (bool, error) {
 	return false, err
 }
 
-// removeLegacyLaunchAgent 卸载并删除旧版用户登录自启项，避免与 LaunchDaemon 双实例运行。
+// removeLegacyLaunchAgent 删除旧版用户登录自启项，避免与 LaunchDaemon 双实例运行。
 //
 // 参数说明：
 //   - account: serviceAccount，旧 LaunchAgent 所属用户及其 launchd GUI domain。
+//   - stopRunning: bool，为 true 时延迟 bootout 旧实例（on 切换场景，避免双实例）；
+//     为 false 时只删文件（off 场景，正在运行的实例不受影响）。
 //
 // 返回值说明：error，旧项不存在或成功删除时为 nil。
 //
-// 错误情况：旧 plist 存在但无法删除时返回错误；bootout/unload 的“未加载”错误可忽略。
-func removeLegacyLaunchAgent(account serviceAccount) error {
+// 错误情况：旧 plist 存在但无法删除时返回错误。bootout 以 service-target 形式延迟
+// 执行：当前进程若正是该 LaunchAgent 托管的实例，同步 bootout 会在删除完成前
+// 终止本进程；延迟执行也让本次 API 响应先返回。
+func removeLegacyLaunchAgent(account serviceAccount, stopRunning bool) error {
 	path := legacyPlistPath(account)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
@@ -177,11 +208,11 @@ func removeLegacyLaunchAgent(account serviceAccount) error {
 		}
 		return err
 	}
-	domain := "gui/" + account.UID
-	_, _ = run("/bin/launchctl", "bootout", domain, path)
-	_, _ = run("/bin/launchctl", "unload", "-w", path)
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("删除旧 LaunchAgent %s 失败: %w", path, err)
+	}
+	if stopRunning {
+		runDeferred("/bin/launchctl", "bootout", "gui/"+account.UID+"/"+plistLabel)
 	}
 	return nil
 }
@@ -190,16 +221,19 @@ func removeLegacyLaunchAgent(account serviceAccount) error {
 // 管理员授权对话框一次性执行，兼容 CLI 与 Web 设置页触发场景。
 //
 // 参数说明：
+//   - account: serviceAccount，授权回退路径需要的运行账户及其图形会话 domain。
 //   - commands: ...privilegedCommand，按顺序执行的固定命令与参数。
 //
-// 返回值说明：error，全部必需命令成功时为 nil。
+// 返回值说明：error，全部命令成功时为 nil。
 //
 // 错误情况：命令失败、管理员拒绝授权或 osascript 不可用时返回包含操作上下文的错误。
-func runPrivileged(commands ...privilegedCommand) error {
+// 当前进程处于系统域（LaunchDaemon 托管）时窗口服务器不可达，授权对话框无法弹出
+// （osascript 报 -60007），此时回退到 runPrivilegedInGUISession 经用户图形会话执行。
+func runPrivileged(account serviceAccount, commands ...privilegedCommand) error {
 	if os.Geteuid() == 0 {
 		for _, command := range commands {
 			if _, err := run(command.Name, command.Args...); err != nil && !command.IgnoreError {
-				return fmt.Errorf("注册系统 LaunchDaemon 失败: %w", err)
+				return err
 			}
 		}
 		return nil
@@ -215,9 +249,29 @@ func runPrivileged(commands ...privilegedCommand) error {
 	shellScript := strings.Join(parts, " && ")
 	appleScript := `do shell script "` + escapeAppleScript(shellScript) + `" with administrator privileges`
 	if _, err := run("/usr/bin/osascript", "-e", appleScript); err != nil {
-		return fmt.Errorf("注册系统 LaunchDaemon 需要管理员授权: %w", err)
+		if interactionNotAllowed(err) {
+			return runPrivilegedInGUISession(shellScript, account)
+		}
+		return fmt.Errorf("需要管理员授权: %w", err)
 	}
 	return nil
+}
+
+// interactionNotAllowed 判断 osascript 失败是否源于当前会话无法弹出授权窗口。
+//
+// 参数说明：
+//   - err: error，run 返回的包含 osascript 标准错误摘要的错误。
+//
+// 返回值说明：bool，错误文本包含 -60007（errAuthorizationInteractionNotAllowed）时为 true。
+//
+// 错误情况：无；仅做文本匹配，错误为 nil 时返回 false。
+func interactionNotAllowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "-60007") || strings.Contains(text, "InteractionNotAllowed") ||
+		strings.Contains(text, "interaction is not allowed")
 }
 
 // renderShellCommand 把命令与参数渲染为可交给 do shell script 的安全文本。

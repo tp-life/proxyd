@@ -174,7 +174,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
-`off` 移除对应项；macOS/Linux 服务管理器会同时停止由该自启项托管的实例，Windows 不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
+`off` 移除对应项，但**不影响正在运行的实例**：macOS 只删除 plist（launchd 内存中的定义保留到本次开机结束，进程继续运行，重启后不再拉起）；Linux 只 `disable` 不停止服务；Windows 同样不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
 
 ### 配置备份与恢复
 
@@ -481,8 +481,8 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
                             # 缺省用内置托管密钥 state-dir/remote/server.private.json
   # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
                             # 无需系统 sshd；持有 token 即可登录，建议配合白名单
-  # web-terminal: false      # 浏览器本机 shell，默认关闭且依赖 enabled + builtin-ssh；
-                            # 非回环 api-listen 上开启必须二次确认
+  # web-terminal: false      # 浏览器本机 shell，默认关闭；独立于远程服务端运行（不开
+                            # 服务端也可用），非回环 api-listen 上开启必须二次确认
   # allow: [{name: 家里, key: nodekey:..., expires-at: 2026-09-10T12:00:00Z, ports: [22]}]
                             # 客户端最小权限白名单：name/expires-at/ports 均可省；
                             # ports 为空=可访问全部 serve 端口，兼容旧写法 ["nodekey:..."]
@@ -516,12 +516,12 @@ proxyd remote token           # 打印完整 token，发给要连接的人
 
 **内嵌免密 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
 
-**Web Terminal**（`remote.web-terminal`）把同一套内嵌 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，必须同时满足远程服务运行中与 `builtin-ssh` 已开启；Web 服务状态卡开启后才显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
+**Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
 Web Terminal 等价于把 **proxyd 进程用户的本机 shell** 交给控制台访问者，因此安全边界比普通只读状态页高得多。`api-listen` 为非回环地址（例如 `0.0.0.0:19091`）时，Web 开启动作必须在危险确认框中再次确认；CLI 会在交互终端提示，自动化环境必须显式执行 `proxyd remote web-terminal on --yes`。优先保持 `api-listen: 127.0.0.1:19091`；若确需远程暴露控制台，应在外层增加可信鉴权和网络访问控制，并仅在使用期间开启 Web Terminal。
 
 ```sh
-proxyd remote web-terminal          # 查看开关、API 监听范围与依赖状态
+proxyd remote web-terminal          # 查看开关与 API 监听范围
 proxyd remote web-terminal on       # 回环监听直接开启；非回环监听要求交互确认
 proxyd remote web-terminal on --yes # 非交互环境显式承担非回环暴露风险
 proxyd remote web-terminal off      # 关闭入口，新的 WebSocket 握手立即返回 404

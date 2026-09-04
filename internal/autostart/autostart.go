@@ -50,7 +50,7 @@ type Options struct {
 // 进程会请求管理员授权以写入系统 LaunchDaemon。
 func On(opt Options) error { return on(opt) }
 
-// Off 移除开机自启；由服务管理器托管的实例可能同时被停止。
+// Off 移除开机自启；不影响正在运行的实例，进程继续运行直到退出或系统重启。
 //
 // 参数说明：无。
 //

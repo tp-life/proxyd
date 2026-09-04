@@ -302,28 +302,21 @@ type terminalStream interface {
 	Resize(remote.TerminalSize) error
 }
 
-// handleRemoteTerminal 把同源 WebSocket 升级为进程内 builtin-ssh 的交互 PTY 会话。
+// handleRemoteTerminal 把同源 WebSocket 升级为进程内 SSH shell 的交互 PTY 会话。
+// 会话由 remote 模块自带的 shell 服务承载，不要求远程连接服务端运行或开启 builtin-ssh。
 //
 // 参数说明：
-//   - w: http.ResponseWriter，用于升级协议或在升级前返回 404/409 引导。
+//   - w: http.ResponseWriter，用于升级协议或在升级前返回 404。
 //   - r: *http.Request，可选 cols/rows 查询参数作为首次 PTY 尺寸，请求 context 控制会话寿命。
 //
 // 返回值说明：无；成功升级后，二进制帧承载终端输入/输出，文本帧仅承载 resize JSON。
 //
-// 错误情况：开关关闭返回 404；builtin-ssh 或服务端未运行返回 409；升级后初始化失败会
-// 发送可展示的 error 控制帧再关闭，浏览器断开或 shell 退出会释放 SSH/PTY/子进程资源。
+// 错误情况：开关关闭返回 404；升级后初始化失败会发送可展示的 error 控制帧再关闭，
+// 浏览器断开或 shell 退出会释放 SSH/PTY/子进程资源。
 func (s *Server) handleRemoteTerminal(w http.ResponseWriter, r *http.Request) {
 	status := s.app.RemoteStatus()
 	if !status.WebTerminal {
 		http.NotFound(w, r)
-		return
-	}
-	if !status.BuiltinSSH {
-		http.Error(w, "Web 终端需要先开启内嵌免密 SSH", http.StatusConflict)
-		return
-	}
-	if !status.Running {
-		http.Error(w, "远程连接服务端未运行，请先开启远程连接服务", http.StatusConflict)
 		return
 	}
 
