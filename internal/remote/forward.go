@@ -30,23 +30,50 @@ type forwardRunner struct {
 	ln     net.Listener
 	client *tailcat.Client
 	done   chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
 	active atomic.Int64
 
-	mu      sync.Mutex
-	lastErr string
+	stopOnce sync.Once
+	mu       sync.Mutex
+	lastErr  string
+	stopped  bool
+	// connections 同时追踪本地接入与远端隧道连接。停止转发时必须显式
+	// 关闭快照内的所有连接，不能依赖 tailcat.Client.Close 的间接行为。
+	connections map[net.Conn]struct{}
 }
 
-// newForwardRunner 构造转发runner；dial 为 nil 表示使用真实隧道拨号。
+// newForwardRunner 构造一条尚未监听的本地转发。
+//
+// 参数说明：
+//   - name: string，配置中的转发名称，仅用于状态和日志。
+//   - listen: string，本地 TCP 监听地址。
+//   - token: tailcat.ConnBlob，目标远端身份与 DERP 信息。
+//   - port: uint16，远端目标端口。
+//   - logf: func(string, ...any)，日志回调；nil 时使用静默回调。
+//   - clientKey: key.NodePrivate，本机客户端身份；零值使用临时身份。
+//   - dial: func(context.Context) (net.Conn, error)，测试注入拨号器；nil 使用 tailcat。
+//
+// 返回值说明：*forwardRunner，调用方还需调用 start。
+//
+// 错误情况：构造阶段不执行 I/O，不返回错误；监听或拨号错误分别由 start/handle 记录。
 func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, logf func(string, ...any), clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
+	ctx, cancel := context.WithCancel(context.Background())
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	return &forwardRunner{
-		name:      name,
-		listen:    listen,
-		token:     token,
-		port:      port,
-		logf:      logf,
-		clientKey: clientKey,
-		dial:      dial,
-		done:      make(chan struct{}),
+		name:        name,
+		listen:      listen,
+		token:       token,
+		port:        port,
+		logf:        logf,
+		clientKey:   clientKey,
+		dial:        dial,
+		done:        make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
+		connections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -59,6 +86,7 @@ func (r *forwardRunner) specEqual(listen string, token tailcat.ConnBlob, port ui
 func (r *forwardRunner) start() error {
 	ln, err := net.Listen("tcp", r.listen)
 	if err != nil {
+		r.cancel()
 		return fmt.Errorf("监听 %s 失败: %w", r.listen, err)
 	}
 	r.ln = ln
@@ -92,35 +120,110 @@ func (r *forwardRunner) acceptLoop() {
 			r.setLastError(err.Error())
 			return
 		}
+		// Accept 与 stop 可能同时完成。只有成功登记的连接才允许启动
+		// handler；停止标记已设置时立即关闭，避免 stop 快照之后漏入连接。
+		if !r.trackConnection(conn) {
+			_ = conn.Close()
+			return
+		}
 		go r.handle(conn)
 	}
 }
 
-// handle 处理一条本地连接：拨远端隧道端口并双向拷贝。
+// handle 处理一条已登记的本地连接：拨远端隧道端口并双向拷贝。
+//
+// 参数说明：
+//   - local: net.Conn，acceptLoop 已加入活动连接集合的本地连接。
+//
+// 返回值说明：无；连接结束后减少 active 并移除两端连接。
+//
+// 错误情况：拨号错误在正常运行期间写入状态；stop 引发的 context.Canceled
+// 是预期生命周期事件，不污染 lastErr，也不输出误导日志。
 func (r *forwardRunner) handle(local net.Conn) {
 	r.active.Add(1)
 	defer r.active.Add(-1)
+	defer r.untrackConnection(local)
 	defer local.Close()
 
-	upstream, err := r.dial(context.Background())
+	upstream, err := r.dial(r.ctx)
 	if err != nil {
-		r.setLastError(err.Error())
-		r.logf("[remote] 转发 %s 拨号失败: %v", r.name, err)
+		if r.ctx.Err() == nil {
+			r.setLastError(err.Error())
+			r.logf("[remote] 转发 %s 拨号失败: %v", r.name, err)
+		}
 		return
 	}
+	if !r.trackConnection(upstream) {
+		_ = upstream.Close()
+		return
+	}
+	defer r.untrackConnection(upstream)
 	defer upstream.Close()
 	relay(local, upstream)
 }
 
-// stop 关闭监听器与隧道客户端；活动连接随监听器关闭后由各自连接关闭收尾。
+// stop 幂等停止监听、在途拨号、隧道客户端与全部活动连接。
+//
+// 参数说明：无。
+//
+// 返回值说明：无；所有关闭动作均为 best-effort。
+//
+// 错误情况：连接可能已经被对端关闭，重复 Close 错误安全忽略；
+// 先设置 stopped 并复制连接快照，确保并发 Accept/Dial 无法越过停止边界。
 func (r *forwardRunner) stop() {
-	close(r.done)
-	if r.ln != nil {
-		_ = r.ln.Close()
+	r.stopOnce.Do(func() {
+		r.mu.Lock()
+		r.stopped = true
+		connections := make([]net.Conn, 0, len(r.connections))
+		for connection := range r.connections {
+			connections = append(connections, connection)
+		}
+		r.mu.Unlock()
+
+		close(r.done)
+		r.cancel()
+		if r.ln != nil {
+			_ = r.ln.Close()
+		}
+		if r.client != nil {
+			_ = r.client.Close()
+		}
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	})
+}
+
+// trackConnection 在停止边界内登记一个需要统一回收的连接。
+//
+// 参数说明：
+//   - connection: net.Conn，本地接入或远端隧道连接。
+//
+// 返回值说明：bool，登记成功为 true；转发已停止时为 false，调用方应立即关闭连接。
+//
+// 错误情况：无；互斥锁保证与 stop 的快照过程原子互斥。
+func (r *forwardRunner) trackConnection(connection net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return false
 	}
-	if r.client != nil {
-		_ = r.client.Close()
-	}
+	r.connections[connection] = struct{}{}
+	return true
+}
+
+// untrackConnection 从活动集合移除已关闭或即将关闭的连接。
+//
+// 参数说明：
+//   - connection: net.Conn，先前由 trackConnection 登记的连接。
+//
+// 返回值说明：无。
+//
+// 错误情况：无；重复删除和 stop 后删除均为幂等操作。
+func (r *forwardRunner) untrackConnection(connection net.Conn) {
+	r.mu.Lock()
+	delete(r.connections, connection)
+	r.mu.Unlock()
 }
 
 // lastError 返回最近一次拨号/监听错误。

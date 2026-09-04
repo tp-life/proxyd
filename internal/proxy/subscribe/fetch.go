@@ -136,12 +136,6 @@ const maxAttempts = 3
 // retryBackoff 第 i 次失败后的等待时间。
 var retryBackoff = []time.Duration{1 * time.Second, 3 * time.Second}
 
-// httpGet 发起 GET 请求并读取响应体；网络错误或 5xx 时按 retryBackoff 重试。
-func httpGet(ctx context.Context, url string) ([]byte, error) {
-	body, _, err := httpGetWithInfo(ctx, url)
-	return body, err
-}
-
 // httpGetWithInfo 发起 GET 请求并读取响应体与订阅用量响应头。
 //
 // retry 只针对网络错误、超时和 5xx：这些通常是上游临时问题；
@@ -183,8 +177,29 @@ func httpGetOnce(ctx context.Context, url string) (body []byte, info UserInfo, r
 	if resp.StatusCode != http.StatusOK {
 		return nil, UserInfo{}, resp.StatusCode >= 500, fmt.Errorf("HTTP %s", resp.Status)
 	}
-	body, err = io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	body, err = readLimitedResponseBody(resp.Body, maxBodySize)
 	return body, ParseUserInfo(resp.Header.Get("subscription-userinfo")), err != nil, err
+}
+
+// readLimitedResponseBody 在明确的内存上限内完整读取 HTTP 响应体。
+//
+// 参数说明：
+//   - reader: io.Reader，上游订阅响应体。
+//   - limit: int64，允许返回的最大字节数，必须大于等于零。
+//
+// 返回值说明：[]byte 为完整正文；error 表示读取失败或正文超过限制。
+//
+// 错误情况：读取 limit+1 字节用于识别溢出，因为 io.LimitReader 自身在到达
+// 上限时不会报错；超过限制时绝不返回截断订阅，避免部分节点被静默接受并覆盖缓存。
+func readLimitedResponseBody(reader io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("订阅响应体超过 %d 字节限制", limit)
+	}
+	return body, nil
 }
 
 // ParseUserInfo 解析 subscription-userinfo 响应头。

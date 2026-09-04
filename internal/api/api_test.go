@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -83,6 +84,51 @@ func TestTriggerCoalescesBurst(t *testing.T) {
 	case fetch := <-started:
 		t.Fatalf("相同突发请求未合并，出现第三次执行: fetch=%v", fetch)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestManagementAuthenticationProtectsAllRoutes 验证 api-secret 中间件会在路由分发前
+// 拦截未认证请求，而正确的 proxyd Basic Auth 凭据可进入下游。
+//
+// 参数说明：
+//   - t: *testing.T，提供隔离 App、HTTP 请求记录器与断言。
+//
+// 返回值说明：无。
+//
+// 错误情况：缺少/错误凭据未返回 401、未携带 Basic challenge，
+// 或正确凭据无法访问下游时测试失败。
+func TestManagementAuthenticationProtectsAllRoutes(t *testing.T) {
+	a, err := app.New(&config.Config{APISecret: "management-secret"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New("127.0.0.1:0", a)
+	called := false
+	handler := server.requireManagementAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/config/export?mask_tokens=false", nil))
+	if unauthorized.Code != http.StatusUnauthorized || unauthorized.Header().Get("WWW-Authenticate") == "" || called {
+		t.Fatalf("未认证请求 status=%d challenge=%q called=%t", unauthorized.Code, unauthorized.Header().Get("WWW-Authenticate"), called)
+	}
+
+	wrong := httptest.NewRequest(http.MethodGet, "/api/remote/keyfile/export", nil)
+	wrong.SetBasicAuth("proxyd", "wrong-secret")
+	wrongRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(wrongRecorder, wrong)
+	if wrongRecorder.Code != http.StatusUnauthorized || called {
+		t.Fatalf("错误口令 status=%d called=%t", wrongRecorder.Code, called)
+	}
+
+	authorized := httptest.NewRequest(http.MethodGet, "/api/remote/token", nil)
+	authorized.SetBasicAuth("proxyd", "management-secret")
+	authorizedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(authorizedRecorder, authorized)
+	if authorizedRecorder.Code != http.StatusNoContent || !called {
+		t.Fatalf("正确凭据 status=%d called=%t", authorizedRecorder.Code, called)
 	}
 }
 
@@ -1355,6 +1401,57 @@ func TestConnectionsAPIUpstreamErrors(t *testing.T) {
 		}
 		if strings.Contains(body, "test-secret") {
 			t.Fatalf("错误响应泄露 secret: %q", body)
+		}
+	})
+
+	t.Run("truncated body", func(t *testing.T) {
+		upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// 故意声明大于实际正文的 Content-Length，让 net/http 在
+			// 读取 JSON 中途观察到 io.ErrUnexpectedEOF，稳定模拟 mihomo 断连。
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100")
+			_, _ = io.WriteString(w, `{"connections":[`)
+		}))
+		defer upstream.Close()
+
+		a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New("127.0.0.1:0", a)
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
+		srv.handleConnections(recorder, request)
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if body := recorder.Body.String(); !strings.Contains(body, "connections upstream response read failed") {
+			t.Fatalf("截断响应错误文本 = %q", body)
+		}
+	})
+
+	t.Run("invalid json with clean eof", func(t *testing.T) {
+		upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// 不声明 Content-Length，使 HTTP 传输可以正常结束，但正文刻意停在
+			// JSON 数组中间；这覆盖 io.ReadAll 返回 nil error 的另一种截断形式。
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"connections":[`)
+		}))
+		defer upstream.Close()
+
+		a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := New("127.0.0.1:0", a)
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
+		srv.handleConnections(recorder, request)
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if body := recorder.Body.String(); !strings.Contains(body, "connections upstream response invalid") {
+			t.Fatalf("非法 JSON 错误文本 = %q", body)
 		}
 	})
 }

@@ -122,9 +122,9 @@ func (t *TUNConfig) ApplyDefaults() {
 // 参数：无；接收者为源 TUNConfig。
 //
 // 返回值：
-//   - TUNConfig：切片、布尔指针和 Extra map 均已复制的副本。
+//   - TUNConfig：切片、布尔指针和 Extra 嵌套容器均已复制的副本。
 //
-// 错误情况：无；Extra 中嵌套的复合值不会被当前开关逻辑修改，因此只复制第一层 map。
+// 错误情况：无；未知标量按值保留，map 与切片递归复制，确保跨锁快照安全。
 func (t TUNConfig) Clone() TUNConfig {
 	out := t
 	out.DNSHijack = append([]string(nil), t.DNSHijack...)
@@ -139,7 +139,7 @@ func (t TUNConfig) Clone() TUNConfig {
 	if t.Extra != nil {
 		out.Extra = make(map[string]any, len(t.Extra))
 		for key, value := range t.Extra {
-			out.Extra[key] = value
+			out.Extra[key] = cloneConfigValue(value)
 		}
 	}
 	return out

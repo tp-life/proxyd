@@ -154,6 +154,9 @@ func TestRemoteAPI(t *testing.T) {
 		t.Fatalf("add forward: %d", code)
 	}
 	code, st = remoteAPIReq(t, "GET", base+"/api/remote", nil)
+	if code != http.StatusOK {
+		t.Fatalf("get remote state after adding forward: %d", code)
+	}
 	forwards, _ := st["forwards"].([]any)
 	if len(forwards) != 1 {
 		t.Fatalf("forwards: %v", st)

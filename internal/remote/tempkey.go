@@ -53,12 +53,15 @@ func ResetTempKey(stateDir string) (pubText string, err error) {
 	return fresh.Private.Public().String(), nil
 }
 
-// tcAddrForKey 复刻 tailcat v0.4.0 未导出的节点隧道地址推导
-// （fd7a:115c:a1e0::/48 + 节点公钥前 10 字节），用于把入站连接的远端地址
-// 归属到白名单/临时身份的公钥。tailcat 依赖升级时需核对该算法是否变化。
+// tcAddrForKey 复刻 tailcat 未导出的节点隧道地址推导算法。
+//
+// 参数 k 是已经完成格式校验的 Tailscale 节点公钥；函数取公钥原始编码的前 10 字节，
+// 与 fd7a:115c:a1e0::/48 前缀组合为节点地址，用于把入站连接归属到白名单身份。
+// 返回值始终是有效 IPv6 地址，不会返回错误。这里使用 AppendTo 获取无类型前缀的原始
+// 32 字节，避免依赖已弃用的 Raw32；tailcat 依赖升级时仍需核对地址算法是否发生变化。
 func tcAddrForKey(k key.NodePublic) netip.Addr {
 	var a [16]byte
-	r := k.Raw32()
+	r := k.AppendTo(nil)
 	a[0] = 0xfd
 	a[1] = 0x7a
 	a[2] = 0x11

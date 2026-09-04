@@ -35,7 +35,8 @@ func parseCFlag(name string, args []string) (string, []string, error) {
 
 // apiClient 是 proxyd 自有 API 的简易客户端。
 type apiClient struct {
-	base string
+	base   string
+	secret string
 }
 
 func newAPIClient(cfgFile string) (*apiClient, error) {
@@ -43,7 +44,21 @@ func newAPIClient(cfgFile string) (*apiClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取配置 %s 失败: %w", cfgFile, err)
 	}
-	return &apiClient{base: "http://" + cfg.APIListen}, nil
+	return &apiClient{base: "http://" + cfg.APIListen, secret: cfg.APISecret}, nil
+}
+
+// applyManagementAuth 为绕过 send 的长连接请求附加统一管理面认证。
+//
+// 参数说明：
+//   - request: *http.Request，即将发往 proxyd 管理 API 的请求。
+//
+// 返回值说明：无；直接修改请求头。api-secret 为空时保持请求不变。
+//
+// 错误情况：无；SetBasicAuth 会按 HTTP 标准编码用户名和口令。
+func (c *apiClient) applyManagementAuth(request *http.Request) {
+	if c.secret != "" {
+		request.SetBasicAuth("proxyd", c.secret)
+	}
 }
 
 // do 发起一次 API 调用；连接失败提示先启动实例，HTTP 错误原样透传服务端报错。
@@ -103,6 +118,7 @@ func (c *apiClient) send(method, path string, body io.Reader, headers map[string
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	c.applyManagementAuth(req)
 	hc := &http.Client{Timeout: timeout}
 	if timeout <= 0 {
 		hc = &http.Client{}

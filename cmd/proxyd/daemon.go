@@ -17,6 +17,13 @@ import (
 // pid 文件由 serve 进程自身登记/清理（state-dir/proxyd.pid），
 // 日志重定向到 state-dir/proxyd.log。
 
+const daemonHealthTimeout = time.Second
+
+// daemonHealthClient 专用于 start/status 的本地健康探测。
+// 不使用无超时的 http.DefaultClient，因为某个占用 API 端口但不返回
+// HTTP 响应的异常进程，会让原本“最长等待 10 秒”的启动流程永久卡住。
+var daemonHealthClient = &http.Client{Timeout: daemonHealthTimeout}
+
 func pidPath(cfg *config.Config) string { return filepath.Join(cfg.StateDir, "proxyd.pid") }
 
 func logPathFor(cfg *config.Config) string { return filepath.Join(cfg.StateDir, "proxyd.log") }
@@ -93,8 +100,7 @@ func cmdStart(args []string) error {
 		if !pidAlive(pid) {
 			return fmt.Errorf("后台进程 (pid %d) 启动后即退出，请查看日志 %s", pid, logPathFor(cfg))
 		}
-		if resp, err := http.Get(base + "/healthz"); err == nil {
-			_ = resp.Body.Close()
+		if healthEndpointResponds(daemonHealthClient, base, cfg.APISecret) {
 			ready = true
 			break
 		}
@@ -171,8 +177,7 @@ func cmdStatus(args []string) error {
 	base := "http://" + cfg.APIListen
 	fmt.Printf("web 控制台: %s/\n", base)
 	apiUp := false
-	if resp, err := http.Get(base + "/healthz"); err == nil {
-		_ = resp.Body.Close()
+	if healthEndpointResponds(daemonHealthClient, base, cfg.APISecret) {
 		fmt.Println("API: 正常")
 		apiUp = true
 	} else {
@@ -185,6 +190,34 @@ func cmdStatus(args []string) error {
 	}
 	fmt.Printf("日志: %s\n", logPathFor(cfg))
 	return nil
+}
+
+// healthEndpointResponds 检查目标 API 是否能在调用方给定的超时内返回 HTTP 响应。
+//
+// 参数说明：
+//   - client: *http.Client，必须配置有限超时，生产调用使用 daemonHealthClient。
+//   - base: string，API 基础地址，例如 http://127.0.0.1:19091。
+//   - secret: string，可选管理面 Basic Auth 口令；非空时用户名固定为 proxyd。
+//
+// 返回值说明：bool，仅收到 healthz 的 HTTP 200 时为 true。
+//
+// 错误情况：拨号失败、超时或读取响应头失败都返回 false；
+// 认证失败、服务错误等非 200 响应也返回 false；响应体无论状态码如何都会
+// 立即关闭，使 keep-alive 与 fd 不泄漏。
+func healthEndpointResponds(client *http.Client, base, secret string) bool {
+	request, err := http.NewRequest(http.MethodGet, base+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	if secret != "" {
+		request.SetBasicAuth("proxyd", secret)
+	}
+	resp, err := client.Do(request)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // printOverviewSummary 在 status 输出后追加运行中实例的汇总信息；失败时静默跳过，不影响基础状态输出。

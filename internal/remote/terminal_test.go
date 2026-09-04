@@ -47,7 +47,7 @@ func TestOpenWebTerminalGates(t *testing.T) {
 	if _, err := manager.OpenWebTerminal(t.Context(), TerminalSize{}); !errors.Is(err, ErrWebTerminalDisabled) {
 		t.Fatalf("默认关闭应返回 ErrWebTerminalDisabled，got %v", err)
 	}
-	if _, err := localShellSSHHandler(); err != nil {
+	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
 		t.Skip("当前平台不支持进程内 shell 服务")
 	}
 	manager.cfg.WebTerminal = true
@@ -71,7 +71,7 @@ func TestOpenWebTerminalGates(t *testing.T) {
 // 错误情况：平台不支持进程内 shell 服务时跳过；SSH 握手、PTY、输入输出、TERM 或窗口
 // 缩放任一环节失败时测试失败。超时会由 context 主动关闭会话，避免遗留登录 shell。
 func TestOpenWebTerminalPTY(t *testing.T) {
-	if _, err := localShellSSHHandler(); err != nil {
+	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
 		t.Skip("当前平台不支持进程内 shell 服务")
 	}
 	manager := NewManager(t.TempDir(), nil)

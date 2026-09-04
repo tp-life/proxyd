@@ -4,6 +4,7 @@ package autostart
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -80,12 +81,30 @@ func daemonLoaded() bool {
 	return err == nil
 }
 
-// runDeferred 经 /bin/sh 在后台延迟约 1 秒执行固定命令并立即返回。
-// 声明为变量以便测试替换。命令与 run/renderShellCommand 共用同一引用规则；
-// 子 shell 脱离父进程标准流，父进程退出不影响其执行。
+// runDeferred 经 /bin/sh 延迟约 1 秒执行固定命令并立即返回。
+//
+// 参数说明：
+//   - name: string，待执行命令的绝对路径。
+//   - args: ...string，按 renderShellCommand 规则转义的命令参数。
+//
+// 返回值说明：无；函数只负责安排延迟任务，不等待目标命令完成。
+//
+// 错误情况：进程无法启动时记录日志后放弃，保持 best-effort 语义；
+// 启动成功后必须在协程中 Wait，否则长期运行的 proxyd 会积累未回收子进程。
+// 声明为变量以便测试替换。子进程不继承父进程的标准流。
 var runDeferred = func(name string, args ...string) {
-	script := "( sleep 1; " + renderShellCommand(privilegedCommand{Name: name, Args: args}) + " ) >/dev/null 2>&1 &"
-	_ = exec.Command("/bin/sh", "-c", script).Start()
+	script := "sleep 1; exec " + renderShellCommand(privilegedCommand{Name: name, Args: args})
+	cmd := exec.Command("/bin/sh", "-c", script)
+	if err := cmd.Start(); err != nil {
+		log.Printf("[autostart] 启动延迟清理命令失败: %v", err)
+		return
+	}
+	// Start 后的子进程必须 Wait 才能回收 PID 与内核计账资源。
+	// 在独立协程等待不会延迟 HTTP 响应，也不需要 shell 再派生一层
+	// 无人回收的后台子进程。
+	go func() {
+		_ = cmd.Wait()
+	}()
 }
 
 // on 安装系统级 LaunchDaemon 并立即启动服务。

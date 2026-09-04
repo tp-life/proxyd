@@ -132,7 +132,13 @@ type RemoteConfig struct {
 	Forwards        []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
 }
 
-// Clone 返回可独立修改的 RemoteConfig 副本，供热更新失败时回滚。
+// Clone 返回可独立修改的 RemoteConfig 副本，供热更新失败时回滚或跨锁读取。
+//
+// 参数说明：无。
+//
+// 返回值说明：RemoteConfig，切片、时间指针、端口切片和启用开关均不与原值共享。
+//
+// 错误情况：无；nil 指针保持 nil，兼容“字段缺失使用默认值”的配置语义。
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
@@ -141,7 +147,14 @@ func (r RemoteConfig) Clone() RemoteConfig {
 		out.Allow[index] = entry.Clone()
 	}
 	out.Remotes = append([]RemotePeer(nil), r.Remotes...)
-	out.Forwards = append([]RemoteForward(nil), r.Forwards...)
+	out.Forwards = make([]RemoteForward, len(r.Forwards))
+	for index, forward := range r.Forwards {
+		out.Forwards[index] = forward
+		if forward.Enabled != nil {
+			enabled := *forward.Enabled
+			out.Forwards[index].Enabled = &enabled
+		}
+	}
 	return out
 }
 

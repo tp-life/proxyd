@@ -126,7 +126,12 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 
 	// 窗口尺寸协程在会话关闭、winCh 关闭前一直运行，可能晚于本函数返回，
 	// 因此使用独立 dup 出的 fd，避免与 defer 的 ptmx.Close 竞争复用。
-	if winchFd, err := unix.Dup(int(ptmx.Fd())); err == nil {
+	// Dup 必须发生在断连 watcher 启动之前：会话可能在 cmd.Start 后立即
+	// 取消，若一边调用 ptmx.Fd、一边 Close，os.File 内部状态会产生数据竞争。
+	winchFd, winchErr := unix.Dup(int(ptmx.Fd()))
+	stopWatching := watchShellSession(sess, cmd, func() { _ = ptmx.Close() })
+	defer stopWatching()
+	if winchErr == nil {
 		go func() {
 			defer unix.Close(winchFd)
 			for win := range winCh {
@@ -150,6 +155,36 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 		return
 	}
 	sess.Exit(0)
+}
+
+// prepareShellProcess 为无 PTY shell 建立独立进程组，使断连清理能覆盖子进程。
+//
+// 参数说明：
+//   - cmd: *exec.Cmd，尚未启动的 shell 命令。
+//
+// 返回值说明：无；直接填充 SysProcAttr。
+//
+// 错误情况：进程组创建失败会由后续 cmd.Start 返回，本函数不单独产生错误。
+func prepareShellProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// terminateShellProcess 强制终止 shell 所在的 Unix 进程组。
+//
+// 参数说明：
+//   - cmd: *exec.Cmd，已经成功启动的 shell 命令。
+//
+// 返回值说明：无；用于异常断连的 best-effort 清理。
+//
+// 错误情况：进程已退出或组信号失败时忽略错误；
+// 组终止失败时再尝试终止直接子进程，避免至少会话 shell 本身残留。
+func terminateShellProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // loginShell 返回用户的登录 shell。

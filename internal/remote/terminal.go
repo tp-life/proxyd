@@ -29,7 +29,7 @@ const (
 
 var (
 	// ErrWebTerminalDisabled 表示高权限浏览器终端入口尚未显式开启。
-	ErrWebTerminalDisabled = errors.New("Web 终端未开启")
+	ErrWebTerminalDisabled = errors.New("web 终端未开启")
 )
 
 // TerminalSize 是浏览器与 PTY 之间传递的字符网格尺寸值对象。
@@ -122,7 +122,7 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 		return nil, ErrWebTerminalDisabled
 	}
 
-	handler, err := localShellSSHHandler()
+	handler, err := localShellSSHHandler(m.stateDir)
 	if err != nil {
 		return nil, err
 	}

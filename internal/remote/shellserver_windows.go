@@ -106,6 +106,15 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 		return
 	}
 	defer cp.Close()
+	processDone := make(chan struct{})
+	defer close(processDone)
+	go func() {
+		select {
+		case <-sess.Context().Done():
+			cp.Terminate()
+		case <-processDone:
+		}
+	}()
 
 	go io.Copy(cp.inWrite, sess) // stdin
 
@@ -136,6 +145,30 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 		return
 	}
 	sess.Exit(code)
+}
+
+// prepareShellProcess 保留 Windows 无 PTY 命令的默认创建属性。
+//
+// 参数说明：
+//   - cmd: *exec.Cmd，尚未启动的 PowerShell 命令。
+//
+// 返回值说明：无。
+//
+// 错误情况：无；Windows 由 Process.Kill 终止直接子进程。
+func prepareShellProcess(_ *exec.Cmd) {}
+
+// terminateShellProcess 强制终止 Windows 无 PTY shell 进程。
+//
+// 参数说明：
+//   - cmd: *exec.Cmd，已经成功启动的 PowerShell 命令。
+//
+// 返回值说明：无；用于会话断开后的 best-effort 回收。
+//
+// 错误情况：进程已退出时 Kill 会失败，收尾路径安全忽略该错误。
+func terminateShellProcess(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // conPTY 是挂接了单个进程的 Windows 伪控制台。
@@ -279,6 +312,19 @@ func (c *conPTY) WaitExitCode() (int, error) {
 		return 0, err
 	}
 	return int(code), nil
+}
+
+// Terminate 终止伪终端中的直接子进程，并关闭输入管道。
+//
+// 参数说明：无；接收者持有已创建的进程句柄。
+//
+// 返回值说明：无；仅用于 SSH 断连后的 best-effort 清理。
+//
+// 错误情况：进程已退出、句柄已关闭或管道已关闭时的错误均可忽略；
+// WaitExitCode 会观察到进程退出并让主流程继续释放 ConPTY 句柄。
+func (c *conPTY) Terminate() {
+	_ = c.inWrite.Close()
+	_ = windows.TerminateProcess(c.proc, 1)
 }
 
 // CloseConsole 只关闭伪控制台本身，不动管道与进程句柄。

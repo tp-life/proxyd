@@ -17,8 +17,8 @@ import (
 //
 // 返回值说明：error，参数、配置解析和系统服务操作全部成功时为 nil。
 //
-// 错误情况：参数非法、配置不可读、路径解析失败或平台自启项操作失败时返回错误；
-// macOS 安装/移除 LaunchDaemon 时系统会请求管理员授权。
+// 错误情况：参数非法、配置不可读、首次 api-secret 引导、路径解析或平台自启项操作
+// 失败时返回错误；macOS 安装/移除 LaunchDaemon 时系统会请求管理员授权。
 func cmdAutostart(args []string) error {
 	fs := flag.NewFlagSet("autostart", flag.ExitOnError)
 	cfgFile := fs.String("c", config.DefaultPath(), "配置文件路径")
@@ -28,8 +28,13 @@ func cmdAutostart(args []string) error {
 	}
 	switch fs.Arg(0) {
 	case "on":
-		cfg, err := config.Load(*cfgFile)
+		// LaunchDaemon 启动后没有交互 stdin，因此必须在当前前台命令中完成
+		// api-secret 首次录入和落盘，重启后服务只读取已保存值。
+		cfg, err := config.LoadForAPISecretBootstrap(*cfgFile)
 		if err != nil {
+			return err
+		}
+		if err := ensureAPISecret(cfg, *cfgFile); err != nil {
 			return err
 		}
 		exe, err := os.Executable()

@@ -1,6 +1,7 @@
 package ruleurl
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -16,6 +17,25 @@ import (
 
 	"proxyd/internal/config"
 )
+
+// TestReadLimitedResponseBodyRejectsOverflow 验证规则源读取达到上限时仍能成功，
+// 多出一个字节时则整体拒绝，防止截断规则被写入缓存并应用。
+//
+// 参数说明：
+//   - t: *testing.T，负责输入构造和边界断言。
+//
+// 返回值说明：无。
+//
+// 错误情况：合法边界正文被拒绝，或超限正文仍以部分数据返回时测试失败。
+func TestReadLimitedResponseBodyRejectsOverflow(t *testing.T) {
+	body, err := readLimitedResponseBody(bytes.NewBufferString("1234"), 4)
+	if err != nil || string(body) != "1234" {
+		t.Fatalf("上限内正文 body=%q err=%v", body, err)
+	}
+	if body, err := readLimitedResponseBody(bytes.NewBufferString("12345"), 4); err == nil || body != nil {
+		t.Fatalf("超限正文应被完整拒绝，body=%q err=%v", body, err)
+	}
+}
 
 func TestParseRuleText(t *testing.T) {
 	body := `# 注释

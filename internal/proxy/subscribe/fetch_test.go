@@ -1,6 +1,7 @@
 package subscribe
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -10,6 +11,25 @@ import (
 
 	"proxyd/internal/config"
 )
+
+// TestReadLimitedResponseBodyRejectsOverflow 验证订阅读取上限不会把超长正文
+// 静默截断成看似成功的数据，同时允许刚好到达上限的完整正文。
+//
+// 参数说明：
+//   - t: *testing.T，负责输入构造和边界断言。
+//
+// 返回值说明：无。
+//
+// 错误情况：limit 字节被误拒绝，或 limit+1 字节未返回错误时测试失败。
+func TestReadLimitedResponseBodyRejectsOverflow(t *testing.T) {
+	body, err := readLimitedResponseBody(bytes.NewBufferString("1234"), 4)
+	if err != nil || string(body) != "1234" {
+		t.Fatalf("上限内正文 body=%q err=%v", body, err)
+	}
+	if body, err := readLimitedResponseBody(bytes.NewBufferString("12345"), 4); err == nil || body != nil {
+		t.Fatalf("超限正文应被完整拒绝，body=%q err=%v", body, err)
+	}
+}
 
 func TestFetchCacheFallback(t *testing.T) {
 	stateDir := t.TempDir()
