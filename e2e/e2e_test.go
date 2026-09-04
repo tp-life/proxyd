@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +27,6 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
-	"proxyd/internal/proxy/sysproxy"
 )
 
 // fakeSocks5 是一个最小 SOCKS5 服务器：无论客户端请求连接哪里，
@@ -1286,52 +1284,9 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("cli main-node off 后主端口 got %q", got)
 	}
 
-	// ---- 系统代理（macOS 真实执行 networksetup，测试后恢复原状）----
-	if runtime.GOOS == "darwin" {
-		snap, err := sysproxy.Snapshot()
-		if err != nil {
-			t.Logf("sysproxy snapshot 失败，跳过: %v", err)
-		} else {
-			defer func() { _ = sysproxy.Restore(snap) }()
-			resp, err = http.Post(base+"/api/system-proxy", "application/json", strings.NewReader(`{"enabled":true}`))
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				t.Errorf("system-proxy on: status=%d", resp.StatusCode)
-			}
-			if on, _ := sysproxy.Status("127.0.0.1", cfg.MixedPort); !on {
-				t.Error("系统代理未生效")
-			}
-			saved, _ = config.Load(cfgPath)
-			if !saved.SystemProxy {
-				t.Error("system-proxy 未持久化")
-			}
-			// 主端口变更时系统代理自动重绑到新端口
-			rebindPort := freePort(t)
-			for rebindPort >= newLo && rebindPort <= newLo+1 || rebindPort == cfg.MixedPort {
-				rebindPort = freePort(t)
-			}
-			resp, _ = http.Post(base+"/api/main-port", "application/json",
-				strings.NewReader(fmt.Sprintf(`{"port":%d}`, rebindPort)))
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				t.Errorf("main-port（系统代理开启中）: status=%d", resp.StatusCode)
-			}
-			if on, _ := sysproxy.Status("127.0.0.1", rebindPort); !on {
-				t.Error("系统代理未跟随主端口重绑")
-			}
-			resp, _ = http.Post(base+"/api/system-proxy", "application/json", strings.NewReader(`{"enabled":false}`))
-			resp.Body.Close()
-			if resp.StatusCode != 200 {
-				t.Errorf("system-proxy off: status=%d", resp.StatusCode)
-			}
-			if on, _ := sysproxy.Status("127.0.0.1", cfg.MixedPort); on {
-				t.Error("系统代理未关闭")
-			}
-		}
-	}
+	// 系统代理会修改宿主机全局状态，因此由平台测试文件决定是否执行并负责恢复。
+	// 非 macOS 构建调用同签名空实现，避免运行时判断仍解析 Darwin 专属符号的问题。
+	testSystemProxyLifecycle(t, base, cfgPath, cfg.MixedPort, newLo)
 
 	// 清理 mihomo 全局状态，避免污染其他测试
 	a.Shutdown()
