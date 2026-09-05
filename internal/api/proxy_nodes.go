@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"proxyd/internal/app"
+	"proxyd/internal/autostart"
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
 )
@@ -36,29 +37,30 @@ type NodeEntry struct {
 
 // Overview 是 /api/overview 的响应。
 type Overview struct {
-	Mode               string                 `json:"mode"`
-	Listen             string                 `json:"listen"`
-	MixedPort          int                    `json:"mixed_port"`
-	MainAuto           bool                   `json:"main_auto"`            // 主端口是否固定走最优节点（跳过规则）
-	MainNode           string                 `json:"main_node"`            // 主端口固定节点（node key；空串=跟随规则）
-	MainNodeUp         bool                   `json:"main_node_up"`         // main-node 当前是否生效（节点可用且 main-auto 未开）
-	AutoPort           int                    `json:"auto_port"`            // 0 表示关闭
-	PortMappingEnabled bool                   `json:"port_mapping_enabled"` // 一对一节点端口 listener 是否实际启用
-	SystemProxy        bool                   `json:"system_proxy"`         // 配置状态（是否启用系统代理）
-	TUN                app.TUNStatus          `json:"tun"`                  // TUN 开关与当前进程权限状态
-	DNSPreset          string                 `json:"dns_preset"`           // off|fake-ip|redir-host
-	DNSCustom          bool                   `json:"dns_custom"`           // true 表示手写 dns 段优先，预设暂不生效
-	Version            app.VersionCheckStatus `json:"version_check"`        // 启动异步检查的缓存状态，不在 overview 请求中联网
-	Autostart          bool                   `json:"autostart"`            // OS 级开机自启项是否存在（实时查询）
-	ServerTime         string                 `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
-	PortRange          [2]int                 `json:"port_range"`
-	Subs               []SubEntry             `json:"subscriptions"`
-	ManualNodes        []app.ManualNodeEntry  `json:"manual_nodes"`
-	Ports              []PortEntry            `json:"ports"`            // 当前实际监听的一对一节点端口
-	PortAssignments    []PortEntry            `json:"port_assignments"` // 稳定分配快照；关闭映射时仍保留
-	Nodes              []NodeEntry            `json:"nodes"`
-	CustomRules        []string               `json:"custom_rules"`
-	Groups             []config.NodeGroup     `json:"groups"`
+	Mode               string                  `json:"mode"`
+	Listen             string                  `json:"listen"`
+	MixedPort          int                     `json:"mixed_port"`
+	MainAuto           bool                    `json:"main_auto"`            // 主端口是否固定走最优节点（跳过规则）
+	MainNode           string                  `json:"main_node"`            // 主端口固定节点（node key；空串=跟随规则）
+	MainNodeUp         bool                    `json:"main_node_up"`         // main-node 当前是否生效（节点可用且 main-auto 未开）
+	AutoPort           int                     `json:"auto_port"`            // 0 表示关闭
+	PortMappingEnabled bool                    `json:"port_mapping_enabled"` // 一对一节点端口 listener 是否实际启用
+	SystemProxy        bool                    `json:"system_proxy"`         // 配置状态（是否启用系统代理）
+	TUN                app.TUNStatus           `json:"tun"`                  // TUN 开关与当前进程权限状态
+	DNSPreset          string                  `json:"dns_preset"`           // off|fake-ip|redir-host
+	DNSCustom          bool                    `json:"dns_custom"`           // true 表示手写 dns 段优先，预设暂不生效
+	Version            app.VersionCheckStatus  `json:"version_check"`        // 启动异步检查的缓存状态，不在 overview 请求中联网
+	Autostart          bool                    `json:"autostart"`            // OS 级开机自启项是否存在（实时查询）
+	AutostartRuntime   autostart.RuntimeStatus `json:"autostart_runtime"`    // 注册与托管进程状态分开，启动失败不会隐藏在开关后
+	ServerTime         string                  `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
+	PortRange          [2]int                  `json:"port_range"`
+	Subs               []SubEntry              `json:"subscriptions"`
+	ManualNodes        []app.ManualNodeEntry   `json:"manual_nodes"`
+	Ports              []PortEntry             `json:"ports"`            // 当前实际监听的一对一节点端口
+	PortAssignments    []PortEntry             `json:"port_assignments"` // 稳定分配快照；关闭映射时仍保留
+	Nodes              []NodeEntry             `json:"nodes"`
+	CustomRules        []string                `json:"custom_rules"`
+	Groups             []config.NodeGroup      `json:"groups"`
 }
 
 // handleOverview 聚合应用内存快照，返回控制台一次轮询所需的完整只读状态。
@@ -69,7 +71,7 @@ type Overview struct {
 //
 // 返回值：无；成功返回 HTTP 200 与 Overview JSON。
 //
-// 错误情况：无外部 I/O；版本检查只读取 App 缓存，绝不会在十秒轮询路径同步访问 GitHub。
+// 错误情况：系统自启查询采用有超时的本机 I/O，故障通过状态消息返回；版本检查只读缓存。
 func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	cfg := s.app.Config()
 	subInfos := s.app.SubscriptionUserInfos()
@@ -84,6 +86,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	subs := map[string]int{} // 订阅名 -> ov.Subs 下标
+	autostartRuntime := s.app.AutostartRuntime()
 	ov := Overview{
 		Mode:               s.app.Mode(),
 		Listen:             cfg.Listen,
@@ -97,7 +100,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		DNSPreset:          cfg.DNSPreset,
 		DNSCustom:          len(cfg.DNS) > 0,
 		Version:            s.app.VersionStatus(),
-		Autostart:          s.app.AutostartStatus(),
+		Autostart:          autostartRuntime.Enabled,
+		AutostartRuntime:   autostartRuntime,
 		ServerTime:         time.Now().Format(time.RFC3339), // 服务器本地时间（含时区偏移）
 		PortRange:          cfg.PortRange,
 		Subs:               []SubEntry{},

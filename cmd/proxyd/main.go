@@ -327,13 +327,17 @@ func firstRunGuide(configPath string) error {
 //
 // 错误情况：版本检查通过应用层异步执行，GitHub 不可达不会阻塞 API、代理核心或退出清理。
 func cmdServe(args []string) error {
+	started := time.Now()
+	log.Printf("[startup] pid=%d 开始启动，托管服务=%q", os.Getpid(), os.Getenv("XPC_SERVICE_NAME"))
 	cfg, cfgPath, err := loadConfigOrRepair(args, true)
 	if err != nil {
 		return err
 	}
+	log.Printf("[startup] pid=%d 配置加载完成，累计耗时=%s", os.Getpid(), time.Since(started))
 	if err := offerStateDirRepair(cfg); err != nil {
 		return err
 	}
+	log.Printf("[startup] pid=%d 状态目录检查完成，累计耗时=%s", os.Getpid(), time.Since(started))
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {
 		return fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
 	}
@@ -342,6 +346,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 	a.ConfigureUpdateCheck(version, updatecheck.New())
+	log.Printf("[startup] pid=%d 应用初始化完成，累计耗时=%s", os.Getpid(), time.Since(started))
 
 	apiSrv := api.New(cfg.APIListen, a)
 	apiSrv.SetRestarter(func() error {
@@ -362,6 +367,7 @@ func cmdServe(args []string) error {
 	if err := apiSrv.Start(); err != nil {
 		return fmt.Errorf("start api on %s: %w", cfg.APIListen, err)
 	}
+	log.Printf("[startup] pid=%d API 已监听，累计耗时=%s", os.Getpid(), time.Since(started))
 	// 登记 pid 文件（供 stop/status/防重复启动），退出时清理
 	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
 		log.Printf("[proxyd] 写 pid 文件失败（不影响运行）: %v", err)

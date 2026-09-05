@@ -60,7 +60,9 @@ func loadConfigFile(name string, args []string) (*config.Config, string, error) 
 	return cfg, *cfgFile, nil
 }
 
-// cmdStart 后台启动：派生 detached 子进程执行 serve，日志落 state-dir/proxyd.log。
+// cmdStart 后台启动，已由系统托管时等待系统实例，否则派生 serve。
+// 参数：args 为 []string，配置及订阅参数。返回：error，启动成功时为 nil。
+// 错误：配置、权限、系统查询或就绪等待失败；系统托管分支绝不回退到独立派生。
 func cmdStart(args []string) error {
 	cfg, cfgPath, err := loadConfigOrRepair(args, true)
 	if err != nil {
@@ -68,6 +70,9 @@ func cmdStart(args []string) error {
 	}
 	// 子进程 detached 后无法交互，权限修复必须在父进程完成
 	if err := offerStateDirRepair(cfg); err != nil {
+		return err
+	}
+	if handled, err := managedStart(cfg, cfgPath, false); handled {
 		return err
 	}
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {
@@ -151,7 +156,16 @@ func cmdStop(args []string) error {
 	return fmt.Errorf("等待进程 %d 退出超时（仍在运行）", pid)
 }
 
+// cmdRestart 重启当前配置的实例，系统托管时由 KeepAlive 创建替代进程。
+// 参数：args 为 []string，配置参数。返回：error。错误：配置、停止或启动失败。
 func cmdRestart(args []string) error {
+	cfg, path, err := loadConfigFile("restart", args)
+	if err != nil {
+		return err
+	}
+	if handled, err := managedStart(cfg, path, true); handled {
+		return err
+	}
 	if err := cmdStop(args); err != nil && !strings.Contains(err.Error(), "未在运行") {
 		return err
 	}
@@ -199,10 +213,10 @@ func cmdStatus(args []string) error {
 //   - base: string，API 基础地址，例如 http://127.0.0.1:19091。
 //   - secret: string，可选管理面 Basic Auth 口令；非空时用户名固定为 proxyd。
 //
-// 返回值说明：bool，仅收到 healthz 的 HTTP 200 时为 true。
+// 返回值说明：bool，收到 healthz 的 HTTP 204 或兼容旧版的 HTTP 200 时为 true。
 //
 // 错误情况：拨号失败、超时或读取响应头失败都返回 false；
-// 认证失败、服务错误等非 200 响应也返回 false；响应体无论状态码如何都会
+// 认证失败、服务错误等其他响应返回 false；响应体无论状态码如何都会
 // 立即关闭，使 keep-alive 与 fd 不泄漏。
 func healthEndpointResponds(client *http.Client, base, secret string) bool {
 	request, err := http.NewRequest(http.MethodGet, base+"/healthz", nil)
@@ -217,7 +231,7 @@ func healthEndpointResponds(client *http.Client, base, secret string) bool {
 		return false
 	}
 	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent
 }
 
 // printOverviewSummary 在 status 输出后追加运行中实例的汇总信息；失败时静默跳过，不影响基础状态输出。

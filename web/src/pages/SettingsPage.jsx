@@ -211,6 +211,8 @@ export function SettingsPage({ forms, overview, onForm, onImportConfig, onPost, 
               <UISwitch checked={Boolean(overview.tun?.enabled)} label="启用 TUN 模式" onCheckedChange={(enabled) => onPost("/api/tun", { enabled }, enabled ? "TUN 已开启" : "TUN 已关闭")} />
               {overview.tun && <p className={classNames("permission-note", overview.tun.allowed && (!overview.tun.enabled || overview.tun.active) ? "ok" : "warn")}>{overview.tun.enabled && !overview.tun.active ? "TUN 配置已开启但实际未生效，请检查日志" : overview.tun.allowed ? `${overview.tun.platform} 权限可用` : overview.tun.permission}</p>}
               <UISwitch checked={overview.autostart} label="系统启动时自动启动 proxyd" onCheckedChange={(enabled) => onPost("/api/autostart", { enabled }, enabled ? "开机自启已开启" : "开机自启已关闭")} />
+              {/* 自启开关表示注册意愿；运行态单独展示，避免已安装但启动失败时误导用户。 */}
+              {overview.autostart_runtime && <p role="status" className={classNames("permission-note", overview.autostart_runtime.running ? "ok" : "warn")}>{overview.autostart_runtime.message}</p>}
             </div>
           </section>
         </div>

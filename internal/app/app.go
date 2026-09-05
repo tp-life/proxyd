@@ -424,6 +424,16 @@ func (a *App) AutostartStatus() bool {
 	return err == nil && on
 }
 
+// AutostartRuntime 查询系统自启运行态，不读取代理领域对象或修改配置。
+// 参数：无。返回：autostart.RuntimeStatus 快照。错误：系统查询失败保留在快照消息中。
+func (a *App) AutostartRuntime() autostart.RuntimeStatus {
+	s := autostart.Inspect()
+	if s.Loaded && (!s.Running || s.PID != os.Getpid()) {
+		s.Message += "；当前控制台由独立实例提供，可执行 proxyd restart 交回系统托管"
+	}
+	return s
+}
+
 // autostartOptions 构建注册自启项的参数：二进制与配置文件均取绝对路径。
 //
 // 参数说明：无。

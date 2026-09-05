@@ -111,7 +111,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd <url>` | `serve <url>` 的快捷形式 |
 | `proxyd start [-c 配置]` | 后台守护模式：派生 detached 子进程执行 serve，日志落 `state-dir/proxyd.log`，pid 写 `state-dir/proxyd.pid`；启动后做就绪等待（轮询 API，最长 10s）并打印 Web 地址；已运行则报错 |
 | `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s，清理 pid 文件；stale pid 自动清理 |
-| `proxyd restart` | stop + start |
+| `proxyd restart` | 重启当前实例；macOS 同配置由系统托管时，请求旧实例退出并等待系统拉起替代进程 |
 | `proxyd status` | 运行中显示 pid、端口、Web 地址、API 健康状态，并追加实例汇总（模式/节点存活/端口映射/主端口策略/系统代理/TUN/DNS/自启/新版本提醒） |
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
@@ -175,7 +175,11 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
-`off` 移除对应项，但**不影响正在运行的实例**：macOS 只删除 plist（launchd 内存中的定义保留到本次开机结束，进程继续运行，重启后不再拉起）；Linux 只 `disable` 不停止服务；Windows 同样不影响已运行实例。`status` 检测自启项是否存在。不支持的平台返回明确错误。
+`off` 移除对应项，但**不影响正在运行的实例**：macOS 只删除 plist（launchd 内存中的定义保留到本次开机结束，进程继续运行，重启后不再拉起）；Linux 只 `disable` 不停止服务；Windows 同样不影响已运行实例。`status` 分别显示自启项注册状态和服务状态；macOS 会查询系统托管 PID、运行状态及最近退出码，其他平台明确提示尚未查询进程状态。不支持的平台返回明确错误。
+
+macOS 已加载同配置的系统服务时，`proxyd start` 等待该服务就绪，`proxyd restart` 请求旧实例退出并由 KeepAlive 拉起新实例，不再自行派生竞争进程。等待最多 60 秒，只有系统 PID、配置 PID 与认证健康检查同时匹配才算成功。若独立启动的旧实例占用资源，可执行 `proxyd restart` 交回系统托管；查询失败或等待超时不会回退到独立启动。
+
+Web 设置页的开关表示自启注册状态，下方单独显示系统服务运行信息；`/api/overview` 的 `autostart_runtime` 包含该快照。启动日志通过 `[startup]` 记录 PID 和配置加载、目录检查、应用初始化、API 监听的累计耗时。生成的 LaunchDaemon 使用 `ProcessType=Standard`；旧安装可执行 `proxyd autostart on` 更新磁盘 plist，已加载的服务定义会在下次开机时读取新版。
 
 ### 配置备份与恢复
 

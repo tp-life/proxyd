@@ -67,6 +67,7 @@ func cmdAutostart(args []string) error {
 		} else {
 			fmt.Println("开机自启：关闭")
 		}
+		fmt.Println("服务状态：" + autostart.Inspect().Message)
 	default:
 		return fmt.Errorf("未知操作 %q，用法: proxyd autostart [-c 配置文件] on|off|status", fs.Arg(0))
 	}

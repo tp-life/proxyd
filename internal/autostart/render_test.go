@@ -24,6 +24,7 @@ func TestRenderPlist(t *testing.T) {
 		"<string>/Users/x/.config/proxyd/config.yaml</string>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>KeepAlive</key>\n\t<true/>",
+		"<key>ProcessType</key>\n\t<string>Standard</string>",
 		"<key>UserName</key>\n\t<string>x</string>",
 		"<key>HOME</key>\n\t\t<string>/Users/x</string>",
 		"<string>/Users/x/.local/state/proxyd/proxyd.log</string>",

@@ -63,7 +63,7 @@ func TestHealthEndpointRespondsHasBoundedTimeout(t *testing.T) {
 }
 
 // TestHealthEndpointRespondsRequiresOKAndAuthentication 验证健康检查只有在携带正确
-// 管理口令并收到 HTTP 200 时才判定服务就绪。
+// 管理口令并收到真实 healthz 的 HTTP 204 时才判定服务就绪。
 //
 // 参数说明：
 //   - t: *testing.T，提供隔离 HTTP 服务和断言。
@@ -78,7 +78,8 @@ func TestHealthEndpointRespondsRequiresOKAndAuthentication(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		// 真实 /healthz 返回 204；保留该响应才能覆盖 CLI 与 API 之间的协议不一致。
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
@@ -87,6 +88,6 @@ func TestHealthEndpointRespondsRequiresOKAndAuthentication(t *testing.T) {
 		t.Fatal("HTTP 401 不应被判定为健康")
 	}
 	if !healthEndpointResponds(client, server.URL, "management-secret") {
-		t.Fatal("携带正确 Basic Auth 的 HTTP 200 应判定为健康")
+		t.Fatal("携带正确 Basic Auth 的 HTTP 204 应判定为健康")
 	}
 }

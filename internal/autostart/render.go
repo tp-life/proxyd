@@ -38,6 +38,8 @@ func plistEscape(s string) string {
 // 错误情况：无；所有外部文本都会执行 XML 转义，文件写入与 launchctl 错误由调用方处理。
 func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
 	esc := plistEscape
+	// 代理直接影响用户网络可用性，使用普通服务资源级别，避免 Background 对 CPU/I/O
+	// 的额外限制拖慢开机初始化；不使用依赖 XPC 活动的 Adaptive 分类。
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -65,7 +67,7 @@ func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>
 	<key>ProcessType</key>
-	<string>Background</string>
+	<string>Standard</string>
 	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>
