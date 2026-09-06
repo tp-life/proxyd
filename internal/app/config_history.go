@@ -2,7 +2,7 @@ package app
 
 // 本文件编排配置历史与恢复，完整快照仅通过仓储解密后交给配置校验器。
 import (
-	"bytes"
+	"crypto/md5"
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"os"
@@ -64,8 +64,9 @@ func changedSections(before, after []byte) []string {
 	return out
 }
 
-// saveWithHistoryLocked 归档当前磁盘配置后原子保存目标，归档失败不修改主配置。
-// 参数 next 为目标配置、reason 为摘要；返回 error；调用者持有 a.mu，避免恢复与配置写入竞争。
+// saveWithHistoryLocked 仅在完整配置内容的 MD5 改变时归档当前磁盘配置并原子保存目标。
+// 参数 next 为 *config.Config、reason 为 string 摘要；返回 error；归档或写盘错误向事务传播。
+// 调用者持有 a.mu，串行完成比较、归档和保存；MD5 仅用于内容去重，不作为凭据或恢复授权校验。
 func (a *App) saveWithHistoryLocked(next *config.Config, reason string) error {
 	target, err := next.ExportYAML(false)
 	if err != nil {
@@ -75,7 +76,10 @@ func (a *App) saveWithHistoryLocked(next *config.Config, reason string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err == nil && !bytes.Equal(current, target) {
+	if err == nil && md5.Sum(current) == md5.Sum(target) {
+		return nil
+	}
+	if err == nil {
 		// 归档保留磁盘原文，包括不满足新规则的旧配置，但不能把未校验字段当作安全公开数据。
 		// 只有通过完整校验的配置才能生成脱敏副本；其余原文只加密保存，不阻碍本次修复写入。
 		redacted := []byte("# 原配置未通过当前版本校验，仅保留加密快照，无法导出脱敏内容。\n")
@@ -86,8 +90,19 @@ func (a *App) saveWithHistoryLocked(next *config.Config, reason string) error {
 				return redactErr
 			}
 		}
-		if _, archiveErr := a.configHistory.Archive(current, redacted, reason, changedSections(current, target)); archiveErr != nil {
-			return fmt.Errorf("归档配置历史失败: %w", archiveErr)
+		// 归档成功但主文件写入失败时，重试可能再次遇到相同快照；仅与最新历史比较。
+		// 不扫描所有历史，确保 A→B→A→B 这样的真实往返仍保留每次变更前的回滚点。
+		duplicate := false
+		if versions, listErr := a.configHistory.List(); listErr == nil && len(versions) > 0 {
+			if latest, readErr := a.configHistory.Read(versions[0].ID); readErr == nil {
+				duplicate = md5.Sum(latest) == md5.Sum(current)
+			}
+		}
+		// 旧历史无法解密时不能据此判断重复，继续归档当前配置；仓储仍会拒绝缺失密钥等错误。
+		if !duplicate {
+			if _, archiveErr := a.configHistory.Archive(current, redacted, reason, changedSections(current, target)); archiveErr != nil {
+				return fmt.Errorf("归档配置历史失败: %w", archiveErr)
+			}
 		}
 	}
 	return next.Save(a.cfgPath)

@@ -25,7 +25,7 @@ export function ConfigHistoryPage({ requestConfirmation, showToast, onRestart })
     } catch (e) { showToast(e.message, "err"); } finally { setBusy(""); }
   }
   return <div className="space-y-5">
-    <PageHeader title="配置历史" detail="自动保存最近 30 次变更前的配置，支持预检和恢复。下载的历史文件已脱敏；历史不包含独立的身份密钥文件。" />
+    <PageHeader title="配置历史" detail="仅在配置内容变化时保存变更前快照，连续相同快照不重复记录，最多保留 30 个版本。下载的历史文件已脱敏；历史不包含独立的身份密钥文件。" />
     {error && <p role="alert" className="text-destructive">{error}</p>}
     {data.pending_restart && <div role="status" className="panel p-4 space-y-3"><p>配置已写入，等待重启生效。请重启后再修改设置。</p><Button onClick={onRestart}>重启守护进程</Button></div>}
     <Button variant="outline" disabled={Boolean(busy)} onClick={reload}>刷新历史</Button>

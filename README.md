@@ -196,6 +196,7 @@ geox-url:
 ## 开发
 
 ```sh
+make deps         # 首次直接执行 Go 命令前下载并修补 mihomo（需 Git、patch）
 go test ./...     # 单元测试 + 端到端测试（e2e/，本地假节点全流程验证）
 make              # 推荐：先构建 Web，再编译嵌入最新前端资源的 bin/proxyd
 make web          # 构建 React 控制台到 internal/api/dist，供 Go embed 使用

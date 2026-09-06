@@ -767,6 +767,8 @@ rules:
 	if err != nil {
 		t.Fatalf("Parse running config: %v", err)
 	}
+	// 配置文件和状态目录必须同时隔离；历史仓储按 state-dir 归档，不能沿用 Parse 的用户默认值。
+	running.StateDir = t.TempDir()
 	if err := running.Save(path); err != nil {
 		t.Fatalf("Save running config: %v", err)
 	}
@@ -774,6 +776,7 @@ rules:
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(a.Shutdown)
 	srv := New("127.0.0.1:0", a)
 
 	masked := httptest.NewRecorder()
@@ -844,6 +847,11 @@ rules:
 	if !result.RestartRequired {
 		t.Fatal("导入成功后必须明确要求重启")
 	}
+	// 确认功能仍实际归档，避免通过关闭历史功能让隔离回归假通过。
+	versions, err := a.ConfigHistory()
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("隔离状态目录应恰好包含一个导入前版本: count=%d err=%v", len(versions), err)
+	}
 	onDisk, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load imported config: %v", err)
@@ -870,6 +878,8 @@ func TestConfigImportAPIRejectsInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+	// 即使本用例预期拒绝导入，也为未来新增的持久化分支隔离状态目录。
+	cfg.StateDir = t.TempDir()
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -877,6 +887,7 @@ func TestConfigImportAPIRejectsInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(a.Shutdown)
 	srv := New("127.0.0.1:0", a)
 
 	rec := httptest.NewRecorder()
@@ -910,6 +921,8 @@ func TestConfigImportAPIRejectsUnconfirmedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
+	// 即使本用例预期拒绝导入，也为未来新增的持久化分支隔离状态目录。
+	cfg.StateDir = t.TempDir()
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -917,6 +930,7 @@ func TestConfigImportAPIRejectsUnconfirmedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(a.Shutdown)
 	srv := New("127.0.0.1:0", a)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/config/import", strings.NewReader(validAPIConfigYAML))
@@ -945,10 +959,11 @@ func TestConfigImportAPIRejectsUnconfirmedContent(t *testing.T) {
 // 错误情况：非 YAML Content-Type 未返回 415 时测试失败；该约束用于让浏览器先执行
 // CORS 预检，避免恶意网页向本机管理 API 静默提交配置。
 func TestConfigImportAPIRequiresYAMLContentType(t *testing.T) {
-	a, err := app.New(&config.Config{}, "")
+	a, err := app.New(&config.Config{StateDir: t.TempDir()}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(a.Shutdown)
 	srv := New("127.0.0.1:0", a)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/config/import", strings.NewReader(validAPIConfigYAML))

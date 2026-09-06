@@ -20,6 +20,7 @@ export const NAV_ITEMS = [
   { id: "groups", label: "策略分组", group: "proxy", icon: Layers },
   { id: "rules", label: "访问规则", group: "proxy", icon: ListFilter },
   { id: "connections", label: "活动连接", group: "proxy", icon: Link2 },
+  { id: "proxy/settings", label: "代理设置", group: "proxy", icon: Settings, keywords: "DNS TUN 系统代理 端口 固定节点" },
   { id: "remote/devices", keywords: "SSH 连接 诊断 diagnose 设备", label: "设备与连接", group: "remote", icon: Laptop, detail: "保存远端设备，连接 SSH 并检查链路。" },
   { id: "remote/services", label: "本机服务", group: "remote", icon: Server, detail: "管理本机隧道、SSH、浏览器终端和暴露端口。" },
   { id: "remote/access", keywords: "SSH 公钥 私钥 密钥 key 授权 白名单 到期", label: "访问授权", group: "remote", icon: KeyRound, detail: "管理 SSH 公钥、客户端白名单及隧道身份。" },
@@ -30,7 +31,7 @@ export const NAV_ITEMS = [
   { id: "diagnostics", label: "诊断中心", group: "system", icon: Activity, keywords: "DNS DERP SSH 环境 检查 排障" },
   { id: "config-history", label: "配置历史", group: "system", icon: History, keywords: "版本 恢复 回滚 备份" },
   { id: "logs", label: "运行日志", group: "system", icon: Terminal },
-  { id: "settings", label: "系统设置", group: "system", icon: Shield },
+  { id: "settings", label: "通用设置", group: "system", icon: Shield, keywords: "系统设置 开机自启 版本检查 导入 导出 备份 重启" },
 ];
 
 /**

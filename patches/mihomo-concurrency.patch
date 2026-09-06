@@ -1,0 +1,158 @@
+--- a/log/log.go
++++ b/log/log.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"fmt"
+ 	"os"
++	"sync/atomic"
+ 
+ 	"github.com/metacubex/mihomo/common/observable"
+ 
+@@ -12,10 +13,12 @@
+ var (
+ 	logCh  = make(chan Event)
+ 	source = observable.NewObservable[Event](logCh)
+-	level  = INFO
++	level  atomic.Int32
+ )
+ 
++// init 初始化日志输出和原子级别；无参数、无返回；进程启动时执行。
+ func init() {
++	level.Store(int32(INFO))
+ 	log.SetOutput(os.Stdout)
+ 	log.SetLevel(log.DebugLevel)
+ 	log.SetFormatter(&log.TextFormatter{
+@@ -71,16 +74,20 @@
+ 	source.UnSubscribe(sub)
+ }
+ 
++// Level 并发读取日志级别；无参数，返回 LogLevel；不会发生数据竞争或返回错误。
+ func Level() LogLevel {
+-	return level
++	return LogLevel(level.Load())
+ }
+ 
++// SetLevel 原子发布级别；参数 newLevel 为 LogLevel；无返回、无错误。
++// 必须同步所有读写，因为热更新与控制器写入会和后台日志协程同时执行。
+ func SetLevel(newLevel LogLevel) {
+-	level = newLevel
++	level.Store(int32(newLevel))
+ }
+ 
++// print 按原子级别过滤事件；参数 data 为 Event；无返回，输出由 logrus 处理。
+ func print(data Event) {
+-	if data.LogLevel < level {
++	if data.LogLevel < Level() {
+ 		return
+ 	}
+ 
+--- a/adapter/inbound/auth.go
++++ b/adapter/inbound/auth.go
+@@ -3,18 +3,28 @@
+ import (
+ 	"net"
+ 	"net/netip"
++	"slices"
++	"sync"
+ 
+ 	C "github.com/metacubex/mihomo/constant"
+ )
+ 
++// 认证前缀由热更新写入、监听协程读取，锁覆盖全部访问，快照复制隔离外部修改。
+ var skipAuthPrefixes []netip.Prefix
++var skipAuthMu sync.RWMutex
+ 
++// SetSkipAuthPrefixes 发布认证豁免前缀；参数为前缀切片；无返回、无错误，复制后持锁替换。
+ func SetSkipAuthPrefixes(prefixes []netip.Prefix) {
+-	skipAuthPrefixes = prefixes
++	skipAuthMu.Lock()
++	defer skipAuthMu.Unlock()
++	skipAuthPrefixes = slices.Clone(prefixes)
+ }
+ 
++// SkipAuthPrefixes 读取独立前缀快照；无参数，返回切片；无错误，调用者修改不影响授权。
+ func SkipAuthPrefixes() []netip.Prefix {
+-	return skipAuthPrefixes
++	skipAuthMu.RLock()
++	defer skipAuthMu.RUnlock()
++	return slices.Clone(skipAuthPrefixes)
+ }
+ 
+ func SkipAuthRemoteAddr(addr net.Addr) bool {
+@@ -33,6 +43,9 @@
+ 	return skipAuth(m.AddrPort().Addr())
+ }
+ 
++// skipAuth 判断源地址是否豁免认证；参数为 IP 地址，返回 bool；锁保护热更新期间的读取。
+ func skipAuth(addr netip.Addr) bool {
++	skipAuthMu.RLock()
++	defer skipAuthMu.RUnlock()
+ 	return prefixesContains(skipAuthPrefixes, addr)
+ }
+--- a/adapter/inbound/ipfilter.go
++++ b/adapter/inbound/ipfilter.go
+@@ -3,27 +3,43 @@
+ import (
+ 	"net"
+ 	"net/netip"
++	"slices"
++	"sync"
+ 
+ 	C "github.com/metacubex/mihomo/constant"
+ )
+ 
++// 监听协程与热更新共享过滤策略，读写均持锁；外部只能取得副本。
++var ipFilterMu sync.RWMutex
+ var lanAllowedIPs []netip.Prefix
+ var lanDisAllowedIPs []netip.Prefix
+ 
++// SetAllowedIPs 更新 IP 过滤前缀；参数为前缀切片；无返回、无错误，复制后持锁发布。
+ func SetAllowedIPs(prefixes []netip.Prefix) {
+-	lanAllowedIPs = prefixes
++	ipFilterMu.Lock()
++	defer ipFilterMu.Unlock()
++	lanAllowedIPs = slices.Clone(prefixes)
+ }
+ 
++// SetDisAllowedIPs 更新 IP 过滤前缀；参数为前缀切片；无返回、无错误，复制后持锁发布。
+ func SetDisAllowedIPs(prefixes []netip.Prefix) {
+-	lanDisAllowedIPs = prefixes
++	ipFilterMu.Lock()
++	defer ipFilterMu.Unlock()
++	lanDisAllowedIPs = slices.Clone(prefixes)
+ }
+ 
++// AllowedIPs 返回独立策略快照；无参数，返回前缀切片；无错误，避免外部修改共享数组。
+ func AllowedIPs() []netip.Prefix {
+-	return lanAllowedIPs
++	ipFilterMu.RLock()
++	defer ipFilterMu.RUnlock()
++	return slices.Clone(lanAllowedIPs)
+ }
+ 
++// DisAllowedIPs 返回独立策略快照；无参数，返回前缀切片；无错误，避免外部修改共享数组。
+ func DisAllowedIPs() []netip.Prefix {
+-	return lanDisAllowedIPs
++	ipFilterMu.RLock()
++	defer ipFilterMu.RUnlock()
++	return slices.Clone(lanDisAllowedIPs)
+ }
+ 
+ func IsRemoteAddrDisAllowed(addr net.Addr) bool {
+@@ -38,10 +54,16 @@
+ 	return false
+ }
+ 
++// isAllowed 判断地址是否匹配前缀；参数为 IP，返回 bool；无错误，与配置写入同步。
+ func isAllowed(addr netip.Addr) bool {
++	ipFilterMu.RLock()
++	defer ipFilterMu.RUnlock()
+ 	return prefixesContains(lanAllowedIPs, addr)
+ }
+ 
++// isDisAllowed 判断地址是否匹配前缀；参数为 IP，返回 bool；无错误，与配置写入同步。
+ func isDisAllowed(addr netip.Addr) bool {
++	ipFilterMu.RLock()
++	defer ipFilterMu.RUnlock()
+ 	return prefixesContains(lanDisAllowedIPs, addr)
+ }

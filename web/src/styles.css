@@ -1575,14 +1575,14 @@
   }
 
   .settings-jump {
-    @apply sticky top-5 z-10 grid content-start gap-1 rounded-xl border bg-card p-3;
+    @apply sticky top-20 z-10 grid content-start gap-1 rounded-xl border bg-card p-3;
   }
 
   .settings-jump > span {
     @apply mb-2 inline-flex items-center gap-2 border-b px-2 pb-3 text-xs font-semibold text-foreground;
   }
 
-  .settings-jump > a {
+  .settings-jump > button {
     @apply rounded-md px-3 py-2.5 text-xs font-medium text-muted-foreground no-underline transition-colors hover:bg-accent hover:text-accent-foreground;
   }
 
@@ -1617,7 +1617,7 @@
   }
 
   .settings-section {
-    @apply scroll-mt-5 overflow-hidden rounded-xl border bg-card;
+    @apply scroll-mt-20 overflow-hidden rounded-xl border bg-card;
   }
 
   .settings-section:hover {
@@ -2737,12 +2737,17 @@
     @apply mr-0;
   }
 
+  /* 手机端将定位入口收成横排并随页面滚动，避免覆盖章节标题或占满可视区域。 */
   .settings-jump {
-    @apply top-1 overflow-x-auto flex-nowrap;
+    @apply static flex flex-wrap gap-1;
+  }
+
+  .settings-jump > span {
+    @apply mb-0 border-0 pb-0;
   }
 
   .settings-jump > span,
-  .settings-jump > a {
+  .settings-jump > button {
     @apply shrink-0;
   }
 

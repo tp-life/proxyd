@@ -141,7 +141,7 @@ export function ProxyOverviewPage({
       <aside className="policy-pane" aria-labelledby="policy-pane-title">
         <header className="policy-pane-header">
           <div><span>主代理入口</span><h1 id="policy-pane-title">主入口策略</h1></div>
-          <Button aria-label="打开系统设置" size="icon" variant="outline" type="button" onClick={() => onNavigate("settings")}><Settings size={17} aria-hidden="true" /></Button>
+          <Button aria-label="打开代理设置" size="icon" variant="outline" type="button" onClick={() => onNavigate("proxy/settings")}><Settings size={17} aria-hidden="true" /></Button>
         </header>
         <div className="policy-options" role="list" aria-label="主入口策略选项">
           <PolicyOption active={policy === "rule"} detail={`当前为${MODE_LABELS[overview.mode] || overview.mode}模式`} icon={ListFilter} label="规则分流" tone="blue" onClick={() => onPolicy("rule")} />
@@ -318,7 +318,7 @@ function buildOverviewAttention(overview, traffic, aliveCount) {
   if (aliveCount === 0) items.push({ text: "当前没有健康节点，请检查订阅或手动节点。", view: "nodes" });
   if (overview.main_node && !overview.main_node_up && !overview.main_auto) items.push({ text: `固定节点当前不可用，主入口已经临时回退到${MODE_LABELS[overview.mode] || overview.mode}模式。`, view: "nodes" });
   if (overview.tun?.enabled && !overview.tun?.active) items.push({ text: "TUN 已配置但没有实际生效，请检查权限与运行日志。", view: "logs" });
-  if (!overview.dns_custom && overview.tun?.enabled && overview.dns_preset === "off") items.push({ text: "TUN 已开启但 DNS 预设关闭，建议评估 Fake IP。", view: "settings" });
+  if (!overview.dns_custom && overview.tun?.enabled && overview.dns_preset === "off") items.push({ text: "TUN 已开启但 DNS 预设关闭，建议评估 Fake IP。", view: "proxy/settings" });
   if (!overview.port_mapping_enabled) items.push({ text: "节点一对一端口当前未监听，稳定分配仍然保留。", view: "ports" });
   if (traffic.error) items.push({ text: "实时流量暂不可用，控制台正在自动重连。", view: "logs" });
   return items;

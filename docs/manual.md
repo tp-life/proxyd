@@ -66,7 +66,12 @@ make            # 一次性完整构建：Web → internal/api/dist → bin/prox
 make all        # 与 make 等价，适合显式写入构建脚本或 CI
 make build      # 产出 bin/proxyd（单文件，无外部依赖）
 make web        # 仅重建 Web 控制台 embed 产物（internal/api/dist）
+make deps       # 首次直接运行 go build/test 前准备 mihomo 依赖
 ```
+
+构建需要 Go、Git 和 `patch`（Windows 可在安装这些工具后的 Git Bash 中执行）。`make build/test/vet/release` 自动运行 `make deps`：按 `go.mod` 的固定版本下载 mihomo，在项目内应用 `patches/mihomo-concurrency.patch`，保留日志级别原子访问和入站认证策略同步修复。`third_party` 是可重新生成的源码目录，已加入 Git 忽略；不会修改 Go 模块缓存。首次准备需要访问模块下载源，后续优先使用缓存；升级版本时需要检查补丁兼容性。原始源码及许可证来自 [mihomo v1.19.30](https://github.com/MetaCubeX/mihomo/tree/v1.19.30)，补丁对应的许可证保存在 `patches/LICENSE.mihomo`。
+
+从干净检出或源码发布包直接运行 Go 命令时，先执行 `make deps`，再执行 `go build ./...`、`go test ./...`。仓库中的 `docs` 仅跟踪本手册，其余设计和排障文档保留在本地。
 
 ### 最快启动
 
@@ -179,11 +184,11 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 macOS 已加载同配置的系统服务时，`proxyd start` 等待该服务就绪，`proxyd restart` 请求旧实例退出并由 KeepAlive 拉起新实例，不再自行派生竞争进程。等待最多 60 秒，只有系统 PID、配置 PID 与认证健康检查同时匹配才算成功。若独立启动的旧实例占用资源，可执行 `proxyd restart` 交回系统托管；查询失败或等待超时不会回退到独立启动。
 
-Web 设置页的开关表示自启注册状态，下方单独显示系统服务运行信息；`/api/overview` 的 `autostart_runtime` 包含该快照。启动日志通过 `[startup]` 记录 PID 和配置加载、目录检查、应用初始化、API 监听的累计耗时。生成的 LaunchDaemon 使用 `ProcessType=Standard`；旧安装可执行 `proxyd autostart on` 更新磁盘 plist，已加载的服务定义会在下次开机时读取新版。
+Web 通用设置页的开关表示自启注册状态，下方单独显示系统服务运行信息；`/api/overview` 的 `autostart_runtime` 包含该快照。启动日志通过 `[startup]` 记录 PID 和配置加载、目录检查、应用初始化、API 监听的累计耗时。生成的 LaunchDaemon 使用 `ProcessType=Standard`；旧安装可执行 `proxyd autostart on` 更新磁盘 plist，已加载的服务定义会在下次开机时读取新版。
 
 ### 配置备份与恢复
 
-Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `secret`、订阅/规则 URL 的用户信息和敏感查询参数，并整体隐藏编码型分享链接，适合排障分享；“完整备份”保留全部凭据，只应存放在可信位置。导入只接受不超过 1 MiB 的 YAML，并复用启动时的迁移、默认值和完整配置校验。前端会先调用预览接口展示新增、删除和变化项；用户确认时携带预览摘要，后端只有在文件内容与预览完全一致时才通过临时文件加 rename 原子替换当前配置文件，避免“预览后文件被替换”的竞态。
+Web 通用设置页提供两种导出：默认的“导出（打码）”会隐藏 `secret`、订阅/规则 URL 的用户信息和敏感查询参数，并整体隐藏编码型分享链接，适合排障分享；“完整备份”保留全部凭据，只应存放在可信位置。导入只接受不超过 1 MiB 的 YAML，并复用启动时的迁移、默认值和完整配置校验。前端会先调用预览接口展示新增、删除和变化项；用户确认时携带预览摘要，后端只有在文件内容与预览完全一致时才通过临时文件加 rename 原子替换当前配置文件，避免“预览后文件被替换”的竞态。
 
 导入不会在当前 HTTP 请求中热替换运行配置。备份可能同时改变 `api-listen`、`state-dir`、监听端口和 TUN 权限要求，局部热更新会造成磁盘配置与运行状态不一致，因此接口明确返回 `restart_required: true`，必须重启 proxyd 后整份配置才生效。校验或写入失败时原配置保持不变。
 
@@ -191,7 +196,7 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 
 `check-updates` 默认 `true`。proxyd 启动后在后台请求官方 GitHub 仓库的 latest release，使用八秒 HTTP 超时并把结果缓存在应用内存；Web 的 overview 轮询只读取缓存，不会重复访问 GitHub。发现高于当前构建版本的稳定版时，概览页显示 Release 链接；请求失败、限流或 JSON 异常只记录状态和日志，不影响 API、代理核心或订阅刷新。
 
-当前版本由构建时 `ldflags` 注入。正式 `vX.Y.Z` tag 和 `git describe` 版本可比较；`dev` 或裸提交哈希没有可靠版本基线，会显示“当前构建版本不可比较”并跳过请求，避免字符串比较误报。可在配置写 `check-updates: false`，也可在 Web 设置页关闭。
+当前版本由构建时 `ldflags` 注入。正式 `vX.Y.Z` tag 和 `git describe` 版本可比较；`dev` 或裸提交哈希没有可靠版本基线，会显示“当前构建版本不可比较”并跳过请求，避免字符串比较误报。可在配置写 `check-updates: false`，也可在 Web 通用设置页关闭。
 
 ## 五、日常管理（Web 控制台）
 
@@ -207,7 +212,8 @@ Web 设置页提供两种导出：默认的“导出（打码）”会隐藏 `se
 - **活动连接**：仅在页面打开且未暂停时每 2 秒读取 mihomo 连接快照；按域名/IP/进程/出口链搜索，查看入口端口、累计流量与开始时间，并可关闭单条或全部连接
 - **远程连接**：管理 tailcat 服务端身份、SSH、客户端白名单、远端 token 和通用 TCP 转发；“服务端 / 客户端”页签只处理隧道与 SSH，不再混放桌面配置
 - **远程桌面**：独立的“服务端 / 客户端”页签；服务端检测 RDP/VNC 是否在本机真实监听并控制隧道开放，客户端保存不含密码的连接档案、建立临时回环转发并打开系统客户端
-- **系统设置**：使用页内分区导航管理主端口、`main-auto`、`main-node`、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN、系统代理、开机自启，以及带差异预览的配置导入
+- **代理 → 代理设置**：管理主端口、`main-auto`、`main-node`、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN 与系统代理
+- **系统 → 通用设置**：管理开机自启、版本检查、配置备份、带差异预览的配置导入与进程重启；代理禁用时仍可使用
 - 页面每 10 秒自动刷新数据；`⌘K` / `Ctrl+K` 命令面板支持跳页、刷新、测速和模式切换
 
 ### 自有 API（`api-listen`，默认 19091）
@@ -307,7 +313,7 @@ tun:
   # strict-route: true        # 其余 mihomo TUN 字段会原样保留并透传
 ```
 
-使用 Web 设置页或 `proxyd tun [-c 配置] on|off|status` 热切换。开启流程先检查权限，再让 mihomo 热更新，并读取实际 listener 状态二次确认；生成、应用或实际启用失败会恢复旧 TUN 配置。配置文件启动时已经是 `enable: true` 但权限不足，proxyd 会在启动 API 和修改路由之前退出并打印修复指引。
+使用 Web「代理 → 代理设置」或 `proxyd tun [-c 配置] on|off|status` 热切换。开启流程先检查权限，再让 mihomo 热更新，并读取实际 listener 状态二次确认；生成、应用或实际启用失败会恢复旧 TUN 配置。配置文件启动时已经是 `enable: true` 但权限不足，proxyd 会在启动 API 和修改路由之前退出并打印修复指引。
 
 - **macOS**：进程必须以 root 运行。停止普通实例后用 `sudo proxyd serve -c <配置文件>` 或 `sudo proxyd start -c <配置文件>` 启动。
 - **Linux**：可直接以 root 运行，或对当前二进制执行 `sudo setcap cap_net_admin=+ep /path/to/proxyd` 后重启。替换/升级二进制会丢失 capability，需要重新执行 `setcap`。
@@ -764,4 +770,4 @@ Web Terminal 工具栏的最小化按钮会将会话停靠在右下角。最小�
 
 ### 运行状态、诊断与配置恢复
 
-系统菜单提供模块运行阶段、立即重试、诊断中心及配置历史。命令行可使用 `proxyd modules remote retry`、`proxyd diagnose home --json` 和 `proxyd config history list`。配置历史自动归档最近 30 次变更前快照；恢复必须预检，重启后生效。详细语义、接口及回归方式见 [运行可靠性说明](reliability.md)。
+系统菜单提供模块运行阶段、立即重试、诊断中心及配置历史。命令行可使用 `proxyd modules remote retry`、`proxyd diagnose home --json` 和 `proxyd config history list`。配置历史只在内容变化时归档变更前快照，跳过连续重复记录，最多保留 30 个版本；恢复必须预检，重启后生效。去重直接比较完整配置内容的 MD5，不递归解析 YAML；注释、排版和默认值补齐同样算内容变化，规范化保存后重复重启不会再增加记录。MD5 仅用于去重，恢复预检仍使用独立的 SHA-256 摘要。

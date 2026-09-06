@@ -69,7 +69,7 @@ async function main() {
     if (await top.getByRole('button', { name: '代理', exact: true }).count()) throw Error('禁用代理仍显示顶部入口');
     await page.getByRole('button', { name: '打开命令菜单', exact: true }).click();
     const palette = page.getByRole('dialog', { name: '命令菜单', exact: true });
-    for (const label of ['代理节点', '刷新订阅', '测速']) {
+    for (const label of ['代理节点', '代理设置', '刷新订阅', '测速']) {
       if (await palette.getByRole('button', { name: new RegExp(label) }).count()) throw Error('禁用代理仍显示命令：' + label);
     }
     if (!(await palette.getByRole('button', { name: /模块管理/ }).count())) throw Error('重新启用入口丢失');
@@ -107,7 +107,7 @@ async function main() {
     if (!off.ok()) throw Error('测试停用远程模块失败');
     await top.getByRole('button', { name: '远程访问', exact: true }).waitFor({ state: 'hidden' });
     // 地址栏、旧书签与历史导航均不能继续进入禁用模块，包括同属远程访问的桌面页面。
-    for (const view of ['remote', 'desktop', 'nodes', 'proxy/overview']) {
+    for (const view of ['remote', 'desktop', 'nodes', 'proxy/overview', 'proxy/settings']) {
       await page.evaluate((value) => { window.location.hash = `/${value}`; }, view);
       await page.waitForFunction(() => window.location.hash === '#/modules');
       await page.getByRole('heading', { name: '模块管理', exact: true }).waitFor();
@@ -127,6 +127,22 @@ async function main() {
     await page.getByRole('button', { name: '打开导航', exact: true }).click();
     if (await nav.getByRole('button', { name: '本机服务', exact: true }).count()) throw Error('移动端显示禁用模块子菜单');
     await nav.getByRole('button', { name: '模块管理', exact: true }).click();
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await nav.getByRole('button', { name: '通用设置', exact: true }).click();
+    await page.getByRole('heading', { name: '通用设置', exact: true }).waitFor();
+    await page.getByRole('switch', { name: '启动时检查新版本', exact: true }).waitFor();
+    await page.waitForFunction(() => !document.querySelector('[role="switch"][aria-label="启动时检查新版本"]')?.disabled);
+    if (await page.getByRole('heading', { name: '主代理入口', exact: true }).count()) throw Error('通用设置混入代理设置');
+    await page.getByRole('navigation', { name: '设置分组快速跳转' }).getByRole('button', { name: '维护与备份', exact: true }).click();
+    if (new URL(page.url()).hash !== '#/settings') throw Error('设置定位改写了业务路由');
+    await page.screenshot({ path: path.join(root, 'system-settings-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error('通用设置移动端溢出');
+    // 手机端定位后章节标题须落在顶部菜单下方；截图前归零滚动，避免捕获平滑滚动中间帧。
+    await page.getByRole('navigation', { name: '设置分组快速跳转' }).getByRole('button', { name: '维护与备份', exact: true }).click();
+    await page.waitForFunction(() => { const y = document.getElementById('settings-maintenance').getBoundingClientRect().top; return y >= 60 && y < innerHeight / 2; });
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await page.screenshot({ path: path.join(root, 'system-settings-mobile.png'), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
     await nav.getByRole('button', { name: '诊断中心', exact: true }).click();
     await page.getByRole('button', { name: '开始诊断', exact: true }).click();
@@ -185,6 +201,21 @@ async function main() {
     if (await nav.getByRole('button', { name: '运行概览', exact: true }).getAttribute('aria-current') !== 'page') throw Error('代理运行概览归属错误');
     await page.reload();
     await page.getByRole('heading', { name: '主入口策略', exact: true }).waitFor();
+    await page.getByRole('button', { name: '打开代理设置', exact: true }).click();
+    await page.getByRole('heading', { name: '代理设置', exact: true }).waitFor();
+    await page.getByRole('switch', { name: '启用 TUN 模式', exact: true }).waitFor();
+    if (await page.getByRole('switch', { name: '系统启动时自动启动 proxyd', exact: true }).count()) throw Error('代理设置仍包含进程自启');
+    if (await page.getByRole('heading', { name: '配置备份', exact: true }).count()) throw Error('代理设置仍包含全局备份');
+    await page.getByRole('navigation', { name: '设置分组快速跳转' }).getByRole('button', { name: '本机网络', exact: true }).click();
+    if (new URL(page.url()).hash !== '#/proxy/settings') throw Error('代理设置定位丢失路由');
+    await page.screenshot({ path: path.join(root, 'proxy-settings-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error('代理设置移动端溢出');
+    await page.getByRole('navigation', { name: '设置分组快速跳转' }).getByRole('button', { name: '本机网络', exact: true }).click();
+    await page.waitForFunction(() => { const y = document.getElementById('settings-network').getBoundingClientRect().top; return y >= 60 && y < innerHeight / 2; });
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+    await page.screenshot({ path: path.join(root, 'proxy-settings-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await top.getByRole('button', { name: '总览', exact: true }).click();
     await page.getByText('SSH 授权需要检查', { exact: true }).waitFor();
     await page.setViewportSize({ width: 390, height: 844 });
@@ -201,8 +232,13 @@ async function main() {
     await page.getByRole('article', { name: '远程访问摘要' }).waitFor();
     await page.getByRole('heading', { name: '部分状态尚未确认', exact: true }).waitFor();
     await page.getByText('配置已恢复，等待重启生效', { exact: true }).waitFor();
+    // 即使代理概览故障，旧 settings 链接仍能独立读取公共设置。
+    await page.goto(`${base}/#/settings`);
+    await page.getByRole('heading', { name: '通用设置', exact: true }).waitFor();
+    await page.getByRole('switch', { name: '系统启动时自动启动 proxyd', exact: true }).waitFor();
+    if (await page.getByText('正在连接 proxyd', { exact: true }).count()) throw Error('通用设置仍依赖代理概览');
     if (errors.length) throw Error(errors.join('\n'));
-    process.stdout.write(`浏览器回归通过：全局总览/代理概览/摘要异常/局部失败/主题/移动端、模块菜单隐藏/恢复/旧链接/移动端、终端恢复与断线、诊断、脱敏下载、配置恢复、移动端。截图：${root}\n`);
+    process.stdout.write(`浏览器回归通过：公共/代理设置分离与定位、全局总览/代理概览/摘要异常/局部失败/主题/移动端、模块菜单隐藏/恢复/旧链接/移动端、终端恢复与断线、诊断、脱敏下载、配置恢复、移动端。截图：${root}\n`);
   } finally {
     if (browser) await browser.close();
     if (child.exitCode === null) {

@@ -174,5 +174,5 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
 
-// 上游 v1.19.30 日志级别存在并发读写；本地仅维护原子访问补丁。
+// make deps 下载原版并应用日志和入站认证并发补丁；生成源码不提交。
 replace github.com/metacubex/mihomo => ./third_party/mihomo

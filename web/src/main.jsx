@@ -64,6 +64,7 @@ import { useDashboardFeed } from "@/hooks/useDashboardFeed";
 import { PortsPage } from "@/pages/PortsPage";
 import { RulesPage } from "@/pages/RulesPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { ProxySettingsPage } from "@/pages/ProxySettingsPage";
 import { SubscriptionsPage } from "@/pages/SubscriptionsPage";
 import { requestJSON, requestText } from "@/lib/api";
 import { MODE_LABELS } from "@/lib/constants";
@@ -736,7 +737,7 @@ function App() {
    *
    * 可能的异常/错误情况：
    * 任一步接口写入失败时由 postJSON 展示错误并停止后续切换；尚未配置固定节点时
-   * 跳转到系统设置，不替用户擅自选择节点。
+   * 跳转到代理设置，不替用户擅自选择节点。
    */
   async function applyMainPolicy(policy) {
     /*
@@ -760,14 +761,14 @@ function App() {
       return;
     }
     /*
-     * 固定节点策略不能凭空推断目标节点：没有 main_node 时跳到设置页，让用户明确
+     * 固定节点策略不能凭空推断目标节点：没有 main_node 时跳到代理设置页，让用户明确
      * 选择。已经保存节点但自动选优仍开启时只关闭 main_auto，保留 main_node 作为
      * 用户选择。若该节点暂时不可用，后端会运行时回退到由 mode 决定的顶层主入口，
      * 但不会删除配置，节点恢复后仍可继续使用原意图。
      */
     if (policy === "fixed") {
       if (!overview?.main_node) {
-        setActiveView("settings");
+        setActiveView("proxy/settings");
         return;
       }
       if (overview.main_auto) await postJSON("/api/main-auto", { enabled: false }, "主端口已切换为固定节点");
@@ -856,7 +857,7 @@ function App() {
           <Button size="sm" variant="outline" type="button" aria-label="打开导航" aria-expanded={mobileOpen} aria-controls="app-sidebar" onClick={() => setMobileOpen(true)}><Menu size={16} aria-hidden="true" />菜单</Button>
           <Button size="sm" variant="outline" type="button" aria-label="搜索页面" onClick={() => setPaletteOpen(true)}><Search size={16} aria-hidden="true" />搜索</Button>
         </div>}
-        {!overview && (NAV_ITEMS.find((item) => item.id === activeView)?.group === "proxy" || activeView === "settings") ? (
+        {!overview && (NAV_ITEMS.find((item) => item.id === activeView)?.group === "proxy") ? (
           <EmptyState title="正在连接 proxyd" detail="等待 /api/overview 返回运行状态。" />
         ) : (
           <div className="view-stage view-enter" key={isRemoteView(activeView) ? "remote" : activeView}>
@@ -962,16 +963,8 @@ function App() {
                 <DesktopPage {...desktop} onNavigateRemote={() => setActiveView("remote")} />
               </Suspense>
             )}
-            {activeView === "settings" && (
-              <SettingsPage
-                forms={forms}
-                overview={overview}
-                onForm={updateForm}
-                onImportConfig={importConfig}
-                onPost={postJSON}
-                onRestart={restartApp}
-              />
-            )}
+            {activeView === "proxy/settings" && <ProxySettingsPage forms={forms} overview={overview} onForm={updateForm} onPost={postJSON} />}
+            {activeView === "settings" && <SettingsPage onImportConfig={importConfig} onPost={postJSON} onRestart={restartApp} />}
           </div>
         )}
       </main>

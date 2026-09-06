@@ -31,6 +31,7 @@ func (s *Server) registerSystemRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/autostart", s.handleSetAutostart)
 	mux.HandleFunc("GET /api/logs", s.handleLogs)
 	mux.HandleFunc("GET /api/system/status", s.handleSystemStatus)
+	mux.HandleFunc("GET /api/system/settings", s.handleSystemSettings)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -314,4 +315,10 @@ func (s *Server) handleSetAutostart(w http.ResponseWriter, r *http.Request) {
 // 错误情况：只读取本地内存，无外部 I/O；配置待重启状态在应用读锁内读取。
 func (s *Server) handleSystemStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, s.app.SystemStatus())
+}
+
+// handleSystemSettings 返回独立的公共设置快照，代理停用或概览不可用时仍可访问。
+// 参数：w 为 http.ResponseWriter，请求未使用；返回无；自启查询故障通过状态字段返回，不暴露凭据。
+func (s *Server) handleSystemSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, s.app.SystemSettings())
 }

@@ -4,6 +4,11 @@ version: 2
 
 project_name: proxyd
 
+# 直接调用 GoReleaser 时也准备本地依赖，确保干净检出能够构建。
+before:
+  hooks:
+    - make deps
+
 builds:
   - id: proxyd
     main: ./cmd/proxyd

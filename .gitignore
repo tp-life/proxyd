@@ -5,3 +5,10 @@ proxyd.yaml
 web/node_modules/
 /proxyd
 configs/config.dev.yaml
+
+# 第三方源码由 make deps 下载并应用补丁，不进入仓库。
+/third_party/
+
+# 文档只发布用户手册，其余设计与排障笔记保留在本地。
+/docs/*
+!/docs/manual.md
