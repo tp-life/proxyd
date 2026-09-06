@@ -4,6 +4,7 @@ package remote
 // 授权在每条 TCP 连接建立时重新读取配置，因此过期边界无需等待一分钟清扫即可立即生效。
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -35,6 +36,12 @@ type connectionDecision struct {
 func decideConnection(cfg config.RemoteConfig, remoteAddr net.Addr, targetPort int, now time.Time) connectionDecision {
 	keyText := clientKeyForAddr(cfg, remoteAddr)
 	decision := connectionDecision{Allowed: true, Key: keyText}
+	// 模块停用优先于白名单规则，防止排队的连接在停用后继续进入 shell。
+	if cfg.Disabled {
+		decision.Allowed = false
+		decision.Reason = "远程访问模块已禁用"
+		return decision
+	}
 	if !cfg.ClientWhitelistEnabled() {
 		return decision
 	}
@@ -103,7 +110,11 @@ func (m *Manager) guardConnection(port uint16, handler func(net.Conn)) func(net.
 	return func(connection net.Conn) {
 		m.mu.Lock()
 		cfg := m.cfg.Clone()
+		runtimeCtx := m.runtimeCtx
 		m.mu.Unlock()
+		// 上游关闭隧道不保证应用处理器立即结束；世代取消显式关闭流以释放 SSH/转发进程。
+		stopCancellation := context.AfterFunc(runtimeCtx, func() { _ = connection.Close() })
+		defer stopCancellation()
 		startedAt := time.Now().UTC()
 		decision := decideConnection(cfg, connection.RemoteAddr(), int(port), startedAt)
 		if !decision.Allowed {

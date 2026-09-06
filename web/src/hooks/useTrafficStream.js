@@ -1,3 +1,4 @@
+/** 代理流量订阅模块，在代理禁用时释放网络请求并清除旧速率。 */
 import { useEffect, useState } from "react";
 
 /**
@@ -5,6 +6,7 @@ import { useEffect, useState } from "react";
  *
  * 参数说明：
  * - showToast: Function，首次连接失败时展示错误。
+ * - enabled: boolean，代理模块是否启用，默认 true 保持已有调用兼容。
  *
  * 返回值说明：
  * 返回 `{ up, down, upTotal, downTotal, connected, error, history }` 实时状态，
@@ -13,7 +15,7 @@ import { useEffect, useState } from "react";
  * 可能的异常/错误情况：
  * 流中断时会自动延迟重连；浏览器不支持 ReadableStream 时显示错误状态。
  */
-export function useTrafficStream(showToast) {
+export function useTrafficStream(showToast, enabled = true) {
   const [traffic, setTraffic] = useState({
     up: 0,
     down: 0,
@@ -26,6 +28,11 @@ export function useTrafficStream(showToast) {
   });
 
   useEffect(() => {
+    // 禁用是正常生命周期，不能继续重连或弹出网络故障提示。
+    if (!enabled) {
+      setTraffic({ up: 0, down: 0, upTotal: 0, downTotal: 0, connected: false, error: "", technicalError: "", history: [] });
+      return;
+    }
     let stopped = false;
     let warned = false;
     let retryTimer = 0;
@@ -101,7 +108,7 @@ export function useTrafficStream(showToast) {
       window.clearTimeout(retryTimer);
       if (controller) controller.abort();
     };
-  }, [showToast]);
+  }, [showToast, enabled]);
 
   return traffic;
 }

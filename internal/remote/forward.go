@@ -250,7 +250,7 @@ func (r *forwardRunner) setLastError(msg string) {
 func (m *Manager) reconcileForwardsLocked(cfg config.RemoteConfig) {
 	want := map[string]config.RemoteForward{}
 	for _, f := range cfg.Forwards {
-		if f.IsEnabled() {
+		if f.IsEnabled() && !cfg.Disabled {
 			want[f.Name] = f
 		}
 	}

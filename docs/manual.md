@@ -556,7 +556,7 @@ proxyd remote serve 22,5900   # macOS 屏幕共享或其它 VNC 服务
 
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
 
-**内嵌免密 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理——与 `tailcat serve no-auth-ssh` 同模型，**无需系统 sshd（如 macOS 远程登录）、无需账号密码**，隧道的密钥握手本身就是认证。适合系统 sshd 不可用/不便开启的机器。注意：持有 token 即获得本机 shell（以 proxyd 运行用户身份），务必配合 `remote allow` 白名单收窄来源。
+**内嵌 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理，**无需系统 sshd（如 macOS 远程登录）**。默认保持隧道免密模式，通过隧道认证即可获得本机 shell（以 proxyd 运行用户身份）；也可按下文额外启用 SSH 公钥认证，并配合 `remote allow` 白名单收窄来源。
 
 **Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
@@ -621,6 +621,69 @@ ssh -p 2222 localhost         # 之后任何 TCP 客户端都能用这条转发
 
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
+内嵌 SSH 在 Linux/macOS 上按 **服务端 proxyd 运行用户**的账户配置启动登录 shell，并加载该 shell 的用户启动文件；`user@` 不会切换系统用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
+
+### SSH 私钥文件登录与服务端公钥管理
+
+tailcat 已升级到 **v0.6.0**，构建需要 **Go 1.27.1 或更新版本**。内嵌 SSH 增加可选的 SSH 公钥认证，默认仍保持原来的隧道免密模式。开启后，客户端既要通过 tailcat 隧道的 token/nodekey 授权，也要持有服务端登记公钥所对应的 SSH 私钥。它与 `remote keyfile`（服务端 WireGuard 身份）及 `--client-key`（客户端 WireGuard 身份）是不同的密钥，不能混用。
+
+客户端使用自己的 SSH 密钥；没有密钥时，可先执行 `ssh-keygen -t ed25519`。将生成的 **`.pub` 公钥文件**交给服务端管理员，私钥留在客户端。服务端执行：
+
+```sh
+# 导入一把公钥，也支持包含多把公钥的 authorized_keys 文件。
+proxyd remote ssh-keys import ./id_ed25519.pub 工作电脑
+
+# 查看名称、算法和 SHA256 指纹，再开启附加认证。
+proxyd remote ssh-keys list
+proxyd remote ssh-keys on
+
+# 客户端提供匹配的私钥文件，其他 SSH 参数仍可同时使用。
+proxyd ssh home -i ~/.ssh/id_ed25519 -o SetEnv=TERM=xterm-256color
+
+# 按唯一名称或完整 SHA256 指纹撤销授权。
+proxyd remote ssh-keys del 工作电脑
+
+# 导出已登记的公钥；只导出公钥，不包含任何私钥。
+proxyd remote ssh-keys export ./authorized_keys
+
+# 显式恢复原来的隧道免密登录，已登记的公钥继续保留。
+proxyd remote ssh-keys off
+```
+
+也可使用 `proxyd remote ssh-keys add 'ssh-ed25519 AAAA…' 名称` 粘贴公钥。Web「远程访问 → 访问授权 → SSH 公钥」提供同样的开关、文件读取、添加、查看、复制和删除功能。文件按内容导入到 proxyd 配置中，后续修改原文件需要重新导入；不读取系统 `~/.ssh/authorized_keys`，不接收私钥，也不支持 `command=`、`from=` 等限制选项，以免忽略限制后授予更大权限。
+
+删除最后一把公钥时，开启中的公钥认证会**继续拒绝全部 SSH 登录**；只有显式关闭附加认证才恢复旧模式。SSH 公钥及认证开关通过配置事务热更新，失败整体回滚；不重建隧道、不改变 token，默认保留已有 SSH 连接。禁用、过期和删除公钥只阻止后续认证，必要时可显式断开已有连接。Web Terminal 仍使用管理 API 和一次性回环令牌认证，不要求上传 SSH 私钥。
+
+### 公钥有效期、会话撤销与诊断
+
+```sh
+# 临时禁用与恢复，保留公钥和到期时间。
+proxyd remote ssh-keys disable 工作电脑
+proxyd remote ssh-keys enable 工作电脑
+
+# 绝对到期时间（含时区）；never 恢复永久。
+proxyd remote ssh-keys expire 工作电脑 2026-10-01T18:00:00+08:00
+proxyd remote ssh-keys expire 工作电脑 never
+
+# 状态包含禁用/过期、最近认证时间、活动连接数与完整指纹。
+proxyd remote ssh-keys list
+
+# 如需禁止重连先禁用公钥，再按 list 或审计中的完整指纹断开现有会话。
+proxyd remote ssh-keys disconnect 'SHA256:完整指纹'
+proxyd remote audit --tail 100
+
+# 在客户端运行；无需向服务器上传私钥，使用系统 OpenSSH 的密钥与 agent。
+proxyd ssh home --diagnose -i ~/.ssh/id_ed25519 -o SetEnv=TERM=xterm-256color
+```
+
+到期时间在每次认证时检查，到期时刻本身即失效；无需等待后台清扫。最近使用时间只在完成签名验证后更新，公钥探测不算成功登录。最近认证时间及审计记录仅保留于当前进程，重启后清空；连接审计最多保留 500 条。公钥文本导出不包含禁用/到期等管理元数据，完整策略应通过配置备份恢复。
+
+诊断依次检查隧道端口、SSH 版本响应、SSH 握手与认证、真实交互登录 shell。它会启动用户的登录 shell 并只输出 USER、SHELL、TERM、PATH、SSH_TTY；用户启动脚本会照常执行。隧道连接最多 30 秒，SSH 版本响应最多 5 秒，认证与 shell 检查最多 30 秒。为避免无人值守时等待密码，诊断启用 BatchMode；加密私钥可先通过 `ssh-add` 加入 agent。需要支持 `proxyd-diagnostics` 子系统的新版内嵌 SSH 服务端；系统 sshd 或旧版服务端会提示不支持。诊断包含一次只读取 SSH 版本的连接探测，因此审计可能出现一条未完成认证的连接记录。
+
+Web 在「设备与连接」提供复制诊断命令入口；「访问授权 → SSH 公钥」可设置到期时间、禁用/启用及断开已有会话。「连接审计」集中展示隧道及 SSH 事件。
+
+v0.6.0 新生成的服务端身份会持久化 WireGuard PSK，重启与公钥配置变更不会重新生成 PSK。旧密钥文件缺少 PSK 时保留兼容模式及原 token；导入带 PSK 的新版 tailcat 密钥文件则保留其中的 PSK，客户端需要使用支持 PSK 的版本。
+
 Web 控制台把两类任务分为两个侧边栏页面。「远程连接」继续按“服务端 / 客户端”管理 tailcat 身份、SSH、token 和通用端口转发；设备的“连接”对话框只提供 SSH/scp 用法，不再混放 RDP/VNC。「远程桌面」则专门管理桌面：服务端按 RDP/VNC 展示“系统服务是否真实监听”和“隧道是否开放”两个状态，端口可按操作系统实际配置修改；客户端保存常用连接档案，一键创建守护进程内的临时转发并下载 `.rdp` 文件或打开 `vnc://` 系统处理器。档案不保存密码，token 也只在 `remote.remotes` 保留一份。
 
 Web 临时会话绑定在**运行 proxyd 的机器**的 `127.0.0.1`，因此一键打开系统客户端只适合浏览器与 proxyd 同机的场景；若通过局域网远程访问 Web，页面会显示警告。纯 CLI 的 `proxyd desk` 仍从当前登录用户会话启动 GUI，适合不希望由 root/system 开机守护进程直接拉起桌面窗口的场景。Web 会话若始终没有客户端连接、客户端断开后长期空闲或超过最长寿命，会由单个清扫协程自动关闭 listener、活动连接和 tailcat 客户端。
@@ -662,3 +725,43 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 - **异常退出后系统代理没恢复**：`proxyd sysproxy off` 手动关闭（正常退出会自动恢复）。
 - **proxyd stop 提示未在运行但进程还在**：异常退出可能留下过期 pid 文件，stop 会自动清理；确认进程残留时手动 kill。
 - **重启后节点还在吗**：在。配置里有订阅/手动节点；`state-dir/nodes.json` 快照让启动即刻可用，`mapping.json` 保证端口不漂。
+
+
+## 管理菜单与功能归属
+
+控制台顶部横向排列「概况、代理、远程访问、系统」，侧栏只显示当前大类的子菜单，命令菜单（⌘K/Ctrl+K）可以按页面名、SSH、公钥等关键词直接跳转。远程访问拆为设备与连接、本机服务、访问授权、端口转发、连接审计和远程桌面；不再将全部功能放进服务端/客户端两个长页签。
+
+页面地址如 `#/remote/access` 可直接打开，支持刷新定位及浏览器前进/后退；旧 `#/remote` 入口兼容到设备与连接。后续功能落位规则见 [管理导航规划](management-navigation.md)。
+
+
+## 模块启停与终端最小化
+
+Web 在“系统 → 模块管理”集中启停代理与远程访问，也可以使用业务侧栏底部的模块开关。禁用保留订阅、节点、端口、密钥和设备配置，管理 API/Web 始终可访问。重新启用后沿用各子功能的开关；已结束的连接需要重新建立。
+
+```bash
+proxyd modules list
+proxyd modules proxy off
+proxyd modules proxy on
+proxyd modules remote off
+proxyd modules remote on
+```
+
+配置中的 `proxy-disabled: true` 会停止代理入口、TUN、DNS、活动代理连接与周期刷新，撤销已配置的系统代理，保留 `system-proxy` 的恢复偏好。恢复时立即通知后台刷新订阅。纯远程服务可以使用该设置且不配置代理订阅。
+
+`remote.disabled: true` 会停止隧道服务端、固定/临时转发、远程桌面连接和 Web Terminal；它不会覆盖原有的 `remote.enabled` 服务端开关。因此原来的纯客户端模式仍然可用。独立执行的 `proxyd ssh` / `remote pipe` 进程不由守护进程模块开关控制。
+
+HTTP 管理入口：`GET /api/modules`，`POST /api/modules/proxy` 或 `/api/modules/remote`，请求体 `{"enabled":false}`。与其他管理 API 使用相同认证。
+
+Web Terminal 工具栏的最小化按钮会将会话停靠在右下角。最小化期间可切换任意大类，恢复后保留连接与历史输出；停靠栏可以直接恢复或关闭。每个标签页保留一条会话，已有会话时再次点击终端入口会恢复它。刷新页面或关闭标签页仍会断开；关闭远程模块或 Web Terminal 开关会在后端结束对应会话。
+
+## DERP 地图故障与开机恢复
+
+默认地图 `https://tailcat.dev/derpmap.json` 的 DNS/HTTP 请求失败时，会尝试 [Tailscale 官方 DERP 地图](https://tailscale.com/docs/reference/derp-servers) `https://controlplane.tailscale.com/derpmap/default`。自动选定的完整区域保存在 `<state-dir>/remote/derp-region.json`，重启复用，避免重复依赖地图查询及 token 区域漂移。自定义 `remote.derp-map-url` 不会自动切换到公共地图。
+
+开机网络尚未就绪导致远程服务启动失败时，控制台显示实际错误，后台每 30 秒重试；每次发现最多 15 秒，关闭远程模块或服务端开关后停止重试。缓存不会让不可达的中继变得可达；公共来源都无法访问时，仍需配置可达的 `remote.derp-map-url` 或 `remote.region` 自建中继主机名。
+
+如需主动重新探测区域，停止远程服务后删除 `remote/derp-region.json` 再启动。仅删除区域缓存，保留 `server.private.json` 等身份文件。重新选区可能改变 token，需重新分发。
+
+### 运行状态、诊断与配置恢复
+
+系统菜单提供模块运行阶段、立即重试、诊断中心及配置历史。命令行可使用 `proxyd modules remote retry`、`proxyd diagnose home --json` 和 `proxyd config history list`。配置历史自动归档最近 30 次变更前快照；恢复必须预检，重启后生效。详细语义、接口及回归方式见 [运行可靠性说明](reliability.md)。

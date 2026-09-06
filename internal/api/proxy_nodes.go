@@ -95,7 +95,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		MainNode:           cfg.MainNode,
 		AutoPort:           cfg.AutoPort,
 		PortMappingEnabled: cfg.PortMappingEnabled(),
-		SystemProxy:        cfg.SystemProxy,
+		SystemProxy:        cfg.SystemProxy && !cfg.ProxyDisabled,
 		TUN:                s.app.TUNStatus(),
 		DNSPreset:          cfg.DNSPreset,
 		DNSCustom:          len(cfg.DNS) > 0,

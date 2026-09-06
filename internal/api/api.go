@@ -123,6 +123,9 @@ func (s *Server) Start() error {
 	s.registerProxyPortRoutes(mux)
 	// 系统与共享路由（system-proxy/tun/dns-preset/update-check/config/restart/autostart/logs/healthz）。
 	s.registerSystemRoutes(mux)
+	s.registerModuleRoutes(mux)
+	s.registerConfigHistoryRoutes(mux)
+	s.registerDiagnosticRoutes(mux)
 	// mihomo external-controller 受控代理（/api/traffic、/api/connections*）。
 	s.registerControllerRoutes(mux)
 	// 「远程连接」周边模块路由（/api/remote*）。

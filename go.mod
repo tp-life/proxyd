@@ -1,6 +1,6 @@
 module proxyd
 
-go 1.27.0
+go 1.27.1
 
 require (
 	charm.land/bubbletea/v2 v2.0.6
@@ -9,14 +9,14 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/metacubex/mihomo v1.19.30
 	github.com/tailscale/gliderssh v0.3.4-0.20260716005906-1a0f895faf28
-	github.com/tailscale/tailcat v0.4.0
+	github.com/tailscale/tailcat v0.6.0
 	github.com/u-root/u-root v0.14.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
-	tailscale.com v1.103.0-pre.0.20260830144538-72780705eda8
+	tailscale.com v1.103.0-pre.0.20260904030409-31d8badb3bfb
 )
 
 require (
@@ -149,7 +149,7 @@ require (
 	github.com/tailscale/hujson v0.0.0-20260302212456-ecc657c15afd // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976 // indirect
-	github.com/tailscale/wireguard-go v0.0.0-20260821191448-23d18d66172c // indirect
+	github.com/tailscale/wireguard-go v0.0.0-20260904023712-e855235c55a2 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
@@ -173,3 +173,6 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
+
+// 上游 v1.19.30 日志级别存在并发读写；本地仅维护原子访问补丁。
+replace github.com/metacubex/mihomo => ./third_party/mihomo

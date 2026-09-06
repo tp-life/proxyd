@@ -30,10 +30,13 @@ func (a *App) initRemote() {
 // startRemote 在 Run 启动阶段按当前配置应用一次远程连接状态；失败仅记录日志，
 // 不影响代理主功能启动。
 func (a *App) startRemote() {
+	// API 在后台启动前已可访问；与配置事务串行，避免慢速 DERP 探测覆盖用户刚提交的停用。
+	a.remoteMutationMu.Lock()
+	defer a.remoteMutationMu.Unlock()
 	a.mu.RLock()
 	cfg := a.cfg.Remote.Clone()
 	a.mu.RUnlock()
-	if err := a.remote.Apply(cfg); err != nil {
+	if err := a.applyRemoteRuntime(cfg); err != nil {
 		log.Printf("[remote] 启动应用配置失败: %v", err)
 	}
 }
@@ -143,7 +146,7 @@ func (a *App) mutateRemoteLocked(mutate func(r *config.RemoteConfig) error) erro
 	applyCfg := next.Clone()
 	a.mu.Unlock()
 
-	if err := a.remote.Apply(applyCfg); err != nil {
+	if err := a.applyRemoteRuntime(applyCfg); err != nil {
 		return a.rollbackRemote(old, err)
 	}
 
@@ -170,7 +173,7 @@ func (a *App) rollbackRemote(old config.RemoteConfig, cause error) error {
 	a.mu.Lock()
 	a.cfg.Remote = old
 	a.mu.Unlock()
-	if rollbackErr := a.remote.Apply(old); rollbackErr != nil {
+	if rollbackErr := a.applyRemoteRuntime(old); rollbackErr != nil {
 		return errors.Join(cause, fmt.Errorf("恢复旧远程连接运行态失败: %w", rollbackErr))
 	}
 	return cause
@@ -588,4 +591,48 @@ func (a *App) DelRemoteForward(name string) error {
 		}
 		return fmt.Errorf("转发 %q 不存在", name)
 	})
+}
+
+// retryRemoteStartup 为开机网络尚未就绪的服务重试启动，不覆盖新的配置事务。
+// 参数：无；返回无；失败保留状态错误，下一周期再试；持有 remoteMutationMu 与手动修改串行。
+func (a *App) retryRemoteStartup() {
+	a.remoteMutationMu.Lock()
+	defer a.remoteMutationMu.Unlock()
+	a.mu.RLock()
+	cfg := a.cfg.Remote.Clone()
+	a.mu.RUnlock()
+	state := a.remoteLifecycle.Snapshot()
+	if cfg.Disabled || state.NextRetryAt == nil || time.Now().Before(*state.NextRetryAt) {
+		return
+	}
+	if err := a.applyRemoteRuntime(cfg); err != nil {
+		log.Printf("[remote] 后台启动重试失败: %v", err)
+	}
+}
+
+// maintainRemote 独立调度远程重试和过期授权清扫，避免代理订阅网络请求阻塞远程恢复。
+// 参数 ctx 为 App.Run 生命周期；无返回，取消后停止调度；配置操作仍由 remoteMutationMu 串行化。
+func (a *App) maintainRemote(ctx context.Context) {
+	retry := time.NewTicker(time.Second)
+	defer retry.Stop()
+	cleanup := time.NewTicker(time.Minute)
+	defer cleanup.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-retry.C:
+			if ctx.Err() != nil {
+				return
+			}
+			a.retryRemoteStartup()
+		case now := <-cleanup.C:
+			if ctx.Err() != nil {
+				return
+			}
+			if _, err := a.pruneExpiredRemoteAllow(now); err != nil {
+				log.Printf("[remote] 清扫过期客户端授权失败: %v", err)
+			}
+		}
+	}
 }

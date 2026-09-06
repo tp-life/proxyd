@@ -87,7 +87,30 @@ func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment
 // 错误情况：调用方必须持有 refreshing 锁，确保读取节点快照和 Reload 期间没有另一轮
 // 刷新并发修改。生成时同时传入完整健康节点集，使 dialer-proxy 依赖和策略组成员即使
 // 没有独立本地端口，也会作为 proxy-only 出站注册到 mihomo。
-func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
+func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) (resultErr error) {
+	generation := a.proxyLifecycle.Begin()
+	// 热更新和启动共用状态收尾；外围刷新另行记录拉取失败，不依赖仅在 HTTP 操作时更新。
+	defer func() {
+		running := a.runner.Running()
+		phase, message := "idle", ""
+		if running {
+			phase = "running"
+		}
+		if cfg.ProxyDisabled && !running {
+			phase = "disabled"
+		}
+		if resultErr != nil {
+			phase, message = "failed", "代理配置应用失败，请检查监听端口、TUN 权限和运行日志"
+			if running {
+				phase = "degraded"
+			}
+		}
+		a.proxyLifecycle.Complete(generation, phase, running, message, 0)
+	}()
+	// 所有配置热更新共用此门，停用期间修改规则或端口也不能意外恢复监听。
+	if cfg.ProxyDisabled {
+		return a.runner.Suspend()
+	}
 	cfgYAML, err := core.GenerateWithNodes(cfg, assigns, a.Nodes(), imported)
 	if err != nil {
 		return fmt.Errorf("generate mihomo config: %w", err)
@@ -106,10 +129,34 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 
 // Refresh 执行一轮完整流水线：fetch=true 时先拉取订阅与规则源，否则复用上次结果。
 // 步骤：拉取/合并 → 健康检测 → 端口分配（稳定映射）→ 生成配置 → 热更新核心。
-func (a *App) Refresh(ctx context.Context, fetch bool) error {
+func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
+	a.mu.RLock()
+	disabled := a.cfg.ProxyDisabled
+	a.mu.RUnlock()
+	// 周期刷新与健康探测也暂停，避免模块关闭后仍持续拉取订阅和访问外网。
+	if disabled {
+		return nil
+	}
 
+	a.proxyLifecycle.Begin()
+	defer func() {
+		generation := a.proxyLifecycle.Begin()
+		phase, message := "running", ""
+		running := a.runner.Running()
+		if !running {
+			phase = "idle"
+		}
+		if resultErr != nil {
+			phase = "failed"
+			message = "代理刷新失败，请检查节点健康状态与运行日志"
+			if running {
+				phase = "degraded"
+			}
+		}
+		a.proxyLifecycle.Complete(generation, phase, running, message, 0)
+	}()
 	var nodes []*node.Node
 	if fetch || len(a.Nodes()) == 0 {
 		a.mu.RLock()

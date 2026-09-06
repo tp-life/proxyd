@@ -43,6 +43,7 @@ const DialogOverlay = forwardRef(function DialogOverlay({ className, ...props },
  * 参数说明：
  * - className: string，主体附加样式。
  * - children: ReactNode，对话框内容。
+ * - forceMount: boolean，保留 Portal 与主体，供需要维持连接的终端隐藏使用。
  * - showClose: boolean，是否显示右上角关闭按钮，默认显示。
  * - 其余参数透传给 Radix Dialog.Content。
  *
@@ -54,13 +55,13 @@ const DialogOverlay = forwardRef(function DialogOverlay({ className, ...props },
  * 非 Radix 的焦点锁，以免形成键盘焦点冲突。
  */
 const DialogContent = forwardRef(function DialogContent(
-  { className, children, showClose = false, ...props },
+  { className, children, showClose = false, forceMount, ...props },
   ref,
 ) {
   return (
-    <RadixDialog.Portal>
+    <RadixDialog.Portal forceMount={forceMount}>
       <DialogOverlay />
-      <RadixDialog.Content ref={ref} className={cn("dialog radix-dialog-content", className)} {...props}>
+      <RadixDialog.Content forceMount={forceMount} ref={ref} className={cn("dialog radix-dialog-content", className)} {...props}>
         {children}
         {showClose ? (
           <RadixDialog.Close className="dialog-close" aria-label="关闭对话框">

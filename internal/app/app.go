@@ -10,13 +10,17 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/semver"
 
 	"proxyd/internal/autostart"
 	"proxyd/internal/config"
+	"proxyd/internal/configversion"
 	"proxyd/internal/desktop"
+	"proxyd/internal/infrastructure/confighistory"
+	"proxyd/internal/lifecycle"
 	"proxyd/internal/proxy/core"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
@@ -74,9 +78,16 @@ type VersionCheckStatus struct {
 
 // App 是 proxyd 的运行时主体。
 type App struct {
-	cfg     *config.Config
-	cfgPath string // 配置文件路径，配置变更时持久化；为空则不落盘
-	runner  *core.Runner
+	// startedAt 在构造时固定，使用单调时钟统计运行时长，配置热更新不会重置。
+	startedAt            time.Time
+	configHistory        configversion.Repository
+	diagnosing           atomic.Bool // 串行执行资源开销较大的诊断。
+	configPendingRestart bool        // 导入或恢复后阻止旧运行配置覆盖待重启的新文件。
+	proxyLifecycle       lifecycle.Tracker
+	remoteLifecycle      lifecycle.Tracker
+	cfg                  *config.Config
+	cfgPath              string // 配置文件路径，配置变更时持久化；为空则不落盘
+	runner               *core.Runner
 
 	mu        sync.RWMutex
 	nodes     []*node.Node           // 最近一次订阅合并结果
@@ -85,9 +96,10 @@ type App struct {
 	ruleStats map[string]RuleURLStat // rule-url 名 -> 最近拉取状态
 	subInfos  map[string]subscribe.UserInfo
 
-	includeRe  *regexp.Regexp
-	excludeRe  *regexp.Regexp
-	refreshing sync.Mutex // 保证刷新流水线串行执行
+	includeRe   *regexp.Regexp
+	excludeRe   *regexp.Regexp
+	proxyResume chan struct{} // 恢复代理后通知主循环立即刷新，缓冲合并重复请求。
+	refreshing  sync.Mutex    // 保证刷新流水线串行执行
 
 	// mainListenerOn 记录最近一次成功应用的配置里主端口是否为固定 listener 形态
 	// （main-auto/main-node 生效）；用于 regenerateWithLocked 判断是否需要
@@ -146,12 +158,13 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 	if err := cfg.Desktop.Validate(); err != nil {
 		return nil, fmt.Errorf("远程桌面配置无效: %w", err)
 	}
-	if cfg.TUN.Enable {
+	if cfg.TUN.Enable && !cfg.ProxyDisabled {
 		if err := tunperm.Require(); err != nil {
 			return nil, fmt.Errorf("配置已开启 TUN，但当前进程无法创建 TUN 设备: %w", err)
 		}
 	}
 	a := &App{
+		startedAt:   time.Now(),
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 		runner:      core.NewRunner(cfg.StateDir),
@@ -159,6 +172,7 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		ruleStats:   map[string]RuleURLStat{},
 		subInfos:    map[string]subscribe.UserInfo{},
 		systemProxy: platformSystemProxy{},
+		proxyResume: make(chan struct{}, 1),
 	}
 	if cfg.Exclude != "" {
 		re, err := regexp.Compile(cfg.Exclude)
@@ -174,6 +188,7 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		}
 		a.includeRe = re
 	}
+	a.configHistory = confighistory.New(filepath.Join(cfg.StateDir, "config-history"))
 	a.initRemote()
 	a.initDesktop()
 	// 兼容迁移（如旧默认 health-url）此前只在内存生效，这里一次性写回配置文件，
@@ -464,7 +479,10 @@ func (a *App) persistLocked() error {
 	if a.cfgPath == "" {
 		return nil
 	}
-	if err := a.cfg.Save(a.cfgPath); err != nil {
+	if a.configPendingRestart {
+		return fmt.Errorf("配置已恢复或导入，请先重启再修改设置")
+	}
+	if err := a.saveWithHistoryLocked(a.cfg, "设置变更前"); err != nil {
 		return fmt.Errorf("保存配置文件失败: %w", err)
 	}
 	return nil
@@ -491,10 +509,15 @@ func (a *App) Run(ctx context.Context) error {
 	go a.startVersionCheck(runCtx)
 	a.restoreSnapshot()
 	a.startRemote()
+	// 远程维护与订阅刷新隔离，慢订阅不能拖延开机网络恢复后的重试或授权清扫。
+	remoteDone := make(chan struct{})
+	go func() { defer close(remoteDone); a.maintainRemote(runCtx) }()
+	// 先取消并等待维护退出，再执行前面登记的 Shutdown，避免关机后重新打开监听。
+	defer func() { cancel(); <-remoteDone }()
 	if err := a.Refresh(runCtx, true); err != nil {
 		// TUN 配置要求全局接管系统路由；如果首次应用后 listener 仍未生效，继续以
 		// “看似开启、实际关闭”的状态运行会造成流量泄漏，因此把启动失败上抛给 CLI。
-		if a.cfg.TUN.Enable && !a.runner.TUNEnabled() {
+		if a.cfg.TUN.Enable && !a.cfg.ProxyDisabled && !a.runner.TUNEnabled() {
 			// remote 已在首次刷新前启动，desktop 管理器也可能已被 API 创建会话。致命
 			// 启动路径不会进入下方 ctx.Done 分支，因此必须在返回前按依赖顺序显式释放，
 			// 否则会残留 tailcat listener、临时桌面端口和后台协程。
@@ -508,15 +531,17 @@ func (a *App) Run(ctx context.Context) error {
 
 	refreshTick := time.NewTicker(a.cfg.RefreshInterval.D())
 	healthTick := time.NewTicker(a.cfg.HealthInterval.D())
-	remoteAllowCleanupTick := time.NewTicker(time.Minute)
 	defer refreshTick.Stop()
 	defer healthTick.Stop()
-	defer remoteAllowCleanupTick.Stop()
 
 	for {
 		select {
 		case <-runCtx.Done():
 			return nil
+		case <-a.proxyResume:
+			if err := a.Refresh(runCtx, true); err != nil {
+				log.Printf("[refresh] 模块恢复刷新失败: %v", err)
+			}
 		case <-refreshTick.C:
 			if err := a.Refresh(runCtx, true); err != nil {
 				log.Printf("[refresh] %v", err)
@@ -525,12 +550,7 @@ func (a *App) Run(ctx context.Context) error {
 			if err := a.Refresh(runCtx, false); err != nil {
 				log.Printf("[health] %v", err)
 			}
-		case now := <-remoteAllowCleanupTick.C:
-			// TTL 在连接授权时已实时生效；分钟清扫负责从持久配置中移除过期项，
-			// 使 CLI/Web 状态与磁盘配置最终收敛，同时避免为每个条目创建定时器。
-			if _, err := a.pruneExpiredRemoteAllow(now); err != nil {
-				log.Printf("[remote] 清扫过期客户端授权失败: %v", err)
-			}
+
 		}
 	}
 }

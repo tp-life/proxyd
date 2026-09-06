@@ -1,3 +1,4 @@
+import { isRemoteView } from "@/lib/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { requestJSON } from "@/lib/api";
 
@@ -5,7 +6,7 @@ import { requestJSON } from "@/lib/api";
  * useRemoteFeed 接入远程连接页的加载与管理能力。
  *
  * 功能说明：
- * 这个 hook 只在 `activeView === "remote"` 时工作，统一维护 `/api/remote`（服务状态、
+ * 这个 hook 只在 `isRemoteView(activeView)` 时工作，统一维护 `/api/remote`（服务状态、
  * 暴露端口与本地转发）和 `/api/remote/remotes`（远程设备列表）两份数据。加载策略与
  * 活动连接页一致：进入页面加载一次，之后由刷新按钮或写操作触发重新拉取，不做后台
  * 全页数据不做后台轮询，避免隐藏页签持续请求；只有用户展开的单个远端会每 30 秒
@@ -195,7 +196,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   }, []);
 
   useEffect(() => {
-    if (activeView !== "remote") {
+    if (!isRemoteView(activeView)) {
       requestControllerRef.current?.abort();
       return undefined;
     }
@@ -208,7 +209,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   }, [activeView, loadRemote]);
 
   useEffect(() => {
-    if (activeView !== "remote" || !expandedRemote) return undefined;
+    if (!isRemoteView(activeView) || !expandedRemote) return undefined;
     probeRemote(expandedRemote, true);
     const timer = window.setInterval(() => probeRemote(expandedRemote, true), 30_000);
     return () => window.clearInterval(timer);
@@ -839,7 +840,30 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     [loadRemote, requestConfirmation, showToast],
   );
 
+  /**
+   * manageSSHKeys 提交 SSH 公钥管理动作，并用服务端完整状态刷新页面。
+   * 参数说明：action 为 string（auth/add/delete）；value 为 object，请求字段；
+   * message 为 string，操作成功提示。
+   * 返回值说明：Promise<boolean>，成功为 true。
+   * 错误情况：校验、并发配置事务或网络失败时显示错误，不修改页面中的原状态。
+   */
+  const manageSSHKeys = useCallback(async (action, value, message) => {
+    try {
+      const payload = await requestJSON(action === "auth" ? "/api/remote/ssh-auth" : action === "disconnect" ? "/api/remote/ssh-keys/disconnect" : "/api/remote/ssh-keys", {
+        method: action === "delete" ? "DELETE" : action === "update" ? "PATCH" : "POST",
+        body: JSON.stringify(value),
+      });
+      if (action === "disconnect") { await loadRemote(); } else if (payload) setStatus(payload);
+      showToast(message);
+      return true;
+    } catch (saveError) {
+      showToast(`操作失败：${saveError.message}`, "err");
+      return false;
+    }
+  }, [showToast, loadRemote]);
+
   return {
+    manageSSHKeys,
     auditEntries,
     error,
     expandedRemote,

@@ -4,7 +4,7 @@
  * 功能说明：
  * 仅在用户主动打开终端时动态加载 xterm.js 与自适应插件，再通过 WebSocket 把键盘输入、
  * 终端输出和窗口尺寸与后端 PTY 会话桥接。组件不持有任何远程模块配置，也不执行开关
- * 变更，关闭弹层即关闭当前会话。可携带一条首命令（如 `proxyd ssh <设备>`），连接
+ * 变更，真正关闭才释放当前会话；最小化只隐藏 DOM，连接与滚动缓冲仍保留。可携带一条首命令（如 `proxyd ssh <设备>`），连接
  * 建立后自动发送执行，用于一键进入对端设备。
  *
  * 可能的异常/错误情况：
@@ -12,10 +12,10 @@
  * 弹层会保留并显示明确错误；用户可关闭后修复配置再重新打开。
  */
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, LoaderCircle, TerminalSquare, Wifi, WifiOff, X } from "lucide-react";
+import { CircleAlert, LoaderCircle, TerminalSquare, Wifi, WifiOff, Minus, Maximize2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /**
  * buildTerminalWebSocketURL 构造与当前控制台同源的终端 WebSocket 地址。
@@ -56,7 +56,9 @@ function parseTerminalControl(message) {
  * TerminalDialog 渲染一条独立的浏览器 shell 会话。
  *
  * 参数说明：
- * - open: boolean，是否打开弹层；从 false 变为 true 时创建全新的终端与 WebSocket。
+ * - open: boolean，会话是否存在；只有真正关闭才释放连接。
+ * - minimized: boolean，是否隐藏主体并显示右下角停靠栏。
+ * - onMinimizedChange: Function，最小化或恢复的布局回调，不重建会话。
  * - onOpenChange: (open: boolean) => void，Radix 关闭事件回调。
  * - command: string，可选；连接建立后自动发送到 shell 执行的首条命令（如 proxyd ssh）。
  * - target: string，可选；会话目标说明（如远程设备名称），仅用于标题展示。
@@ -64,8 +66,14 @@ function parseTerminalControl(message) {
  * 返回值说明：返回 React 元素；关闭时仍保留 Dialog 根节点以正确归还焦点。
  * 可能的异常/错误情况：终端依赖、WebSocket 或 PTY 任一环节失败时进入 error/disconnected 状态。
  */
-export default function TerminalDialog({ open, onOpenChange, command = "", target = "" }) {
+export default function TerminalDialog({ open, onOpenChange, minimized = false, onMinimizedChange, command = "", target = "" }) {
   const containerRef = useRef(null);
+  const terminalRef = useRef(null);
+  const minimizedRef = useRef(minimized);
+  minimizedRef.current = minimized;
+  useEffect(() => {
+    if (!minimized) terminalRef.current?.focus();
+  }, [minimized]);
   const [phase, setPhase] = useState("loading");
   const [message, setMessage] = useState("正在加载终端组件…");
 
@@ -151,7 +159,7 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
       setPhase("connected");
       setMessage(target ? `已连接，正在进入 ${target}…` : "已连接到本机 shell");
       fitTerminal();
-      terminal?.focus();
+      if (!minimizedRef.current) terminal?.focus();
       if (command) {
         commandTimer = window.setTimeout(() => {
           if (!active || !socket || socket.readyState !== WebSocket.OPEN) return;
@@ -270,6 +278,7 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
           brightWhite: "#f8fafc",
         },
       });
+      terminalRef.current = terminal;
       fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
       terminal.open(containerRef.current);
@@ -316,14 +325,20 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
       if (socket?.readyState === WebSocket.OPEN) socket.close(1000, "用户关闭终端");
       else if (socket?.readyState === WebSocket.CONNECTING) socket.close();
       terminal?.dispose();
+      terminalRef.current = null;
     };
   }, [open, command, target]);
 
   const connected = phase === "connected";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="terminal-dialog" aria-describedby="web-terminal-description">
+    <>
+    {minimized && <div className="terminal-dock" role="region" aria-label="已最小化的 Web Terminal">
+      <Button variant="ghost" type="button" onClick={() => onMinimizedChange(false)} aria-label="恢复 Web Terminal"><Maximize2 size={16} /><span className="truncate">{target || "本机终端"} · {connected ? "已连接" : phase === "loading" ? "连接中" : "已断开"}</span></Button>
+      <Button variant="ghost" size="icon" type="button" aria-label="关闭 Web Terminal" onClick={() => onOpenChange(false)}><X size={16} /></Button>
+    </div>}
+    <Dialog modal={false} open={open && !minimized} onOpenChange={(visible) => { if (!visible && !minimized) onMinimizedChange(true); }}>
+      <DialogContent forceMount style={minimized ? { display: "none" } : undefined} onInteractOutside={(event) => event.preventDefault()} className="terminal-dialog" aria-describedby="web-terminal-description">
         <header className="terminal-dialog-toolbar">
           <DialogHeader className="min-w-0 gap-0 pr-0">
             <DialogTitle className="flex items-center gap-2 text-base">
@@ -341,11 +356,12 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
               {connected ? <Wifi size={12} aria-hidden="true" /> : phase === "loading" ? <LoaderCircle className="animate-spin" size={12} aria-hidden="true" /> : <WifiOff size={12} aria-hidden="true" />}
               {connected ? "已连接" : phase === "loading" ? "连接中" : "已断开"}
             </Badge>
-            <DialogClose asChild>
-              <Button aria-label="关闭 Web Terminal" size="icon" type="button" variant="ghost">
+            <Button aria-label="最小化 Web Terminal" size="icon" type="button" variant="ghost" onClick={() => onMinimizedChange(true)}><Minus size={18} aria-hidden="true" /></Button>
+            <span>
+              <Button onClick={() => onOpenChange(false)} aria-label="关闭 Web Terminal" size="icon" type="button" variant="ghost">
                 <X size={18} aria-hidden="true" />
               </Button>
-            </DialogClose>
+            </span>
           </div>
         </header>
 
@@ -360,10 +376,11 @@ export default function TerminalDialog({ open, onOpenChange, command = "", targe
         </div>
 
         <footer className="terminal-dialog-footer">
-          <span>高权限会话 · 当前进程用户 · 关闭窗口立即断开</span>
+          <span>高权限会话 · 当前进程用户 · 最小化保持连接 · 关闭立即断开</span>
           <span className="font-mono">TERM=xterm-256color</span>
         </footer>
       </DialogContent>
     </Dialog>
+    </>
   );
 }

@@ -117,8 +117,9 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 	}
 	m.mu.Lock()
 	cfg := m.cfg.Clone()
+	runtimeCtx := m.terminalCtx
 	m.mu.Unlock()
-	if !cfg.WebTerminal {
+	if !cfg.WebTerminal || cfg.Disabled {
 		return nil, ErrWebTerminalDisabled
 	}
 
@@ -216,6 +217,8 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 	go func() {
 		select {
 		case <-ctx.Done():
+			_ = terminal.Close()
+		case <-runtimeCtx.Done():
 			_ = terminal.Close()
 		case <-terminal.done:
 		}

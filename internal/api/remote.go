@@ -22,7 +22,11 @@ import (
 // 打码摘要；完整本机 token 只能通过 GET /api/remote/token 显式获取。
 
 // registerRemoteRoutes 注册「远程连接」周边模块路由。
+// 参数说明：mux 为 *http.ServeMux，应用管理 API 认证的路由器。
+// 返回值说明：无。
+// 错误情况：重复注册按 ServeMux 约定触发 panic，正常启动只调用一次。
 func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
+	s.registerRemoteSSHRoutes(mux)
 	mux.HandleFunc("GET /api/remote", s.handleGetRemote)
 	mux.HandleFunc("POST /api/remote", s.handleSetRemote)
 	mux.HandleFunc("GET /api/remote/token", s.handleGetRemoteToken)

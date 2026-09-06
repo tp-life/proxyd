@@ -168,7 +168,7 @@ func (a *App) SetDesktopService(protocol string, port int, exposed bool) error {
 	a.cfg.Remote = nextRemote
 	a.mu.Unlock()
 
-	if err := a.remote.Apply(nextRemote.Clone()); err != nil {
+	if err := a.applyRemoteRuntime(nextRemote.Clone()); err != nil {
 		return a.rollbackDesktopAndRemote(oldDesktop, oldRemote, err)
 	}
 	a.mu.Lock()
@@ -259,6 +259,15 @@ func (a *App) DeleteDesktopConnection(name string) error {
 //
 // 错误情况：档案或远端不存在、token 非法、本地监听失败或会话管理器关闭时返回错误。
 func (a *App) StartDesktopSession(name string) (desktop.Session, error) {
+	// 与模块事务串行，避免刚禁用时复用尚未被清理的旧桌面会话。
+	a.remoteMutationMu.Lock()
+	defer a.remoteMutationMu.Unlock()
+	a.mu.RLock()
+	disabled := a.cfg.Remote.Disabled
+	a.mu.RUnlock()
+	if disabled {
+		return desktop.Session{}, fmt.Errorf("远程访问模块已禁用")
+	}
 	name = strings.TrimSpace(name)
 	a.mu.RLock()
 	var found *config.DesktopConnection
@@ -349,7 +358,7 @@ func (a *App) rollbackDesktopAndRemote(oldDesktop config.DesktopConfig, oldRemot
 	a.cfg.Desktop = oldDesktop
 	a.cfg.Remote = oldRemote
 	a.mu.Unlock()
-	if rollbackErr := a.remote.Apply(oldRemote.Clone()); rollbackErr != nil {
+	if rollbackErr := a.applyRemoteRuntime(oldRemote.Clone()); rollbackErr != nil {
 		return errors.Join(cause, fmt.Errorf("恢复旧桌面服务运行态失败: %w", rollbackErr))
 	}
 	return cause

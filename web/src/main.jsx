@@ -1,3 +1,4 @@
+import { ModulesPage } from "@/pages/ModulesPage";
 /**
  * proxyd Web 控制台入口模块。
  *
@@ -19,6 +20,7 @@ import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from
 import { createRoot } from "react-dom/client";
 import {
   Activity,
+  ChevronDown,
   Gauge,
   Laptop,
   Layers,
@@ -57,6 +59,8 @@ import { GroupsPage } from "@/pages/GroupsPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { NodesPage } from "@/pages/NodesPage";
 import { OverviewPage } from "@/pages/OverviewPage";
+import { ProxyOverviewPage } from "@/pages/ProxyOverviewPage";
+import { useDashboardFeed } from "@/hooks/useDashboardFeed";
 import { PortsPage } from "@/pages/PortsPage";
 import { RulesPage } from "@/pages/RulesPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -64,6 +68,8 @@ import { SubscriptionsPage } from "@/pages/SubscriptionsPage";
 import { requestJSON, requestText } from "@/lib/api";
 import { MODE_LABELS } from "@/lib/constants";
 import { classNames, proxyEnvCommands, proxyURL } from "@/lib/format";
+import { NAV_GROUPS, NAV_ITEMS, isRemoteView, visibleNavigation } from "@/lib/navigation";
+import { useNavigation } from "@/hooks/useNavigation";
 import "./styles.css";
 
 /**
@@ -112,21 +118,14 @@ function loadDesktopPage() {
 
 // Remote 与 Desktop 页面分别懒加载；Remote 内更大的 xterm 运行时继续保持第二级懒加载。
 const RemotePage = lazy(loadRemotePage);
+/** 系统任务页面按需加载；回调无参数，返回模块 Promise，加载错误由 React 页面边界接管。 */
+const ConfigHistoryPage = lazy(() => import("@/pages/ConfigHistoryPage").then((module) => ({ default: module.ConfigHistoryPage })));
+const DiagnosticsPage = lazy(() => import("@/pages/DiagnosticsPage").then((module) => ({ default: module.DiagnosticsPage })));
+// 只有用户创建会话时才加载全局终端宿主。
+const TerminalDialog = lazy(() => import("@/components/TerminalDialog"));
 const DesktopPage = lazy(loadDesktopPage);
 
-const NAV_ITEMS = [
-  { id: "overview", label: "运行概况", shortLabel: "概况", group: "概览", icon: Activity },
-  { id: "nodes", label: "代理节点", shortLabel: "节点", group: "代理资源", icon: Network },
-  { id: "subscriptions", label: "订阅管理", shortLabel: "订阅", group: "代理资源", icon: Rss },
-  { id: "ports", label: "代理入口", shortLabel: "入口", group: "代理入口", icon: Gauge },
-  { id: "groups", label: "策略分组", shortLabel: "分组", group: "代理入口", icon: Layers },
-  { id: "rules", label: "访问规则", shortLabel: "规则", group: "代理入口", icon: ListFilter },
-  { id: "connections", label: "活动连接", shortLabel: "连接", group: "连接与日志", icon: Link2 },
-  { id: "logs", label: "运行日志", shortLabel: "日志", group: "连接与日志", icon: Terminal },
-  { id: "remote", label: "远程连接", shortLabel: "远程", group: "远程访问", icon: Laptop },
-  { id: "desktop", label: "远程桌面", shortLabel: "桌面", group: "远程访问", icon: Monitor },
-  { id: "settings", label: "系统设置", shortLabel: "设置", group: "系统", icon: Settings },
-];
+
 
 /**
  * App 渲染 proxyd 控制台根组件。
@@ -141,10 +140,23 @@ const NAV_ITEMS = [
  * API 不可达时保留旧数据并通过 toast 报错；写操作失败时展示后端错误文本。
  */
 function App() {
+  // 会话归属应用根节点，切换业务页面只改变布局，不释放 WebSocket 与 PTY。
+  const [terminalSession, setTerminalSession] = useState(null);
+  const [terminalMinimized, setTerminalMinimized] = useState(false);
+  /** 打开或恢复当前会话。参数 session 为目标对象；返回无；函数式更新避免旧页面回调替换活动连接。 */
+  const openTerminal = useCallback((session) => {
+    setTerminalSession((current) => current || session);
+    setTerminalMinimized(false);
+  }, []);
   const { dismissToast, showToast, toasts } = useToast();
-  const traffic = useTrafficStream(showToast);
-  const [activeView, setActiveView] = useState("overview");
   const [overview, setOverview] = useState(null);
+  const [modules, setModules] = useState([]);
+  const [snapshotError, setSnapshotError] = useState("");
+  const traffic = useTrafficStream(showToast, modules.some((module) => module.id === "proxy" && module.enabled));
+  const [activeView, setActiveView] = useNavigation(modules);
+  const dashboard = useDashboardFeed(activeView === "overview", modules);
+  const navigation = useMemo(() => visibleNavigation(modules), [modules]);
+  const [moduleBusy, setModuleBusy] = useState("");
   const [ruleUrls, setRuleUrls] = useState([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
@@ -197,7 +209,7 @@ function App() {
   );
 
   /**
-   * load 拉取概览与规则源状态。
+   * load 独立更新代理概览、模块和规则源，单一来源失败不阻断系统与远程页面。
    *
    * 参数说明：
    * - silent: boolean，是否静默失败；轮询时设为 true，避免频繁打扰。
@@ -212,19 +224,33 @@ function App() {
     async (silent = false) => {
       try {
         setLoading(true);
-        const [nextOverview, nextRuleUrls] = await Promise.all([
-          requestJSON("/api/overview"),
-          requestJSON("/api/rule-urls"),
+        // 三个来源各自提交结果，规则源失败不会阻断模块开关或总览；8 秒超时限制积压。
+        const signal = AbortSignal.timeout(8000);
+        const results = await Promise.allSettled([
+          requestJSON("/api/overview", { signal }),
+          requestJSON("/api/rule-urls", { signal }),
+          requestJSON("/api/modules", { signal }),
         ]);
-        setOverview(nextOverview);
-        setRuleUrls(nextRuleUrls || []);
-        setForms((current) => ({
-          ...current,
-          mainPort: current.mainPort || String(nextOverview.mixed_port || ""),
-          rangeLo: current.rangeLo || String(nextOverview.port_range?.[0] || ""),
-          rangeHi: current.rangeHi || String(nextOverview.port_range?.[1] || ""),
-          autoPort: current.autoPort || String(nextOverview.auto_port || 41998),
-        }));
+        const [overviewResult, rulesResult, modulesResult] = results;
+        if (modulesResult.status === "fulfilled") setModules(modulesResult.value || []);
+        if (rulesResult.status === "fulfilled") setRuleUrls(rulesResult.value || []);
+        if (overviewResult.status === "fulfilled") {
+          const nextOverview = overviewResult.value;
+          setOverview(nextOverview);
+          setForms((current) => ({
+            ...current,
+            mainPort: current.mainPort || String(nextOverview.mixed_port || ""),
+            rangeLo: current.rangeLo || String(nextOverview.port_range?.[0] || ""),
+            rangeHi: current.rangeHi || String(nextOverview.port_range?.[1] || ""),
+            autoPort: current.autoPort || String(nextOverview.auto_port || 41998),
+          }));
+        }
+        // 禁用代理时，其明细接口故障不应成为全局总览的待办或阻断远程模块状态。
+        const currentModules = modulesResult.status === "fulfilled" ? modulesResult.value || [] : [];
+        const proxyVisible = currentModules.some((module) => module.id === "proxy" && module.enabled);
+        const unavailable = [proxyVisible && overviewResult.status === "rejected" && "代理概览", modulesResult.status === "rejected" && "模块状态"].filter(Boolean);
+        setSnapshotError(unavailable.length ? `${unavailable.join("、")}暂不可用` : "");
+        if (!silent && results.some((result) => result.status === "rejected")) showToast("部分状态暂不可用，页面会自动重试", "err");
       } catch (error) {
         if (!silent) showToast(`加载失败：${error.message}`, "err");
       } finally {
@@ -383,6 +409,31 @@ function App() {
    * 接口失败时由 hook 内部承接到错误条带；调用方无需额外捕获。
    */
   const remote = useRemoteFeed(activeView, requestConfirmation, showToast);
+  /** retryModule 重试已启用模块；参数 module 为状态对象；返回 Promise<void>，失败由 postJSON 提示并刷新状态。 */
+  async function retryModule(module) {
+    if (moduleBusy) return;
+    setModuleBusy(module.id);
+    try { await postJSON(`/api/modules/${module.id}/retry`, {}, "模块已重试"); setModules(await requestJSON("/api/modules")); }
+    catch (e) { showToast(e.message, "err"); }
+    finally { setModuleBusy(""); }
+  }
+
+  /**
+   * toggleModule 执行模块启停并刷新相关页面。
+   * 参数：module 为当前模块快照；返回 Promise<void>；失败由 postJSON 展示，始终释放忙状态。
+   * 禁用确认说明连接影响，避免把服务停止误认为单纯隐藏菜单。
+   */
+  async function toggleModule(module) {
+    if (moduleBusy) return;
+    if (module.enabled && !(await requestConfirmation({ title: `禁用${module.name}模块？`, description: "将停止此模块的服务并结束活动连接，现有配置会保留。管理控制台仍可访问。", confirmLabel: "禁用模块", destructive: true }))) return;
+    setModuleBusy(module.id);
+    try {
+      if (await postJSON(`/api/modules/${module.id}`, { enabled: !module.enabled }, `${module.name}模块已${module.enabled ? "禁用" : "启用"}`)) {
+        if (module.id === "remote") { if (module.enabled) setTerminalSession(null); await remote.reload(); }
+      }
+    } finally { setModuleBusy(""); }
+  }
+
 
   /**
    * useDesktopFeed 接入独立远程桌面页的数据与会话生命周期。
@@ -533,8 +584,8 @@ function App() {
   );
 
   const commands = useMemo(
-    () => buildCommands(overview, setActiveView, runCommandAction, triggerOperation, postJSON),
-    [overview, triggerOperation, postJSON],
+    () => buildCommands(overview, setActiveView, runCommandAction, triggerOperation, postJSON, navigation.items),
+    [overview, triggerOperation, postJSON, setActiveView, navigation.items],
   );
 
   /**
@@ -552,6 +603,7 @@ function App() {
   async function runCommandAction(action) {
     try {
       setPaletteOpen(false);
+      setMobileOpen(false);
       setQuery("");
       await action();
     } catch (error) {
@@ -583,7 +635,7 @@ function App() {
         event.preventDefault();
         setPaletteOpen(true);
       }
-      if (event.key === "Escape") setPaletteOpen(false);
+      if (event.key === "Escape") { setPaletteOpen(false); setMobileOpen(false); }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -788,20 +840,29 @@ function App() {
   }
 
   const filteredCommands = commands.filter((command) =>
-    `${command.label} ${command.group}`.toLowerCase().includes(query.toLowerCase()),
+    `${command.label} ${command.group} ${command.searchText || ""}`.toLowerCase().includes(query.toLowerCase()),
   );
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="app-shell">
-      <Sidebar activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} theme={theme} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))} />
-      <main className={classNames("workspace", activeView === "overview" && "overview-workspace")}>
-        {!overview ? (
+      <div className={classNames("app-shell", activeView === "overview" && "dashboard-layout")}>
+      <nav className="domain-topbar" aria-label="业务大类">
+        <b className="domain-brand">proxyd</b>
+        {navigation.groups.map((group) => <button key={group.id} type="button" aria-current={NAV_ITEMS.find((item) => item.id === activeView)?.group === group.id ? "true" : undefined} onClick={() => { setActiveView(navigation.items.find((item) => item.group === group.id).id); setMobileOpen(false); }}>{group.label}</button>)}
+      </nav>
+      {activeView !== "overview" && <Sidebar navItems={navigation.items} modules={modules} moduleBusy={moduleBusy} onToggleModule={toggleModule} activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} theme={theme} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))} />}
+      <main className={classNames("workspace", activeView === "proxy/overview" && "overview-workspace")}>
+        {activeView !== "overview" && activeView !== "proxy/overview" && <div className="mobile-only mb-3 items-center gap-2" aria-label="页面导航工具">
+          <Button size="sm" variant="outline" type="button" aria-label="打开导航" aria-expanded={mobileOpen} aria-controls="app-sidebar" onClick={() => setMobileOpen(true)}><Menu size={16} aria-hidden="true" />菜单</Button>
+          <Button size="sm" variant="outline" type="button" aria-label="搜索页面" onClick={() => setPaletteOpen(true)}><Search size={16} aria-hidden="true" />搜索</Button>
+        </div>}
+        {!overview && (NAV_ITEMS.find((item) => item.id === activeView)?.group === "proxy" || activeView === "settings") ? (
           <EmptyState title="正在连接 proxyd" detail="等待 /api/overview 返回运行状态。" />
         ) : (
-          <div className="view-stage view-enter" key={activeView}>
-            {activeView === "overview" && (
-              <OverviewPage
+          <div className="view-stage view-enter" key={isRemoteView(activeView) ? "remote" : activeView}>
+            {activeView === "overview" && <OverviewPage modules={modules} overview={overview} traffic={traffic} feed={dashboard} snapshotError={snapshotError} theme={theme} onNavigate={setActiveView} onRefresh={() => { load(); dashboard.reload(); }} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => current === "light" ? "dark" : "light")} />}
+            {activeView === "proxy/overview" && (
+              <ProxyOverviewPage
                 aliveCount={aliveCount}
                 busy={busy}
                 loading={loading}
@@ -884,11 +945,16 @@ function App() {
                 onViewContent={submitRuleURLContent}
               />
             )}
+            <Suspense fallback={<EmptyState title="正在加载系统管理页面" detail="首次进入时按需加载。" />}>
+              {activeView === "diagnostics" && <DiagnosticsPage />}
+              {activeView === "config-history" && <ConfigHistoryPage requestConfirmation={requestConfirmation} showToast={showToast} onRestart={restartApp} />}
+            </Suspense>
+            {activeView === "modules" && <ModulesPage modules={modules} busy={moduleBusy} onToggle={toggleModule} onRetry={retryModule} />}
             {activeView === "logs" && <LogsPage />}
             {activeView === "connections" && <ConnectionsPage {...connections} />}
-            {activeView === "remote" && (
+            {isRemoteView(activeView) && (
               <Suspense fallback={<EmptyState title="正在加载远程连接页面" detail="首次进入时按需加载远程管理与终端入口。" />}>
-                <RemotePage {...remote} />
+                <RemotePage view={activeView} {...remote} onOpenTerminal={openTerminal} />
               </Suspense>
             )}
             {activeView === "desktop" && (
@@ -909,6 +975,7 @@ function App() {
           </div>
         )}
       </main>
+      {terminalSession && <Suspense fallback={null}><TerminalDialog open command={terminalSession.command || ""} target={terminalSession.target || ""} minimized={terminalMinimized} onMinimizedChange={setTerminalMinimized} onOpenChange={(open) => { if (!open) setTerminalSession(null); }} /></Suspense>}
       {paletteOpen && (
         <CommandPalette
           commands={filteredCommands}
@@ -969,6 +1036,7 @@ function App() {
  * buildCommands 生成命令面板命令。
  *
  * 参数说明：
+ * - navItems: Array<object>，已过滤禁用模块的导航项；代理禁用时同时隐藏其快捷操作。
  * - overview: object | null，当前概览数据。
  * - setActiveView: Function，切换页面的 setter。
  * - runCommandAction: Function，统一执行命令的包装器。
@@ -981,10 +1049,11 @@ function App() {
  * 可能的异常/错误情况：
  * 无；真正的命令错误由 runCommandAction 处理。
  */
-function buildCommands(overview, setActiveView, runCommandAction, triggerOperation, postJSON) {
-  const navCommands = NAV_ITEMS.map((item) => ({
-    group: "跳转",
+function buildCommands(overview, setActiveView, runCommandAction, triggerOperation, postJSON, navItems) {
+  const navCommands = navItems.map((item) => ({
+    group: NAV_GROUPS.find((group) => group.id === item.group)?.label || "概况",
     label: item.label,
+    searchText: item.keywords || item.detail || "",
     run: () => runCommandAction(() => setActiveView(item.id)),
   }));
   const modeCommands = Object.entries(MODE_LABELS).map(([mode, label]) => ({
@@ -1007,13 +1076,14 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
       run: () => runCommandAction(() => triggerOperation("/api/test", "测速")),
     },
   ];
-  return overview ? [...navCommands, ...operationCommands, ...modeCommands] : navCommands;
+  return overview && navItems.some((item) => item.group === "proxy") ? [...navCommands, ...operationCommands, ...modeCommands] : navCommands;
 }
 
 /**
  * Sidebar 渲染桌面侧边栏与移动端抽屉导航。
  *
  * 参数说明：
+ * - navItems: Array<object>，统一筛选后的菜单，适用于桌面和移动端。
  * - activeView: string，当前页面 id。
  * - connected: boolean，是否已取得后端运行状态。
  * - mobileOpen: boolean，移动端抽屉是否展开。
@@ -1029,13 +1099,25 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
  * 可能的异常/错误情况：
  * 无。
  */
-function Sidebar({ activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
+function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
+  const currentGroup = NAV_ITEMS.find((item) => item.id === activeView)?.group;
+  const module = modules.find((item) => item.id === currentGroup);
+
+  /**
+   * renderItem 渲染任务入口，桌面和移动端共用同一注册项。
+   * 参数说明：item 为 object，导航元数据；返回值：React 元素。
+   * 错误情况：无，跳转后关闭移动端抽屉。
+   */
+  function renderItem(item) {
+    const Icon = item.icon;
+    return <button key={item.id} aria-current={activeView === item.id ? "page" : undefined} className={classNames("nav-item", activeView === item.id && "active")} type="button" onClick={() => { onNavigate(item.id); onClose(); }}><Icon size={18} aria-hidden="true" /><span>{item.label}</span></button>;
+  }
   return (
     <>
-      <aside className={classNames("sidebar", mobileOpen && "open")}>
+      <aside id="app-sidebar" className={classNames("sidebar", mobileOpen && "open")}>
         <div className="brand">
           <span className="brand-mark"><Shield size={18} /></span>
-          <span className="brand-copy"><b>proxyd</b><small>代理控制台</small></span>
+          <span className="brand-copy"><b>proxyd</b><small>服务控制台</small></span>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button className="sidebar-command" size="icon" variant="ghost" type="button" onClick={onPalette} aria-label="打开命令菜单">
@@ -1056,34 +1138,11 @@ function Sidebar({ activeView, connected, mobileOpen, theme, onNavigate, onClose
             <X size={18} aria-hidden="true" />
           </Button>
         </div>
-        <nav className="nav-list" aria-label="主导航">
-          {NAV_ITEMS.map((item, index) => {
-            const Icon = item.icon;
-            const previous = NAV_ITEMS[index - 1];
-            const startsSection = !previous || previous.group !== item.group;
-            return (
-              <React.Fragment key={item.id}>
-                {/*
-                  分组标题直接呈现用户的任务层级，而不是只依赖一条无文案的分隔线。
-                  首组“概览”无需额外标题，避免品牌区下方出现重复的运行概况文案。
-                */}
-                {startsSection && item.group !== "概览" && <span className="nav-heading">{item.group}</span>}
-                <button
-                  aria-current={activeView === item.id ? "page" : undefined}
-                  className={classNames("nav-item", activeView === item.id && "active")}
-                  type="button"
-                  onClick={() => {
-                    onNavigate(item.id);
-                    onClose();
-                  }}
-                >
-                  <Icon size={18} aria-hidden="true" />
-                  <span>{item.label}</span>
-                </button>
-              </React.Fragment>
-            );
-          })}
+        <nav className="nav-list" aria-label="当前大类子菜单">
+          <div className="nav-section-title">{NAV_GROUPS.find((group) => group.id === currentGroup)?.label}</div>
+          {navItems.filter((item) => item.group === currentGroup).map(renderItem)}
         </nav>
+        {module && <div className="module-sidebar-control"><span>{module.name} · {module.enabled ? "已启用" : "已禁用"}</span><Button size="sm" variant="outline" disabled={Boolean(moduleBusy)} onClick={() => onToggleModule(module)}>{moduleBusy === module.id ? "应用中…" : module.enabled ? "禁用模块" : "启用模块"}</Button></div>}
         <div className={classNames("sidebar-status", !connected && "pending")}><i aria-hidden="true" /><span>本机服务</span><b>{connected ? "运行中" : "连接中"}</b></div>
       </aside>
       {mobileOpen && <button className="scrim" type="button" aria-label="关闭导航遮罩" onClick={onClose} />}

@@ -169,8 +169,9 @@ func (a *App) ImportConfig(raw []byte) error {
 	}
 	// 导入与设置页的其他持久化操作共用同一把配置锁，避免两个 Save 同时使用
 	// `<config>.tmp`，也避免较早开始的普通设置在导入完成后覆盖整份备份。
-	if err := next.Save(a.cfgPath); err != nil {
+	if err := a.saveWithHistoryLocked(next, "配置导入前"); err != nil {
 		return fmt.Errorf("写入导入配置失败: %w", err)
 	}
+	a.configPendingRestart = true
 	return nil
 }
