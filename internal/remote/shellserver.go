@@ -25,9 +25,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	ssh "github.com/tailscale/gliderssh"
 	gossh "golang.org/x/crypto/ssh"
+
+	"proxyd/internal/config"
 )
 
 // shellHostKeyRelPath 是内嵌 SSH host key 相对于 state-dir 的固定位置。
@@ -47,19 +50,64 @@ var shellHostKeyMu sync.Mutex
 // 错误情况：状态目录创建、host key 读写或解析失败时返回错误，
 // 不会返回半成品处理器。
 func localShellSSHHandler(stateDir string) (func(net.Conn), error) {
+	// Web 终端依赖管理 API 与一次性回环令牌认证，不受远程 SSH 公钥开关影响。
+	return configuredShellSSHHandler(stateDir, false, nil)
+}
+
+// configuredShellSSHHandler 创建保留本项目 PTY、环境与断连清理逻辑的 SSH 服务。
+// 参数说明：stateDir 为 string，host key 状态目录；required 为 bool，是否要求公钥；
+// entries 为 []config.RemoteSSHKey，已授权的客户端公钥，绝不包含客户端私钥。
+// 返回值说明：func(net.Conn) 和 error，处理器接管已由隧道认证的单条连接。
+// 错误情况：公钥无效或 host key 不可用时拒绝构造；required=true 且列表为空时
+// 保持拒绝全部，绝不因删除最后一把公钥而降级为免认证。
+func configuredShellSSHHandler(stateDir string, required bool, entries []config.RemoteSSHKey) (func(net.Conn), error) {
+	keys, err := NormalizeSSHKeys(entries)
+	if err != nil {
+		return nil, err
+	}
+	policy := newSSHAccess(newAuditLog(remoteAuditCapacity))
+	policy.update(required, keys)
+	return managedShellSSHHandler(stateDir, policy)
+}
+
+// managedShellSSHHandler 构造共享动态授权策略的 SSH 入口。
+// 参数说明：stateDir 为 string，host key 保存目录；policy 为 *sshAccess，管理器共享策略。
+// 返回值说明：func(net.Conn) 与 error；每条连接持有独立 SSH 协议状态。
+// 错误情况：host key 加载失败返回错误；握手超过 30 秒会关闭连接。
+// 公钥探测与签名完成分别检查策略，防止探测缓存跨越禁用或到期边界。
+func managedShellSSHHandler(stateDir string, policy *sshAccess) (func(net.Conn), error) {
 	signer, err := loadOrCreateShellHostKey(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("加载内嵌 SSH host key 失败: %w", err)
 	}
-	srv := &ssh.Server{
-		Handler:             shellSessionHandler,
-		NoClientAuthHandler: func(ssh.Context) error { return nil },
-		ChannelHandlers:     map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
-		RequestHandlers:     map[string]ssh.RequestHandler{},
-		SubsystemHandlers:   map[string]ssh.SubsystemHandler{},
-	}
-	srv.AddHostKey(signer)
-	return srv.HandleConn, nil
+	return func(conn net.Conn) {
+		attempted := ""
+		// callbacks 与 HandleConn 在同一握手协程执行；会话索引的并发读写由 policy 锁保护。
+		defer func() { policy.finished(conn, attempted) }()
+		srv := &ssh.Server{
+			Handler:           shellSessionHandler,
+			HandshakeTimeout:  30 * time.Second,
+			ChannelHandlers:   map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
+			RequestHandlers:   map[string]ssh.RequestHandler{},
+			SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": shellDiagnosticHandler},
+		}
+		srv.PublicKeyHandler = func(_ ssh.Context, public ssh.PublicKey) error {
+			attempted = gossh.FingerprintSHA256(public)
+			return policy.check(attempted)
+		}
+		// 两种协议认证入口始终存在，none 是否放行也读取实时策略，因此无需重建隧道。
+		srv.NoClientAuthHandler = func(_ ssh.Context) error { return policy.authenticated(conn, "") }
+		srv.ServerConfigCallback = func(_ ssh.Context) *gossh.ServerConfig {
+			return &gossh.ServerConfig{NoClientAuth: true,
+				VerifiedPublicKeyCallback: func(_ gossh.ConnMetadata, public gossh.PublicKey, permissions *gossh.Permissions, _ string) (*gossh.Permissions, error) {
+					err := policy.authenticated(conn, gossh.FingerprintSHA256(public))
+					return permissions, err
+				},
+			}
+		}
+		srv.AddHostKey(signer)
+		srv.HandleConn(conn)
+	}, nil
 }
 
 // loadOrCreateShellHostKey 读取持久化 ed25519 SSH host key，不存在时原子生成。
@@ -147,13 +195,39 @@ func shellSessionHandler(sess ssh.Session) {
 		sess.Exit(1)
 		return
 	}
+	runShellSession(sess, u)
+}
+
+// runShellSession 为已解析的本机用户启动 SSH 会话，统一内嵌 SSH 与 Web 终端的执行路径。
+//
+// 参数说明：sess 为 ssh.Session，承载命令、环境和终端请求；u 为 *user.User，
+// 必须是调用方已确认的进程用户，不能直接使用客户端声明的 SSH 用户名。
+// 返回值说明：无，退出状态通过 sess.Exit 回传。
+// 错误情况：命令或终端启动失败时由对应执行器写入错误并结束会话。
+func runShellSession(sess ssh.Session, u *user.User) {
 	cmd := newShellSessionCommand(u, sess.RawCommand())
+	// 包括无 PTY exec 在内的 SSH 会话都应携带连接标识，否则用户启动脚本可能
+	// 误入本地终端分支（例如等待本地交互）。这里记录 SSH 传输端点；经隧道或
+	// 回环接入时它们是隧道/回环地址，不冒充客户端公网地址。非 TCP 地址则不伪造。
+	clientIP, clientPort, clientErr := net.SplitHostPort(sess.RemoteAddr().String())
+	serverIP, serverPort, serverErr := net.SplitHostPort(sess.LocalAddr().String())
+	if clientErr == nil && serverErr == nil {
+		cmd.Env = append(cmd.Env,
+			"SSH_CLIENT="+strings.Join([]string{clientIP, clientPort, serverPort}, " "),
+			"SSH_CONNECTION="+strings.Join([]string{clientIP, clientPort, serverIP, serverPort}, " "),
+		)
+	}
+	ptyReq, winCh, isPTY := sess.Pty()
+	// PTY 提供默认终端类型，随后应用客户端显式 SetEnv；若顺序相反，
+	// 用户为远端缺失 terminfo 设置的兼容 TERM 会在进程启动前被悄悄覆盖。
+	if isPTY && ptyReq.Term != "" {
+		cmd.Env = append(cmd.Env, "TERM="+ptyReq.Term)
+	}
 	for _, env := range sess.Environ() {
 		if acceptShellEnvPair(env) {
 			cmd.Env = append(cmd.Env, env)
 		}
 	}
-	ptyReq, winCh, isPTY := sess.Pty()
 	if isPTY {
 		sess.DisablePTYEmulation()
 		runShellWithPTY(sess, cmd, ptyReq, winCh)

@@ -12,9 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
-	"runtime"
-	"strings"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -47,6 +44,7 @@ func newShellSessionCommand(u *user.User, rawCmd string) *exec.Cmd {
 	cmd.Env = []string{
 		"SHELL=" + shell,
 		"USER=" + u.Username,
+		"LOGNAME=" + u.Username,
 		"HOME=" + u.HomeDir,
 		"PATH=" + defaultShellPath(u),
 	}
@@ -109,9 +107,9 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 		})
 	}
 
-	if ptyReq.Term != "" {
-		cmd.Env = append(cmd.Env, "TERM="+ptyReq.Term)
-	}
+	// 必须传递真实从端路径：用户启动脚本据此判断 SSH 登录，工具也会通过它
+	// 访问控制终端。客户端不允许覆盖此变量，且无 PTY 会话不能伪造 SSH_TTY。
+	cmd.Env = append(cmd.Env, "SSH_TTY="+tty.Name())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
 	cmd.Stdin = tty
 	cmd.Stdout = tty
@@ -192,17 +190,12 @@ func terminateShellProcess(cmd *exec.Cmd) {
 // 参数说明：
 //   - u: *user.User，目标本机用户。
 //
-// 返回值说明：string，优先目录服务记录，其次 SHELL 环境变量，兜底 /bin/sh。
+// 返回值说明：string，优先系统账户记录，其次 SHELL 环境变量，兜底 /bin/sh。
 //
 // 错误情况：无；所有查询失败都回退到默认值。
 func loginShell(u *user.User) string {
-	if runtime.GOOS == "darwin" {
-		out, err := exec.Command("dscl", ".", "-read", filepath.Join("/Users", u.Username), "UserShell").Output()
-		if err == nil {
-			if s, ok := strings.CutPrefix(string(out), "UserShell: "); ok {
-				return strings.TrimSpace(s)
-			}
-		}
+	if shell := lookupLoginShell(u); shell != "" {
+		return shell
 	}
 	if e := os.Getenv("SHELL"); e != "" {
 		return e

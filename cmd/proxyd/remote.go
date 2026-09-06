@@ -69,6 +69,7 @@ type remoteStatusJSON struct {
 	TempKey         string                      `json:"temp_key,omitempty"`
 	KeyFile         string                      `json:"key_file"`
 	BuiltinSSH      bool                        `json:"builtin_ssh"`
+	SSHAuthRequired bool                        `json:"ssh_auth_required"`
 	WebTerminal     bool                        `json:"web_terminal"`
 	APIListen       string                      `json:"api_listen"`
 	APILoopback     bool                        `json:"api_loopback"`
@@ -157,6 +158,8 @@ func cmdRemote(args []string) error {
 		return cmdRemoteTempKey(c, rest[1:])
 	case "keyfile":
 		return cmdRemoteKeyFile(c, rest[1:])
+	case "ssh-keys":
+		return cmdRemoteSSHKeys(c, rest[1:])
 	case "builtin-ssh":
 		return cmdRemoteBuiltinSSH(c, rest[1:])
 	case "web-terminal":
@@ -166,10 +169,13 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|audit|tempkey|keyfile|builtin-ssh|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|web-terminal|remotes|forwards|genkey|pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
+// 参数说明：c 为 *apiClient，用于访问已认证的管理 API。
+// 返回值说明：error，读取与展示成功时为 nil。
+// 错误情况：API 连接或解码失败时返回错误；状态只展示公钥及凭据摘要。
 func remotePrintStatus(c *apiClient) error {
 	var st remoteStatusJSON
 	if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
@@ -217,7 +223,11 @@ func remotePrintStatus(c *apiClient) error {
 		fmt.Printf("密钥文件：%s\n", st.KeyFile)
 	}
 	if st.BuiltinSSH {
-		fmt.Println("内嵌免密 SSH：已开启（隧道 22 端口由进程内 SSH 处理，proxyd remote builtin-ssh off 关闭）")
+		if st.SSHAuthRequired {
+			fmt.Println("内嵌 SSH：已开启，要求 SSH 公钥认证（proxyd remote ssh-keys 管理）")
+		} else {
+			fmt.Println("内嵌 SSH：已开启，隧道免密模式（proxyd remote ssh-keys on 可额外要求公钥认证）")
+		}
 	}
 	if st.WebTerminal {
 		fmt.Printf("Web 终端：已开启（管理 API %s；proxyd remote web-terminal off 可立即关闭）\n", st.APIListen)
@@ -576,15 +586,17 @@ func parseRemotePorts(raw string) ([]int, error) {
 
 // remoteAuditEntryJSON 对应连接审计 API 的单条安全事件。
 type remoteAuditEntryJSON struct {
-	Time       time.Time `json:"time"`
-	ClientKey  string    `json:"client_key,omitempty"`
-	ClientName string    `json:"client_name,omitempty"`
-	TargetPort int       `json:"target_port"`
-	Action     string    `json:"action"`
-	Reason     string    `json:"reason,omitempty"`
-	DurationMS int64     `json:"duration_ms,omitempty"`
-	RxBytes    int64     `json:"rx_bytes,omitempty"`
-	TxBytes    int64     `json:"tx_bytes,omitempty"`
+	SSHFingerprint string    `json:"ssh_fingerprint"`
+	SSHKeyName     string    `json:"ssh_key_name"`
+	Time           time.Time `json:"time"`
+	ClientKey      string    `json:"client_key,omitempty"`
+	ClientName     string    `json:"client_name,omitempty"`
+	TargetPort     int       `json:"target_port"`
+	Action         string    `json:"action"`
+	Reason         string    `json:"reason,omitempty"`
+	DurationMS     int64     `json:"duration_ms,omitempty"`
+	RxBytes        int64     `json:"rx_bytes,omitempty"`
+	TxBytes        int64     `json:"tx_bytes,omitempty"`
 }
 
 // cmdRemoteAudit 查询并打印最近的 remote 连接审计事件。
@@ -631,7 +643,13 @@ func cmdRemoteAudit(c *apiClient, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "TIME\tCLIENT\tPORT\tACTION\tDURATION\tRX\tTX\tREASON")
 	for _, entry := range response.Entries {
-		client := entry.ClientName
+		client := entry.SSHKeyName
+		if entry.SSHFingerprint != "" {
+			client += " (" + entry.SSHFingerprint + ")"
+		}
+		if client == "" {
+			client = entry.ClientName
+		}
 		if client == "" {
 			client = entry.ClientKey
 		}
@@ -665,6 +683,14 @@ func formatRemoteAuditAction(action string) string {
 		return "拒绝"
 	case remote.AuditActionDisconnected:
 		return "断开"
+	case "ssh_authenticated":
+		return "SSH 已认证"
+	case "ssh_failed":
+		return "SSH 失败"
+	case "ssh_disconnected":
+		return "SSH 结束"
+	case "ssh_disconnect_requested":
+		return "请求断开"
 	default:
 		return action
 	}
@@ -771,16 +797,17 @@ func cmdRemoteKeyFile(c *apiClient, args []string) error {
 	return nil
 }
 
-// cmdRemoteBuiltinSSH 查看（无参）或开关内嵌免密 SSH 服务（on|off）。
-// 开启后隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证，无需系统 sshd），
-// 与 tailcat serve 的 no-auth-ssh 同模型；token 不变。
+// cmdRemoteBuiltinSSH 查看或开关内嵌 SSH 服务，保留另行设置的公钥认证策略。
+// 参数说明：c 为 *apiClient；args 为 []string，无参数查询，on/off 切换服务。
+// 返回值说明：error，API 操作成功时为 nil。
+// 错误情况：参数非法、API 失败或服务调和失败时返回错误；不修改授权公钥。
 func cmdRemoteBuiltinSSH(c *apiClient, args []string) error {
 	if len(args) == 0 {
 		var st remoteStatusJSON
 		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
 			return err
 		}
-		fmt.Printf("内嵌免密 SSH：%v\n", st.BuiltinSSH)
+		fmt.Printf("内嵌 SSH：%v，要求公钥认证：%v\n", st.BuiltinSSH, st.SSHAuthRequired)
 		return nil
 	}
 	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
@@ -792,9 +819,13 @@ func cmdRemoteBuiltinSSH(c *apiClient, args []string) error {
 		return err
 	}
 	if enabled {
-		fmt.Println("内嵌免密 SSH 已开启：对端直接 proxyd ssh / tailcat ssh 即可登录（隧道即认证，无需系统 sshd 与账号密码）")
+		if st.SSHAuthRequired {
+			fmt.Println("内嵌 SSH 已开启：客户端需提供已授权的 SSH 私钥（proxyd ssh home -i 私钥文件）")
+		} else {
+			fmt.Println("内嵌 SSH 已开启：保留隧道免密登录，无需系统 sshd")
+		}
 	} else {
-		fmt.Println("内嵌免密 SSH 已关闭：隧道 22 端口恢复转发 127.0.0.1:22（系统 sshd）")
+		fmt.Println("内嵌 SSH 已关闭：隧道 22 端口恢复转发 127.0.0.1:22（系统 sshd）")
 	}
 	return nil
 }
@@ -1152,7 +1183,20 @@ func extractClientKey(args []string) (rest []string, keyText string, err error) 
 
 // cmdSSH 经 tailcat 隧道执行系统 ssh（等价 tailcat ssh）：解析远端名 → token，
 // 以 `proxyd remote pipe` 作为 ProxyCommand 启动系统 ssh。纯客户端命令。
+// 参数说明：args 为 []string；--diagnose 进入有界诊断，其余 SSH 参数沿用系统客户端。
+// 返回值说明：error，连接或诊断成功时为 nil。
+// 错误情况：配置、目标、密钥、网络或诊断失败时返回错误；不输出完整 token。
 func cmdSSH(args []string) error {
+	diagnose := false
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--diagnose" {
+			diagnose = true
+		} else {
+			filtered = append(filtered, arg)
+		}
+	}
+	args = filtered
 	args, clientKeyText, err := extractClientKey(args)
 	if err != nil {
 		return err
@@ -1220,7 +1264,7 @@ func cmdSSH(args []string) error {
 	// 因此给 ssh 一个短主机名；真实 token 只出现在 ProxyCommand 参数里。
 	sshHost := name
 	if strings.HasPrefix(name, "tc") {
-		sshHost = "tailcat-" + token[len(token)-8:]
+		sshHost = "tailcat-" + token[max(0, len(token)-8):]
 	}
 	sshDst := sshHost
 	if user != "" {
@@ -1245,6 +1289,13 @@ func cmdSSH(args []string) error {
 		"-o", "LogLevel ERROR",
 		"-o", "ProxyCommand=" + proxyCmd,
 		sshDst,
+	}
+	if diagnose {
+		// 诊断参数放在目标之前；BatchMode 禁止无人值守密码提示，子系统使用真实交互 PTY。
+		diagnosticArgs := append([]string{}, argv[:len(argv)-1]...)
+		diagnosticArgs = append(diagnosticArgs, sshArgs...)
+		diagnosticArgs = append(diagnosticArgs, "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-tt", "-s", sshDst, "proxyd-diagnostics")
+		return runSSHDiagnostic(sshExe, diagnosticArgs, cfgFile, token, clientKeyText, portNum)
 	}
 	argv = append(argv, sshArgs...)
 

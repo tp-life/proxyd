@@ -1,4 +1,4 @@
-// Package config loads and validates proxyd's own configuration file.
+// Package config 负责 proxyd 配置加载、默认值与领域约束校验。
 package config
 
 import (
@@ -215,6 +215,10 @@ func (c *Config) RedactedCopy() *Config {
 	for i := range out.RuleURLs {
 		out.RuleURLs[i].URL = redactSourceURL(out.RuleURLs[i].URL)
 	}
+	// DERP 地图也可能使用带凭据的私有 URL，分享配置时沿用订阅源的保守脱敏。
+	if out.Remote.DERPMapURL != "" {
+		out.Remote.DERPMapURL = redactSourceURL(out.Remote.DERPMapURL)
+	}
 	out.RuleProviders = redactConfigMap(out.RuleProviders)
 	out.GeoXUrl = redactConfigMap(out.GeoXUrl)
 	out.DNS = redactConfigMap(out.DNS)
@@ -405,6 +409,8 @@ func redactConfigValue(key string, value any) any {
 
 // Config is the root of proxyd's configuration.
 type Config struct {
+	// ProxyDisabled 关闭代理数据面但保留订阅、端口与规则；零值兼容既有配置。
+	ProxyDisabled bool           `yaml:"proxy-disabled,omitempty"`
 	Subscriptions []Subscription `yaml:"subscriptions"`
 
 	// ManualNodes 手动添加的自有代理节点（http(s)/socks5 URL 或分享链接），
@@ -661,6 +667,15 @@ func (c *Config) MigrationApplied() bool {
 //
 // 错误情况：无；默认值之间的端口冲突等结构问题由 Validate 统一返回。
 func (c *Config) applyDefaults() {
+	// 纯远程实例无需填写代理骨架；保留合法默认值便于以后从控制台配置并启用代理。
+	if c.ProxyDisabled {
+		if c.PortRange == [2]int{} {
+			c.PortRange = [2]int{42000, 42100}
+		}
+		if len(c.Rules) == 0 {
+			c.Rules = []string{"MATCH,PROXY"}
+		}
+	}
 	if c.Listen == "" {
 		c.Listen = defaultListen
 	}
@@ -803,7 +818,7 @@ func (c *Config) ValidateForAPISecretBootstrap() error {
 // 错误情况：除 api-secret 的临时例外外，所有错误与 Validate 完全一致；
 // 调用方必须在启动任何管理监听前补齐口令并再次调用 Validate。
 func (c *Config) validate(allowMissingAPISecret bool) error {
-	if len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
+	if !c.ProxyDisabled && len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
 		return fmt.Errorf("at least one subscription or manual node is required")
 	}
 	for i, m := range c.ManualNodes {

@@ -58,13 +58,14 @@ func (a *App) SetSystemProxy(enabled bool) error {
 
 	a.mu.RLock()
 	oldEnabled := a.cfg.SystemProxy
+	disabled := a.cfg.ProxyDisabled
 	port := a.cfg.MixedPort
 	a.mu.RUnlock()
-	if err := a.applySystemProxy(enabled, port); err != nil {
+	if err := a.applySystemProxy(enabled && !disabled, port); err != nil {
 		// macOS 会遍历多个网络服务，其中一项失败时前面的项可能
 		// 已经改动；因此“首次调用返错”也要主动重放旧状态，不能
 		// 假设底层命令具有原子性。
-		if rollbackErr := a.applySystemProxy(oldEnabled, port); rollbackErr != nil {
+		if rollbackErr := a.applySystemProxy(oldEnabled && !disabled, port); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("系统代理设置失败后恢复旧状态失败: %w", rollbackErr))
 		}
 		return err
@@ -79,7 +80,7 @@ func (a *App) SetSystemProxy(enabled bool) error {
 	if persistErr == nil {
 		return nil
 	}
-	if rollbackErr := a.applySystemProxy(oldEnabled, port); rollbackErr != nil {
+	if rollbackErr := a.applySystemProxy(oldEnabled && !disabled, port); rollbackErr != nil {
 		return errors.Join(persistErr, fmt.Errorf("恢复旧系统代理状态失败: %w", rollbackErr))
 	}
 	return persistErr

@@ -112,6 +112,10 @@ func Probe(ctx context.Context, token string, clientKey key.NodePrivate) (ProbeR
 // 错误情况：客户端身份加载失败时降级为临时身份；实际探测错误原样返回给应用层。
 func (m *Manager) ProbeRemote(ctx context.Context, token string) (ProbeResult, error) {
 	m.mu.Lock()
+	if m.cfg.Disabled {
+		m.mu.Unlock()
+		return ProbeResult{}, fmt.Errorf("远程访问模块已禁用")
+	}
 	clientKey := m.clientKeyLocked()
 	m.mu.Unlock()
 	return Probe(ctx, token, clientKey)

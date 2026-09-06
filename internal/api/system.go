@@ -17,6 +17,7 @@ import (
 )
 
 // registerSystemRoutes 注册系统与共享路由（含健康检查）。
+// 参数：mux 为 *http.ServeMux；返回无；重复注册由标准库报告错误。
 func (s *Server) registerSystemRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/system-proxy", s.handleSetSystemProxy)
 	mux.HandleFunc("GET /api/tun", s.handleTUNStatus)
@@ -29,6 +30,7 @@ func (s *Server) registerSystemRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/restart", s.handleRestart)
 	mux.HandleFunc("POST /api/autostart", s.handleSetAutostart)
 	mux.HandleFunc("GET /api/logs", s.handleLogs)
+	mux.HandleFunc("GET /api/system/status", s.handleSystemStatus)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -305,4 +307,11 @@ func (s *Server) handleSetAutostart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"autostart": req.Enabled})
+}
+
+// handleSystemStatus 返回不含配置或凭据的系统运行摘要。
+// 参数：w 为 http.ResponseWriter，r 为 *http.Request（未使用）；返回无。
+// 错误情况：只读取本地内存，无外部 I/O；配置待重启状态在应用读锁内读取。
+func (s *Server) handleSystemStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, s.app.SystemStatus())
 }

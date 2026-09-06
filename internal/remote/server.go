@@ -48,32 +48,43 @@ func expandHome(p string) string {
 	return p
 }
 
-// autoRegionLocked 返回自动就近模式下的 DERP 区域：首次调用经 Expand 探测并缓存，
-// 之后（含配置变更引发的重建）沿用缓存，保证 token 中的区域信息在进程生命周期内稳定。
+// autoRegionLocked 返回自动就近模式下的 DERP 区域：首次调用恢复持久缓存或经备用地图探测并缓存，
+// 之后（含配置变更引发的重建）沿用缓存，保证 token 中的区域信息跨进程稳定。
 // DERPMapURL 变化时缓存失效、重新探测。调用方需持有 m.mu。
 func (m *Manager) autoRegionLocked(cfg config.RemoteConfig) (*tailcfg.DERPRegion, error) {
 	if m.autoRegion != nil && m.autoRegionMapURL == cfg.DERPMapURL {
 		return m.autoRegion, nil
 	}
-	ci := &tailcat.ConnInfo{RegionID: -1} // -1 = 自动探测最近区域
-	opts := []any{tailcat.ExpandForServer}
-	if cfg.DERPMapURL != "" {
-		opts = append(opts, tailcat.DERPMapURL(cfg.DERPMapURL))
+	if region := m.loadDERPRegion(cfg.DERPMapURL); region != nil {
+		m.autoRegion, m.autoRegionMapURL = region, cfg.DERPMapURL
+		m.logf("[remote] 恢复持久 DERP 区域 %d（%s）", region.RegionID, region.RegionName)
+		return region, nil
+	}
+	sources := []string{cfg.DERPMapURL}
+	if cfg.DERPMapURL == "" {
+		sources = []string{tailcat.DefaultDERPMapURL, fallbackDERPMapURL}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), autoRegionDiscoveryTimeout)
 	defer cancel()
-	if err := ci.Expand(ctx, opts...); err != nil {
-		return nil, fmt.Errorf("探测 DERP 区域失败: %w", err)
+	region, err := discoverDERPRegion(ctx, -1, sources)
+	if err != nil {
+		return nil, err
 	}
-	m.autoRegion = ci.Region[0]
+	m.autoRegion = region
+	if err := m.saveDERPRegion(cfg.DERPMapURL, region); err != nil {
+		m.logf("[remote] 保存 DERP 区域缓存失败: %v", err)
+	}
 	m.autoRegionMapURL = cfg.DERPMapURL
-	m.logf("[remote] 自动选定 DERP 区域 %d（%s），进程内保持不变", m.autoRegion.RegionID, m.autoRegion.RegionName)
+	m.logf("[remote] 自动选定 DERP 区域 %d（%s），持久保持不变", m.autoRegion.RegionID, m.autoRegion.RegionName)
 	return m.autoRegion, nil
 }
 
 // startServerLocked 按配置启动隧道服务端并刷新 token；调用方需持有 m.mu。
+// 参数说明：cfg 为 config.RemoteConfig，已验证的服务端配置快照。
+// 返回值说明：error，身份恢复、SSH 初始化与 tailcat 启动成功时为 nil。
+// 错误情况：文件、区域查询或服务启动失败时返回错误；旧密钥不自动增加 PSK，避免身份迁移。
 func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
-	priv, err := loadOrCreateNodeKey(m.serverKeyPath(cfg))
+	identity, err := loadOrCreateTailcatKey(m.serverKeyPath(cfg))
 	if err != nil {
 		return err
 	}
@@ -84,9 +95,13 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	}
 
 	s := &tailcat.Server{
-		Key:        priv,
-		Logf:       logger.Logf(m.logf),
-		DERPMapURL: cfg.DERPMapURL,
+		Key: identity.Private,
+		// v0.6 默认为零 PSK 自动生成随机值；必须恢复文件中的 PSK 才能保持 token 稳定。
+		// 老文件没有 PSK，显式沿用兼容模式，避免升级后已分发的 token 全部失效。
+		PresharedKey:        identity.Public.PresharedKey,
+		DisablePresharedKey: identity.Public.PresharedKey.IsZero(),
+		Logf:                logger.Logf(m.logf),
+		DERPMapURL:          cfg.DERPMapURL,
 	}
 	// 客户端公钥白名单只负责尽早挡住未知身份；TTL 与端口范围仍在每条 TCP
 	// 连接进入时由 guardConnection 判定。授权清扫后即使列表为空，也必须保留
@@ -118,7 +133,16 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 		}
 		s.Region = region
 	} else if regionID > 0 {
-		s.RegionID = tailcfg.DERPRegionID(regionID)
+		sources := []string{cfg.DERPMapURL}
+		if cfg.DERPMapURL == "" {
+			sources = []string{tailcat.DefaultDERPMapURL, fallbackDERPMapURL}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), autoRegionDiscoveryTimeout)
+		defer cancel()
+		s.Region, err = discoverDERPRegion(ctx, tailcfg.DERPRegionID(regionID), sources)
+		if err != nil {
+			return err
+		}
 	} else {
 		// 自动就近：进程内粘性。区域探测结果随网络抖动可能在相邻区域间摇摆，
 		// 而 token 嵌入了区域信息——若每次重建都重新探测，任何配置变更（白名单/
@@ -142,7 +166,7 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	// shell，会残留 PTY、子进程和处理协程。host key 持久化在 state-dir/remote。
 	var sshHandler func(net.Conn)
 	if cfg.BuiltinSSH {
-		sshHandler, err = localShellSSHHandler(m.stateDir)
+		sshHandler, err = managedShellSSHHandler(m.stateDir, m.sshAccess)
 		if err != nil {
 			return err
 		}
@@ -171,6 +195,9 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	sshNote := ""
 	if cfg.BuiltinSSH {
 		sshNote = "，内嵌免密 SSH（隧道 22 端口）"
+		if cfg.SSHAuthRequired {
+			sshNote = "，内嵌 SSH 公钥认证（隧道 22 端口）"
+		}
 	}
 	if strings.TrimSpace(cfg.KeyFile) != "" {
 		m.logf("[remote] 隧道服务端已启动，暴露端口 %v%s，密钥文件 %s", cfg.Serve, sshNote, m.serverKeyPath(cfg))
@@ -252,31 +279,46 @@ func ValidateKeyFile(path string) error {
 	return nil
 }
 
-// loadOrCreateNodeKey 读取持久化节点密钥；不存在时生成新密钥并以 0600 落盘。
-// 服务端密钥决定 token，客户端密钥决定 --allow 白名单身份：文件在则身份稳定。
+// loadOrCreateNodeKey 读取客户端所需的持久化节点私钥。
+// 参数说明：path 为 string，tailcat JSON 密钥文件路径。
+// 返回值说明：key.NodePrivate 和 error，返回文件中的节点身份。
+// 错误情况：文件读取、解析或创建失败时返回错误，不使用零值私钥降级。
 func loadOrCreateNodeKey(path string) (priv key.NodePrivate, err error) {
+	saved, err := loadOrCreateTailcatKey(path)
+	if err != nil {
+		return priv, err
+	}
+	return saved.Private, nil
+}
+
+// loadOrCreateTailcatKey 读取完整 tailcat 身份，保留 v0.6 新增的持久化 PSK。
+// 参数说明：path 为 string，服务端或客户端密钥文件路径。
+// 返回值说明：*tailcat.PrivateKey 和 error；老文件保持原值，新文件包含随机 PSK。
+// 错误情况：损坏文件或写入失败时返回错误。新文件通过同目录原子替换以 0600 落盘；
+// 服务端调用由 Manager 锁串行化，既有身份不会因为一次启动失败而被重新生成。
+func loadOrCreateTailcatKey(path string) (*tailcat.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
+		if err := ValidateServerKeyData(data); err != nil {
+			return nil, err
+		}
 		var saved tailcat.PrivateKey
 		if jerr := json.Unmarshal(data, &saved); jerr != nil {
-			return priv, fmt.Errorf("解析 %s 失败: %w", path, jerr)
+			return nil, fmt.Errorf("解析 %s 失败: %w", path, jerr)
 		}
-		return saved.Private, nil
+		return &saved, nil
 	}
 	if !os.IsNotExist(err) {
-		return priv, fmt.Errorf("读取 %s 失败: %w", path, err)
+		return nil, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
 
 	fresh := tailcat.NewPrivateKey()
 	data, err = json.MarshalIndent(fresh, "", "\t")
 	if err != nil {
-		return priv, err
+		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return priv, err
+	if err := WriteServerKeyData(path, data); err != nil {
+		return nil, err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return priv, fmt.Errorf("写入 %s 失败: %w", path, err)
-	}
-	return fresh.Private, nil
+	return fresh, nil
 }

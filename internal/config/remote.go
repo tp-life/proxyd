@@ -116,6 +116,8 @@ func (f RemoteForward) IsEnabled() bool {
 // RemoteConfig 是「远程连接」周边模块的配置段，基于 tailcat 数据面隧道，
 // 与代理功能完全独立（不经过 mihomo）。
 type RemoteConfig struct {
+	// Disabled 是模块总停用标记，独立于 Enabled 服务端开关；保留客户端模式兼容性。
+	Disabled   bool               `yaml:"disabled,omitempty" json:"disabled"`
 	Enabled    bool               `yaml:"enabled" json:"enabled"`                             // 隧道服务端总开关
 	Region     string             `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
 	DERPMapURL string             `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
@@ -126,7 +128,9 @@ type RemoteConfig struct {
 	AllowRestricted bool            `yaml:"allow-restricted,omitempty" json:"allow_restricted,omitempty"`
 	TempKey         string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`         // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
 	KeyFile         string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`         // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
-	BuiltinSSH      bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"`   // 内嵌免密 SSH 服务：隧道 22 端口由进程内 SSH 服务器直接处理（隧道即认证），不再转发 127.0.0.1:22，无需系统 sshd
+	BuiltinSSH      bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"`   // 内嵌 SSH：隧道 22 由进程内处理，无需系统 sshd；默认隧道免密，可叠加公钥认证
+	SSHAuthRequired bool            `yaml:"ssh-auth-required,omitempty" json:"ssh_auth_required"` // 开启后在隧道认证之上要求 SSH 公钥；空授权列表保持拒绝全部
+	SSHKeys         []RemoteSSHKey  `yaml:"ssh-keys,omitempty" json:"ssh_keys"`                   // SSH 登录授权公钥，与 WireGuard nodekey 白名单独立
 	WebTerminal     bool            `yaml:"web-terminal,omitempty" json:"web_terminal,omitempty"` // 浏览器终端总开关；默认关闭，且非回环 api-listen 开启时必须显式确认暴露风险
 	Remotes         []RemotePeer    `yaml:"remotes,omitempty" json:"remotes,omitempty"`
 	Forwards        []RemoteForward `yaml:"forwards,omitempty" json:"forwards,omitempty"`
@@ -142,6 +146,10 @@ type RemoteConfig struct {
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
+	out.SSHKeys = make([]RemoteSSHKey, len(r.SSHKeys))
+	for i, entry := range r.SSHKeys {
+		out.SSHKeys[i] = entry.Clone()
+	}
 	out.Allow = make([]RemoteAllowEntry, len(r.Allow))
 	for index, entry := range r.Allow {
 		out.Allow[index] = entry.Clone()
@@ -242,8 +250,14 @@ func ValidateRemoteAllow(entries []RemoteAllowEntry) error {
 }
 
 // checkRemote 校验 remote 配置段整体：端口范围、名称唯一性与转发字段。
+// 参数说明：无，接收者包含待校验的完整配置。
+// 返回值说明：error，全部结构约束满足时为 nil。
+// 错误情况：SSH 公钥集合越界或其他 remote 字段非法时返回带上下文的错误。
 func (c *Config) checkRemote() error {
 	r := c.Remote
+	if err := ValidateRemoteSSHKeys(r.SSHKeys); err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
 	if err := ValidateRemoteServe(r.Serve); err != nil {
 		return fmt.Errorf("remote: %w", err)
 	}

@@ -113,6 +113,8 @@ func cmdConfig(args []string) error {
 		sub = rest[0]
 	}
 	switch sub {
+	case "history":
+		return cmdConfigHistory(cfgFile, rest[1:])
 	case "path":
 		abs, err := filepath.Abs(cfgFile)
 		if err != nil {
@@ -163,7 +165,7 @@ func cmdConfig(args []string) error {
 		}
 		return cmdConfigImport(nil, cfgFile, items[0], *yes)
 	default:
-		return fmt.Errorf("用法: proxyd config [-c 配置] path|export [--full] [-o 文件]|import [--yes] <文件>")
+		return fmt.Errorf("用法: proxyd config [-c 配置] path|export [--full] [-o 文件]|import [--yes] <文件>|history list|preview|restore|export")
 	}
 }
 

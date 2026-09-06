@@ -61,6 +61,10 @@ func main() {
 			err = cmdStatus(os.Args[2:])
 		case "check":
 			err = cmdCheck(os.Args[2:])
+		case "diagnose":
+			err = cmdDiagnose(os.Args[2:])
+		case "modules":
+			err = cmdModules(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -155,6 +159,9 @@ usage:
   proxyd serve [flags] [订阅地址...]    前台常驻运行（日志输出到终端）
   proxyd start|stop|restart|status [flags]   后台守护模式（日志落 state-dir/proxyd.log）
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
+  proxyd diagnose [-c 配置] [设备] [--json]  分阶段诊断与脱敏报告
+  proxyd config history list|export <ID>|preview <ID>|restore <ID> [--yes]
+  proxyd modules [-c 配置] list | proxy|remote on|off|retry  模块管理
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
   proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式（需系统权限）
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
@@ -197,7 +204,9 @@ usage:
   proxyd remote audit [--tail N]       查看连接建立、拒绝与断开审计记录
   proxyd remote tempkey [reset]          查看/重置临时身份（保留手动白名单与客户端 nodekey）
   proxyd remote keyfile [路径|-]|export <路径>|import <路径>   设置、导出或导入服务端身份密钥
-  proxyd remote builtin-ssh [on|off]    查看/开关进程内免密 SSH（隧道即认证）
+  proxyd remote ssh-keys list|add|import|del|export|on|off|enable|disable|expire|disconnect     管理 SSH 登录公钥与附加认证
+  proxyd ssh <远端> --diagnose [-i 私钥]    分阶段检查隧道、SSH 认证与交互登录环境
+  proxyd remote builtin-ssh [on|off]    查看/开关进程内 SSH（可叠加公钥认证）
   proxyd remote web-terminal [on|off] [--yes]   查看/开关浏览器终端（默认关闭；非回环开启需确认）
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
@@ -391,7 +400,7 @@ func cmdServe(args []string) error {
 	// 配置开启系统代理时启动即应用。退出清理必须无条件注册，并在执行时读取
 	// App 当前快照：服务可能启动时关闭、随后由 Web/CLI 热开启；若只在启动配置
 	// 为 true 时登记 defer，正常 stop 后操作系统仍会指向已经退出的代理端口。
-	if cfg.SystemProxy {
+	if cfg.SystemProxy && !cfg.ProxyDisabled {
 		if err := sysproxy.On("127.0.0.1", cfg.MixedPort); err != nil {
 			log.Printf("[sysproxy] 应用系统代理失败: %v", err)
 		} else {

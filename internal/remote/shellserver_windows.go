@@ -95,10 +95,6 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 		return
 	}
 
-	if ptyReq.Term != "" {
-		cmd.Env = append(cmd.Env, "TERM="+ptyReq.Term)
-	}
-
 	cp, err := startConPTY(cmd, ptyReq.Window.Width, ptyReq.Window.Height)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "conpty: %v\r\n", err)

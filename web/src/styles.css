@@ -676,11 +676,14 @@
   }
 
   .sidebar {
+    /* 移动端关闭时同时退出键盘与辅助技术导航，避免焦点进入屏外按钮。 */
+    visibility: hidden;
     @apply fixed inset-y-0 left-0 z-40 flex w-[240px] -translate-x-full flex-col border-r bg-sidebar px-3 py-5 text-sidebar-foreground transition-transform duration-300;
     transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .sidebar.open {
+    visibility: visible;
     @apply translate-x-0;
   }
 
@@ -2371,6 +2374,7 @@
   }
 
   .sidebar {
+    visibility: visible;
     @apply sticky top-0 z-20 h-screen translate-x-0;
   }
 
@@ -2941,4 +2945,43 @@
   [data-theme="light"] .page-kicker {
     text-shadow: none;
   }
+}
+
+/* 二级任务导航缩进展示；分组可折叠以限制侧边栏长度，移动端共用此结构。 */
+.nav-domain { min-width: 0; }
+.nav-domain-toggle { width: 100%; margin-top: 8px; }
+.nav-domain-toggle.selected-domain { color: var(--foreground); }
+.nav-domain-items { padding-left: 12px; margin-left: 9px; border-left: 1px solid var(--border); }
+.nav-domain-items .nav-item { width: 100%; }
+
+/* 大类横向排列，侧栏只承担当前业务子页；移动端可横滑顶部入口。 */
+.domain-topbar { position: sticky; top: 0; z-index: 35; grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; height: 60px; padding: 0 24px; background: var(--background); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.domain-topbar button { white-space: nowrap; padding: 9px 18px; border-radius: 8px; color: var(--muted-foreground); font-weight: 600; }
+.domain-topbar button[aria-current] { background: var(--secondary); color: var(--foreground); }
+.domain-brand { margin-right: 24px; letter-spacing: -0.03em; }
+.nav-section-title { padding: 12px; font-size: 12px; color: var(--muted-foreground); }
+.terminal-dock { position: fixed; bottom: 20px; right: 20px; z-index: 60; display: flex; align-items: center; max-width: calc(100vw - 32px); padding: 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--background); box-shadow: 0 8px 32px #0003; }
+.terminal-dock > button:first-child { min-width: 0; }
+@media (min-width: 761px) { .app-shell { grid-template-rows: 60px 1fr; } .sidebar { top: 60px; height: calc(100vh - 60px); } }
+@media (max-width: 760px) { .domain-topbar { padding: 0 10px; gap: 2px; } .domain-topbar button { padding: 9px 12px; } .domain-brand { margin-right: 6px; } .sidebar { top: 60px; } }
+
+/* 模块状态置于子菜单底部，禁用后统一转到系统模块管理。 */
+.module-sidebar-control { display: flex; flex-direction: column; gap: 10px; padding: 16px; font-size: 12px; border-top: 1px solid var(--border); }
+.module-disabled-note { padding: 12px 16px; margin-bottom: 16px; background: var(--secondary); border-radius: 8px; font-size: 13px; }
+
+/* 当前大类以底线和填色同时标记，停靠栏使用实色避免与页面内容重叠。 */
+.domain-topbar button[aria-current] { box-shadow: inset 0 -2px 0 var(--primary); }
+.terminal-dock { background: var(--popover); }
+
+/* 总览没有侧边子菜单，释放整行空间；卡片和待办在窄屏垂直排列，长错误文本可换行。 */
+.dashboard-layout { grid-template-columns: minmax(0, 1fr); }
+.dashboard-shell { max-width: 1200px; margin-inline: auto; }
+.dashboard-health { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px; padding: 24px; }
+.dashboard-attention-item { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.dashboard-attention-item > button { flex-shrink: 0; }
+@media (max-width: 760px) {
+  .dashboard-health { padding: 20px; }
+  .dashboard-shell .page-header { flex-direction: column; align-items: stretch; }
+  .dashboard-shell .page-header-actions { align-self: flex-start; }
+  .dashboard-attention-item { align-items: flex-start; flex-direction: column; gap: 12px; }
 }

@@ -23,15 +23,17 @@ const (
 
 // AuditEntry 描述一条可追溯的远程连接安全事件。
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	ClientKey  string    `json:"client_key,omitempty"`
-	ClientName string    `json:"client_name,omitempty"`
-	TargetPort int       `json:"target_port"`
-	Action     string    `json:"action"`
-	Reason     string    `json:"reason,omitempty"`
-	DurationMS int64     `json:"duration_ms,omitempty"`
-	RxBytes    int64     `json:"rx_bytes,omitempty"`
-	TxBytes    int64     `json:"tx_bytes,omitempty"`
+	SSHFingerprint string    `json:"ssh_fingerprint,omitempty"`
+	SSHKeyName     string    `json:"ssh_key_name,omitempty"`
+	Time           time.Time `json:"time"`
+	ClientKey      string    `json:"client_key,omitempty"`
+	ClientName     string    `json:"client_name,omitempty"`
+	TargetPort     int       `json:"target_port"`
+	Action         string    `json:"action"`
+	Reason         string    `json:"reason,omitempty"`
+	DurationMS     int64     `json:"duration_ms,omitempty"`
+	RxBytes        int64     `json:"rx_bytes,omitempty"`
+	TxBytes        int64     `json:"tx_bytes,omitempty"`
 }
 
 // auditLog 是固定容量、并发安全的 FIFO 环形缓冲。

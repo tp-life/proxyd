@@ -109,7 +109,7 @@ func (a *App) SetMainPort(port int) error {
 	}
 	old := a.cfg.MixedPort
 	a.cfg.MixedPort = port
-	sysOn := a.cfg.SystemProxy
+	sysOn := a.cfg.SystemProxy && !a.cfg.ProxyDisabled
 	a.mu.Unlock()
 	if err := a.regenerateCurrentLocked(); err != nil {
 		return a.rollbackMainPortLocked(old, sysOn, err)
