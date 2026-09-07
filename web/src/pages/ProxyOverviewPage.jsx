@@ -1,6 +1,8 @@
 /** 代理运行概览模块，仅呈现代理上下文的详细状态与控制操作。 */
+import { useRef, useState } from "react";
 import {
   ArrowRight,
+  ArrowRightLeft,
   CheckCircle2,
   CircleAlert,
   CircleHelp,
@@ -26,6 +28,7 @@ import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Switch as UISwitch } from "@/components/ui/switch";
 import { PanelTitle } from "@/components/PanelTitle";
 import { StatusBadge } from "@/components/StatusBadge";
+import { FixedNodeDialog } from "@/components/FixedNodeDialog";
 import { MODE_LABELS } from "@/lib/constants";
 import { classNames, delayClass, formatBytes, formatDelay } from "@/lib/format";
 
@@ -71,6 +74,7 @@ const MODE_HELP = {
  * - busy/loading: string | boolean，全局后台操作与同步状态。
  * - traffic: object，实时速率流状态。
  * - onCopy/onMenu/onMode/onNavigate/onPalette/onPolicy/onPortMapping/onRefresh/onSystemProxy/onTest/onTun: Function，用户操作回调。
+ * - onSelectNode: (key: string) => Promise<boolean>，写入固定节点并刷新概览，失败返回 false。
  *
  * 返回值说明：
  * 返回概览页 React 元素。
@@ -93,10 +97,18 @@ export function ProxyOverviewPage({
   onPolicy,
   onPortMapping,
   onRefresh,
+  onSelectNode,
   onSystemProxy,
   onTest,
   onTun,
 }) {
+  const [nodePickerOpen, setNodePickerOpen] = useState(false);
+  const nodePickerTrigger = useRef(null);
+  /** openNodePicker 打开候选弹窗并记录焦点入口；event 为 React.MouseEvent，返回 void，无同步异常。 */
+  function openNodePicker(event) {
+    nodePickerTrigger.current = event.currentTarget;
+    setNodePickerOpen(true);
+  }
   const updated = overview.server_time ? new Date(overview.server_time) : new Date();
   const ready = aliveCount > 0 && overview.mixed_port > 0;
   const takenOver = Boolean(overview.system_proxy || overview.tun?.active || overview.tun?.enabled);
@@ -146,7 +158,7 @@ export function ProxyOverviewPage({
         <div className="policy-options" role="list" aria-label="主入口策略选项">
           <PolicyOption active={policy === "rule"} detail={`当前为${MODE_LABELS[overview.mode] || overview.mode}模式`} icon={ListFilter} label="规则分流" tone="blue" onClick={() => onPolicy("rule")} />
           <PolicyOption active={policy === "auto"} detail="自动选择延迟最低节点" icon={Sparkles} label="自动最快" tone="teal" onClick={() => onPolicy("auto")} />
-          <PolicyOption active={policy === "fixed"} detail={overview.main_node ? (activeNode?.name || "配置节点当前不可用") : "前往设置选择固定节点"} icon={Target} label="固定节点" tone="indigo" onClick={() => onPolicy("fixed")} />
+          <PolicyOption active={policy === "fixed"} detail={overview.main_node ? (activeNode?.name || "点击选择可用节点") : "点击选择固定节点"} icon={Target} label="固定节点" tone="indigo" onClick={openNodePicker} />
         </div>
         <section className="policy-mode">
           <PanelTitle title="规则模式" detail="仅在规则分流策略下生效" />
@@ -215,7 +227,7 @@ export function ProxyOverviewPage({
 
         <div className="overview-lower-grid">
           <section className="exit-summary" aria-labelledby="exit-summary-title">
-            <div className="section-heading-row compact"><div><span>主入口</span><h2 id="exit-summary-title">实际出口</h2></div><StatusBadge ok={Boolean(activeNode || usesConfiguredMode)} text={activeNode ? "可用" : usesConfiguredMode ? "由模式决定" : "不可用"} /></div>
+            <div className="section-heading-row compact"><div><span>主入口</span><h2 id="exit-summary-title">实际出口</h2></div><div className="exit-summary-actions"><StatusBadge ok={Boolean(activeNode || usesConfiguredMode)} text={activeNode ? "可用" : usesConfiguredMode ? "由模式决定" : "不可用"} />{policy === "fixed" && <Button size="sm" variant="outline" onClick={openNodePicker}><ArrowRightLeft size={14} aria-hidden="true" />切换节点</Button>}</div></div>
             <div className="exit-node">
               <div className="exit-node-icon"><Globe2 size={24} aria-hidden="true" /></div>
               <div><strong>{exitLabel}</strong><small>{activeNode?.subscription === "manual" ? "手动节点" : activeNode?.subscription || "由访问规则决定"}</small></div>
@@ -239,6 +251,7 @@ export function ProxyOverviewPage({
           <button type="button" onClick={() => onNavigate("ports")}>查看全部代理入口 <ArrowRight size={15} aria-hidden="true" /></button>
         </section>
       </div>
+      {nodePickerOpen && <FixedNodeDialog nodes={overview.nodes} currentNode={overview.main_node} active={policy === "fixed"} triggerElement={nodePickerTrigger.current} onSelect={onSelectNode} onClose={() => setNodePickerOpen(false)} />}
     </section>
   );
 }
