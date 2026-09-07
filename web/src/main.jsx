@@ -726,18 +726,17 @@ function App() {
    *
    * 功能说明：
    * 后端为了兼容配置文件，仍使用 `main_auto` 与 `main_node` 两个字段表达优先级；
-   * 界面则只允许用户看到规则、自动最快、固定节点三个互斥选择。切换时先清除会与
-   * 目标策略冲突的状态，避免关闭自动选择后意外恢复一个旧的固定节点。
+   * 此处处理规则和自动策略，固定策略由节点弹窗明确选择目标后交给 selectOverviewNode。
+   * 切换时先清除会与目标策略冲突的状态，避免意外恢复一个旧的固定节点。
    *
    * 参数说明：
-   * - policy: "rule" | "auto" | "fixed"，用户选择的主入口策略。
+   * - policy: "rule" | "auto"，用户选择的主入口策略。
    *
    * 返回值说明：
    * 返回 Promise<void>；接口全部成功后概览会通过 postJSON 自动重新加载。
    *
    * 可能的异常/错误情况：
-   * 任一步接口写入失败时由 postJSON 展示错误并停止后续切换；尚未配置固定节点时
-   * 跳转到代理设置，不替用户擅自选择节点。
+   * 任一步接口写入失败时由 postJSON 展示错误并停止后续切换。
    */
   async function applyMainPolicy(policy) {
     /*
@@ -760,19 +759,23 @@ function App() {
       if (!overview?.main_auto) await postJSON("/api/main-auto", { enabled: true }, "主端口已切换为自动最快");
       return;
     }
-    /*
-     * 固定节点策略不能凭空推断目标节点：没有 main_node 时跳到代理设置页，让用户明确
-     * 选择。已经保存节点但自动选优仍开启时只关闭 main_auto，保留 main_node 作为
-     * 用户选择。若该节点暂时不可用，后端会运行时回退到由 mode 决定的顶层主入口，
-     * 但不会删除配置，节点恢复后仍可继续使用原意图。
-     */
-    if (policy === "fixed") {
-      if (!overview?.main_node) {
-        setActiveView("proxy/settings");
-        return;
-      }
-      if (overview.main_auto) await postJSON("/api/main-auto", { enabled: false }, "主端口已切换为固定节点");
+  }
+
+  /**
+   * selectOverviewNode 保存概览弹窗选中的节点，并使固定策略生效。
+   * 参数：key 为 string，节点稳定身份；返回 Promise<boolean>，全部操作成功为 true。
+   * 错误：节点已失效时拒绝写入；接口失败或 15 秒超时由 postJSON 提示，返回 false。
+   * 自动策略优先于固定节点，因此先保存目标，再关闭自动选优；第一步失败时原出口不变，
+   * 第二步失败时仍保持自动出口，弹窗保留供重试。每次写入后读取后端快照，不虚报实际出口。
+   */
+  async function selectOverviewNode(key) {
+    if (!overview.nodes.some((node) => node.key === key && node.alive)) {
+      showToast("该节点当前不可用，请选择其他节点", "err");
+      return false;
     }
+    if (!(await postJSON("/api/main-node", { node: key }, overview.main_auto ? "" : "主端口已固定到所选节点", "POST", AbortSignal.timeout(15000)))) return false;
+    if (overview.main_auto) return postJSON("/api/main-auto", { enabled: false }, "主端口已切换为固定节点", "POST", AbortSignal.timeout(15000));
+    return true;
   }
 
   /**
@@ -876,6 +879,7 @@ function App() {
                 onNavigate={setActiveView}
                 onPalette={() => setPaletteOpen(true)}
                 onPolicy={applyMainPolicy}
+                onSelectNode={selectOverviewNode}
                 onPortMapping={(enabled) => postJSON("/api/port-mapping", { enabled }, enabled ? "节点端口映射已开启" : "节点端口映射已关闭")}
                 onRefresh={() => triggerOperation("/api/refresh", "刷新订阅")}
                 onSystemProxy={(enabled) => postJSON("/api/system-proxy", { enabled }, enabled ? "系统代理已开启" : "系统代理已关闭")}

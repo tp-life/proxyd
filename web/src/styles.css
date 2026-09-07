@@ -1808,12 +1808,12 @@
   }
 
   .overview-shell {
-    @apply grid min-h-screen min-w-0;
+    @apply grid min-w-0;
     grid-template-columns: 320px minmax(0, 1fr);
   }
 
   .policy-pane {
-    @apply sticky top-0 flex h-screen min-w-0 flex-col border-r bg-card px-5 py-7;
+    @apply flex min-w-0 flex-col border-r bg-card px-5 py-5;
   }
 
   .policy-pane-header {
@@ -2155,6 +2155,90 @@
     @apply ml-auto;
   }
 
+  /* 固定节点弹窗加宽以容纳三列卡片；长列表仍在中间滚动，搜索和确认按钮始终可见。 */
+  .fixed-node-dialog {
+    @apply flex flex-col gap-4 overflow-hidden;
+    width: min(960px, calc(100vw - 32px));
+    height: fit-content;
+    max-height: min(90dvh, 840px);
+  }
+
+  .fixed-node-dialog .dialog-header,
+  .fixed-node-dialog .dialog-footer {
+    @apply m-0 shrink-0;
+  }
+
+  /* 来源筛选与关键词在桌面并排，手机改为上下排列；固定工具区不随节点列表滚动。 */
+  .fixed-node-filters {
+    @apply grid shrink-0 gap-3;
+    grid-template-columns: minmax(0, 1fr) 220px;
+  }
+
+  .fixed-node-search {
+    @apply flex min-w-0 items-center gap-2 text-muted-foreground;
+  }
+
+  .fixed-node-search input {
+    @apply min-w-0 flex-1;
+  }
+
+  .fixed-node-list {
+    @apply grid min-h-0 gap-3 overflow-y-auto p-1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    overscroll-behavior: contain;
+  }
+
+  .fixed-node-card {
+    @apply flex min-w-0 flex-col gap-3 rounded-lg border bg-card p-4 text-left outline-none transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .fixed-node-card.selected {
+    @apply border-primary bg-info-soft;
+  }
+
+  .fixed-node-card-heading {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .fixed-node-card-heading svg {
+    @apply shrink-0 text-primary;
+  }
+
+  .fixed-node-card-heading strong {
+    @apply min-w-0 flex-1 break-words text-sm;
+    overflow-wrap: anywhere;
+  }
+
+  .fixed-node-source {
+    @apply break-words text-xs text-muted-foreground;
+    overflow-wrap: anywhere;
+  }
+
+  .fixed-node-card-status,
+  .exit-summary-actions {
+    @apply flex flex-wrap items-center justify-between gap-2;
+  }
+
+  .fixed-node-card-status {
+    @apply mt-auto;
+  }
+
+  .fixed-node-empty {
+    @apply col-span-full py-8 text-center text-sm text-muted-foreground;
+  }
+
+  .fixed-node-feedback {
+    @apply shrink-0 text-xs text-muted-foreground;
+  }
+
+  .fixed-node-feedback p {
+    @apply m-0 truncate;
+  }
+
+  .fixed-node-feedback [role="alert"] {
+    @apply text-destructive;
+  }
+
   /*
    * 策略分组的成员节点展开区。li 基础样式来自 .item-list，这里用更高优先级把它
    * 改成纵向容器：首行保持原有信息排布，展开后在其下方列出成员节点及健康度。
@@ -2368,6 +2452,50 @@
 }
 
 @media (min-width: 761px) {
+  /*
+   * 顶部大类导航占用 60px，概览只能使用剩余视口；min-height: 0 允许网格子项收缩。
+   * 左右面板各自承接内容溢出，避免任一面板把整个页面撑高；短屏与多告警仍可滚动访问。
+   */
+  .overview-shell {
+    height: calc(100dvh - 60px);
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .overview-shell > .policy-pane,
+  .overview-shell > .overview-detail {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .policy-pane > * {
+    flex-shrink: 0;
+  }
+
+  /* 缩减桌面概览的装饰留白，优先保证常见笔记本窗口能同时扫读策略、出口和速率。 */
+  .policy-options { margin-top: 16px; }
+  .policy-option { min-height: 64px; padding-block: 10px; }
+  .policy-mode { margin-top: 18px; padding-top: 16px; }
+  .policy-pane-footer { padding-top: 14px; }
+  .overview-hero { min-height: 120px; padding: 18px 24px; gap: 16px; }
+  .overview-hero-copy h2 { font-size: 26px; line-height: 32px; }
+  .hero-badges { margin-top: 10px; }
+  .effective-route { padding: 14px 24px; }
+  .route-flow { margin-top: 8px; grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 16px minmax(0, 1fr) 16px minmax(0, 1fr); }
+  .route-step { min-height: 64px; padding: 10px; gap: 8px; }
+  .route-summary { margin-top: 10px; }
+  .overview-lower-grid { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
+  .exit-summary,
+  .overview-lower-grid .traffic-panel { padding: 16px 24px; }
+  .exit-node { margin-top: 14px; }
+  .exit-facts { margin-block: 16px 0; padding-top: 12px; }
+  .overview-lower-grid .traffic-chart > svg { height: 48px; }
+  .overview-attention { margin: 12px 24px; padding: 12px; }
+  .overview-quick-settings { margin: 0 24px 16px; padding-top: 12px; gap: 12px 20px; }
+  /* 快捷开关与外层已有分隔线，不再沿用设置表单的额外顶边距和边框。 */
+  .overview-quick-settings .switch-row { margin: 0; padding: 0; border: 0; }
+
   .app-shell {
     display: grid;
     grid-template-columns: 240px minmax(0, 1fr);
@@ -2483,6 +2611,11 @@
   }
 }
 
+/* 桌面弹窗使用三列；较窄窗口保留两列，手机沿用单列，避免节点信息被挤压。 */
+@media (min-width: 1024px) {
+  .fixed-node-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 @media (min-width: 1180px) {
   .workspace {
     @apply px-9;
@@ -2533,6 +2666,10 @@
 }
 
 @media (max-width: 760px) {
+  /* 手机以单列卡片保留触控空间，长列表仅在弹窗中滚动。 */
+  .fixed-node-list { grid-template-columns: minmax(0, 1fr); }
+  .fixed-node-filters { grid-template-columns: minmax(0, 1fr); }
+
   .workspace {
     @apply overflow-x-hidden;
   }
