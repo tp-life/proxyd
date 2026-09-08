@@ -206,6 +206,15 @@ func shellSessionHandler(sess ssh.Session) {
 // 错误情况：命令或终端启动失败时由对应执行器写入错误并结束会话。
 func runShellSession(sess ssh.Session, u *user.User) {
 	cmd := newShellSessionCommand(u, sess.RawCommand())
+	runShellSessionCommand(sess, cmd)
+}
+
+// runShellSessionCommand 将已构造的命令接入统一 SSH 环境、PTY 与断连清理流程。
+// 参数说明：sess 为 ssh.Session，提供经过过滤的客户端环境；cmd 为 *exec.Cmd，
+// 必须由服务端构造且尚未启动，诊断命令和普通会话共用此执行边界。
+// 返回值说明：无，命令退出状态通过 sess.Exit 回传。
+// 错误情况：PTY 或进程启动失败由执行器报告；所有会话继续使用相同的环境白名单。
+func runShellSessionCommand(sess ssh.Session, cmd *exec.Cmd) {
 	// 包括无 PTY exec 在内的 SSH 会话都应携带连接标识，否则用户启动脚本可能
 	// 误入本地终端分支（例如等待本地交互）。这里记录 SSH 传输端点；经隧道或
 	// 回环接入时它们是隧道/回环地址，不冒充客户端公网地址。非 TCP 地址则不伪造。

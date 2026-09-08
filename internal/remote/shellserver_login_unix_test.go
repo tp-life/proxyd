@@ -177,17 +177,24 @@ func TestShellLoginLoadsUserCommands(t *testing.T) {
 
 // TestSSHDiagnosticLoadsInteractiveProfile 验证诊断子系统确实加载交互用户启动文件。
 // 参数说明：t 为 *testing.T，提供隔离 HOME 与真实 SSH/PTy；返回值说明：无。
-// 错误情况：绕过交互配置、TERM 覆盖失效或输出缺少结束标记时失败。
+// 错误情况：绕过交互/登录配置、TERM 覆盖失效或输出缺少结束标记时失败。
 func TestSSHDiagnosticLoadsInteractiveProfile(t *testing.T) {
 	sess, u := newLoginTestSession(t)
 	shell := filepath.Base(loginShell(u))
 	file := ".zshrc"
+	profile := "# 诊断回归：必须同时加载交互与登录环境。\nif [ -n \"$PS1\" ]; then\n export PATH=\"$HOME/diagnostic-bin:$PATH\"\nfi\n"
 	if shell == "bash" {
 		file = ".bash_profile"
+	} else if shell == "fish" {
+		file = ".config/fish/config.fish"
+		profile = "# 诊断回归：fish 必须保持交互登录语义，不依赖终端模拟器回应查询。\nif status is-interactive; and status is-login\n set -gx PATH \"$HOME/diagnostic-bin\" $PATH\nend\n"
 	} else if shell != "zsh" {
-		t.Skip("需要 bash/zsh 启动文件")
+		t.Skip("需要 bash/zsh/fish 启动文件")
 	}
-	if err := os.WriteFile(filepath.Join(u.HomeDir, file), []byte("# 诊断回归用例：仅在交互登录时加入独立路径。\nexport PATH=\"$HOME/diagnostic-bin:$PATH\"\n"), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(u.HomeDir, file)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(u.HomeDir, file), []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := sess.RequestPty("xterm-256color", 24, 160, gossh.TerminalModes{gossh.ECHO: 0}); err != nil {
