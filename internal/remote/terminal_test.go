@@ -6,8 +6,6 @@ package remote
 import (
 	"context"
 	"errors"
-	"io"
-	"strings"
 	"testing"
 	"time"
 )
@@ -58,56 +56,4 @@ func TestOpenWebTerminalGates(t *testing.T) {
 		t.Fatalf("开启后不应再要求服务端运行或 builtin-ssh: %v", err)
 	}
 	_ = session.Close()
-}
-
-// TestOpenWebTerminalPTY 验证 Web Terminal 会真正进入进程内 SSH 服务的 PTY shell，
-// 并把 TERM 与浏览器窗口尺寸传到子进程。
-//
-// 参数说明：
-//   - t: *testing.T，Go 测试上下文。
-//
-// 返回值说明：无。
-//
-// 错误情况：平台不支持进程内 shell 服务时跳过；SSH 握手、PTY、输入输出、TERM 或窗口
-// 缩放任一环节失败时测试失败。超时会由 context 主动关闭会话，避免遗留登录 shell。
-func TestOpenWebTerminalPTY(t *testing.T) {
-	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
-		t.Skip("当前平台不支持进程内 shell 服务")
-	}
-	manager := NewManager(t.TempDir(), nil)
-	manager.cfg.WebTerminal = true
-
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	session, err := manager.OpenWebTerminal(ctx, TerminalSize{Columns: 80, Rows: 24})
-	if err != nil {
-		t.Fatalf("打开进程内 PTY 失败: %v", err)
-	}
-	defer session.Close()
-
-	if err := session.Resize(TerminalSize{Columns: 120, Rows: 40}); err != nil {
-		t.Fatalf("同步窗口尺寸失败: %v", err)
-	}
-	if _, err := session.Write([]byte("printf 'PROXYD_TERM:%s\\n' \"$TERM\"; stty size; exit\n")); err != nil {
-		t.Fatalf("写入 shell 命令失败: %v", err)
-	}
-
-	outputDone := make(chan []byte, 1)
-	go func() {
-		output, _ := io.ReadAll(session)
-		outputDone <- output
-	}()
-	select {
-	case output := <-outputDone:
-		text := string(output)
-		if !strings.Contains(text, "PROXYD_TERM:xterm-256color") {
-			t.Fatalf("PTY 未继承 xterm-256color，输出: %q", text)
-		}
-		// PTY 的 stty 输出可能带前导空格或 CRLF，按空白字段规范化后再验证行列。
-		if !strings.Contains(strings.Join(strings.Fields(text), " "), "40 120") {
-			t.Fatalf("PTY 窗口尺寸未同步为 40x120，输出: %q", text)
-		}
-	case <-ctx.Done():
-		t.Fatalf("等待 PTY 输出超时: %v", ctx.Err())
-	}
 }

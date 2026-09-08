@@ -48,6 +48,15 @@ func newShellSessionCommand(u *user.User, rawCmd string) *exec.Cmd {
 	return cmd
 }
 
+// newShellDiagnosticCommand 通过 PowerShell 的命令参数执行服务端固定诊断脚本。
+// 参数说明：u 为 *user.User，服务端确认的用户；script 为 string，固定只读脚本。
+// 返回值说明：*exec.Cmd，尚未启动，保留用户 profile 加载和 ConPTY 执行环境。
+// 错误情况：PowerShell 不可用或 profile 阻塞时，由统一会话执行器和超时机制报告。
+// 不使用 -NoProfile，避免诊断漏掉用户启动配置；脚本也不再混入终端能力响应的输入流。
+func newShellDiagnosticCommand(u *user.User, script string) *exec.Cmd {
+	return newShellSessionCommand(u, script)
+}
+
 // powerShellPath 返回 Windows PowerShell 可执行文件路径。
 func powerShellPath() string {
 	if p, err := exec.LookPath("powershell.exe"); err == nil {

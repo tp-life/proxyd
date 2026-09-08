@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -73,14 +72,12 @@ func TestWebTerminalDisconnectReapsShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打开 Web Terminal 失败: %v", err)
 	}
-	readDone := make(chan struct{})
-	go func() {
-		defer close(readDone)
-		_, _ = io.Copy(io.Discard, session)
-	}()
+	client := startTerminalTestClient(t, session)
 
 	pidPath := stateDir + "/shell.pid"
-	if _, err := fmt.Fprintf(session, "printf '%%d\\n' $$ > %q\n", pidPath); err != nil {
+	// 使用受控 POSIX 子命令读取父进程 PID，避免 fish 将 $$ 解析为语法错误；
+	// $PPID 指向实际交互 shell，仍然验证断连时该 shell 是否被回收。
+	if _, err := fmt.Fprintf(session, "/bin/sh -c 'printf \"%%s\\n\" \"$PPID\"' > %q\r", pidPath); err != nil {
 		_ = session.Close()
 		t.Fatalf("请求 shell 写入 PID 失败: %v", err)
 	}
@@ -101,6 +98,10 @@ func TestWebTerminalDisconnectReapsShell(t *testing.T) {
 		_ = session.Close()
 		t.Fatalf("未在限期内取得 shell PID：%v", err)
 	}
+	// 先确认记录的是存活进程，避免错误 PID 让断连后的 ESRCH 检查出现假阳性。
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("断连前 shell 进程 %d 不可用: %v", pid, err)
+	}
 
 	if err := session.Close(); err != nil {
 		t.Fatalf("关闭 Web Terminal 失败: %v", err)
@@ -109,7 +110,7 @@ func TestWebTerminalDisconnectReapsShell(t *testing.T) {
 	for time.Now().Before(reapDeadline) {
 		if killErr := syscall.Kill(pid, 0); errors.Is(killErr, syscall.ESRCH) {
 			select {
-			case <-readDone:
+			case <-client.done:
 				return
 			case <-time.After(time.Second):
 				t.Fatal("shell 已回收，但终端输出读取协程未退出")

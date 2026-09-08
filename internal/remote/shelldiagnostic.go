@@ -9,27 +9,20 @@ import (
 	"io"
 	"os/user"
 	"runtime"
-	"strings"
 
 	ssh "github.com/tailscale/gliderssh"
 )
 
-// diagnosticShellSession 复用真实会话的输出与 PTY，只将输入替换为固定检查脚本。
+// diagnosticShellSession 复用真实会话的输出与 PTY，并隔离客户端交互输入。
 type diagnosticShellSession struct {
 	ssh.Session
-	input *strings.Reader
 }
 
-// Read 把诊断脚本作为交互登录 shell 的标准输入。
+// Read 阻止客户端向固定诊断命令追加任意键盘输入。
 // 参数说明：buffer 为 []byte，调用方缓冲。
-// 返回值说明：int 与 error，脚本读完后返回 EOF。
-// 错误情况：不读取真实客户端输入；不会执行客户端附带的任意脚本。
-func (s *diagnosticShellSession) Read(buffer []byte) (int, error) { return s.input.Read(buffer) }
-
-// RawCommand 强制使用与普通登录完全一致的交互 shell 启动路径。
-// 参数说明：无；返回值说明：空 string。
-// 错误情况：无；不能改成 shell -c，否则会绕过交互启动文件，漏掉登录卡住的问题。
-func (s *diagnosticShellSession) RawCommand() string { return "" }
+// 返回值说明：始终返回 0 与 io.EOF；脚本通过服务端命令参数执行。
+// 错误情况：不读取真实客户端输入，也不修改 PTY 的字节流转发规则。
+func (s *diagnosticShellSession) Read(buffer []byte) (int, error) { return 0, io.EOF }
 
 // shellDiagnosticHandler 在认证后标记进度，再运行加载用户环境的交互登录 shell。
 // 参数说明：sess 为 ssh.Session，客户端应申请 PTY 并设置总超时。
@@ -60,5 +53,6 @@ func runShellDiagnostic(sess ssh.Session, u *user.User) {
 	if runtime.GOOS == "windows" {
 		script = "Write-Output ''; Write-Output 'PROXYD_DIAG_READY'; Write-Output ('USER=' + $env:USERNAME); Write-Output ('SHELL=' + (Get-Process -Id $PID).Path); Write-Output ('TERM=' + $env:TERM); Write-Output ('PATH=' + $env:PATH); Write-Output 'SSH_TTY=ConPTY'; Write-Output 'PROXYD_DIAG_DONE'; exit\r\n"
 	}
-	runShellSession(&diagnosticShellSession{Session: sess, input: strings.NewReader(script)}, u)
+	cmd := newShellDiagnosticCommand(u, script)
+	runShellSessionCommand(&diagnosticShellSession{Session: sess}, cmd)
 }

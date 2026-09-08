@@ -51,6 +51,18 @@ func newShellSessionCommand(u *user.User, rawCmd string) *exec.Cmd {
 	return cmd
 }
 
+// newShellDiagnosticCommand 创建显式交互登录的诊断命令，加载用户配置后直接执行固定脚本。
+// 参数说明：u 为 *user.User，服务端确认的用户；script 为 string，服务端固定只读脚本。
+// 返回值说明：*exec.Cmd，继承普通会话的用户目录和最小环境，尚未启动。
+// 错误情况：不支持这些参数的 shell 会在启动时返回错误；用户配置阻塞仍由会话超时收尾。
+// -i 与 -l 必须同时保留以加载交互和登录配置；-c 将脚本交给 shell 执行，避免 fish
+// 在提示符初始化查询终端能力时消费提前写入 stdin 的命令。不会关闭正常终端的能力查询。
+func newShellDiagnosticCommand(u *user.User, script string) *exec.Cmd {
+	cmd := newShellSessionCommand(u, script)
+	cmd.Args = []string{cmd.Path, "-l", "-i", "-c", script}
+	return cmd
+}
+
 // runShellWithPTY 把命令挂到伪终端上运行，并桥接 SSH 会话与窗口尺寸变化。
 //
 // 参数说明：
