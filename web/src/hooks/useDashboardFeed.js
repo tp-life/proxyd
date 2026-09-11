@@ -45,7 +45,7 @@ export function useDashboardFeed(active, modules) {
       });
       setSnapshot({ data, errors, loading: false });
       // 请求完成后再排下一轮，慢接口不会造成重叠请求；切页或切换模块会取消整轮请求。
-      timer = window.setTimeout(poll, 10000);
+      timer = window.setTimeout(poll, 60000);
     }
     poll();
     return () => { stopped = true; window.clearTimeout(timer); controller?.abort(); };

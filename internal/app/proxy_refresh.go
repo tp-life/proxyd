@@ -202,8 +202,36 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		nodes = filterEnabledSubscriptionNodes(a.Nodes(), a.Subscriptions())
 	}
 
-	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.dialerTargets()...)
+	a.checkNodes(ctx, nodes, a.dialerTargets()...)
 	return a.applyNodes(ctx, nodes)
+}
+
+// Testing 报告当前是否正在进行节点健康检测（测速）。
+//
+// 参数：无。
+//
+// 返回值：bool，pool.Check 执行期间为 true。
+//
+// 错误情况：无；只读原子标记，供概览接口把延迟列降级为「测速中」。
+func (a *App) Testing() bool {
+	return a.testing.Load()
+}
+
+// checkNodes 包裹 pool.Check，检测期间置位 Testing 标记。
+//
+// 参数：
+//   - ctx: context.Context，控制整轮检测的取消与超时。
+//   - nodes: []*node.Node，待检测节点，结果原地写回。
+//   - dialerTargets: ...string，可作为链式目标的策略组名称。
+//
+// 返回值：无；单节点失败通过节点状态表达。
+//
+// 错误情况：检测串行化由调用方的 refreshing 锁保证，标记不存在并发竞争；
+// 即使 panic 也经 defer 复位，不会让「测速中」状态残留。
+func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets ...string) {
+	a.testing.Store(true)
+	defer a.testing.Store(false)
+	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, dialerTargets...)
 }
 
 // applyNodes 执行健康检测后的流水线尾部，并完成链式代理的二阶段验证。

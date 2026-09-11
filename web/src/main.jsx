@@ -614,7 +614,7 @@ function App() {
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(() => load(true), 10000);
+    const timer = window.setInterval(() => load(true), 60000);
     return () => window.clearInterval(timer);
   }, [load]);
 

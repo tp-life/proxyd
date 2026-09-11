@@ -28,7 +28,7 @@ export function useSystemSettings() {
         if (!stopped) setError("系统设置暂时无法读取，请重试。");
       } finally {
         window.clearTimeout(deadline);
-        if (!stopped) timer = window.setTimeout(poll, 10000);
+        if (!stopped) timer = window.setTimeout(poll, 60000);
       }
     }
     poll();

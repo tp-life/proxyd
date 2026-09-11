@@ -14,7 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { requestJSON } from "@/lib/api";
 
 // 桌面页可见时的刷新间隔；它用于更新临时会话连接数和本机服务监听状态。
-const DESKTOP_REFRESH_INTERVAL_MS = 10_000;
+const DESKTOP_REFRESH_INTERVAL_MS = 60_000;
 
 /**
  * launchDesktopClient 把后端生成的安全启动目标交给浏览器处理。
