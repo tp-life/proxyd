@@ -9,6 +9,7 @@ import (
 	"log"
 	urlpkg "net/url"
 	"strings"
+	"sync"
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
@@ -258,7 +259,7 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 				checkList = append(checkList, candidate)
 			}
 		}
-		pool.Check(ctx, checkList, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, groupNames(nextGroups)...)
+		a.checkNodes(ctx, checkList, groupNames(nextGroups)...)
 	}
 
 	alive := make([]*node.Node, 0, len(nextNodes))
@@ -445,11 +446,15 @@ func autoSubName(url string, existing []config.Subscription) string {
 	}
 }
 
-// RefreshSubscription 只刷新单个订阅：重新拉取该订阅，与其它来源的现有节点
-// 重新合并后只检测该订阅的节点，再执行端口分配与热更新。
+// RefreshSubscription 只刷新单个订阅：重新拉取该订阅并检测新节点，提交时与
+// 其它来源的最新节点重新合并，再执行端口分配与热更新。
+//
+// 并发模型：拉取与测速只持有按订阅名的操作锁（同一订阅串行，不同订阅并行），
+// 且只操作本次拉取的私有节点对象，不触碰共享节点；合并、热更新与快照保存等
+// 提交阶段才获取 refreshing 全局锁。
 func (a *App) RefreshSubscription(ctx context.Context, name string) error {
-	a.refreshing.Lock()
-	defer a.refreshing.Unlock()
+	unlock := a.lockSubOp(name)
+	defer unlock()
 
 	a.mu.RLock()
 	var target *config.Subscription
@@ -477,8 +482,21 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 		log.Printf("[subscribe] %v", err) // 拉取失败，降级使用缓存节点
 	}
 
-	// 其它来源沿用现有节点，与该订阅的新节点重新合并（Merge 按稳定身份去重、
-	// 保证名称唯一；名称变化不影响端口稳定映射，后者按节点 Key 对齐快照）
+	// fresh 是本次拉取的私有对象（尚未经 Merge 改名/挂接共享状态），合并前测速
+	// 不读写共享节点，因此不需要 refreshing 锁，可与其它订阅的操作并行。
+	a.checkNodes(ctx, fresh, a.dialerTargets()...)
+
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+	// 拉取/测速期间订阅可能被改名、改地址、停用或删除；提交前重新校验，
+	// 否则会把已失效来源的节点重新并入运行态，或覆盖较新的编辑结果。
+	if err := a.subscriptionUnchangedLocked(name, *target); err != nil {
+		return err
+	}
+
+	// 其它来源沿用最新节点（提交前可能已被并发操作更新），与该订阅的新节点
+	// 重新合并（Merge 按稳定身份去重、保证名称唯一；名称变化不影响端口稳定
+	// 映射，后者按节点 Key 对齐快照）
 	groups := map[string][]*node.Node{name: fresh}
 	for _, n := range a.Nodes() {
 		if n.Subscription != name {
@@ -494,30 +512,27 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 		a.subInfos[name] = info
 		a.mu.Unlock()
 	}
-
-	// 只检测该订阅的节点，其它节点沿用上次检测结果
-	var checkList []*node.Node
-	for _, n := range nodes {
-		if n.Subscription == name {
-			checkList = append(checkList, n)
-		}
-	}
-	pool.Check(ctx, checkList, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.dialerTargets()...)
 	return a.applyNodes(ctx, nodes)
 }
 
 // TestSubscription 只对单个订阅的现有节点做健康检测/延迟测试，
-// 不重新拉取订阅；完成后重新分配端口并热更新。
+// 不重新拉取订阅；完成后把结果按节点 Key 回填到最新节点集，再重新分配端口并热更新。
+//
+// 并发模型：与 RefreshSubscription 相同，测速在共享节点的克隆上进行（不同订阅可
+// 并行，也不与概览读取产生数据竞争），只有回填与热更新的提交阶段持有 refreshing 锁。
 func (a *App) TestSubscription(ctx context.Context, name string) error {
-	a.refreshing.Lock()
-	defer a.refreshing.Unlock()
+	unlock := a.lockSubOp(name)
+	defer unlock()
+
 	a.mu.RLock()
 	found := false
 	enabled := false
+	var target config.Subscription
 	for _, subscription := range a.cfg.Subscriptions {
 		if subscription.Name == name {
 			found = true
 			enabled = subscription.IsEnabled()
+			target = subscription
 			break
 		}
 	}
@@ -529,18 +544,92 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 		return fmt.Errorf("订阅 %q 已禁用，请先启用后再测速", name)
 	}
 
+	// 克隆待测节点：pool.Check 会原地写回 Alive/Delay/FailReason，直接检测共享
+	// 节点会与并发的概览读取、其它订阅提交产生数据竞争。提交时按 Key 回填结果。
 	nodes := a.Nodes()
 	var checkList []*node.Node
 	for _, n := range nodes {
 		if n.Subscription == name {
-			checkList = append(checkList, n)
+			cloned := *n
+			checkList = append(checkList, &cloned)
 		}
 	}
 	if len(checkList) == 0 {
 		return fmt.Errorf("订阅 %s 当前没有节点", name)
 	}
-	pool.Check(ctx, checkList, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.dialerTargets()...)
-	return a.applyNodes(ctx, nodes)
+	a.checkNodes(ctx, checkList, a.dialerTargets()...)
+
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+	if err := a.subscriptionUnchangedLocked(name, target); err != nil {
+		return err
+	}
+	latest := a.Nodes()
+	byKey := make(map[string]*node.Node, len(latest))
+	for _, n := range latest {
+		byKey[n.Key()] = n
+	}
+	for _, checked := range checkList {
+		current := byKey[checked.Key()]
+		if current == nil {
+			continue // 测速期间节点已被其它操作移除或替换
+		}
+		current.Alive = checked.Alive
+		current.Delay = checked.Delay
+		current.FailReason = checked.FailReason
+	}
+	return a.applyNodes(ctx, latest)
+}
+
+// lockSubOp 获取指定订阅的操作锁，使同一订阅的刷新/测速串行执行。
+//
+// 参数：
+//   - name: string，订阅名称。
+//
+// 返回值：func()，释放函数，调用方应 defer 调用。
+//
+// 错误情况：无；锁表按需懒创建，不校验订阅是否存在。
+func (a *App) lockSubOp(name string) func() {
+	a.subOpMu.Lock()
+	if a.subOps == nil {
+		a.subOps = make(map[string]*sync.Mutex)
+	}
+	mu := a.subOps[name]
+	if mu == nil {
+		mu = &sync.Mutex{}
+		a.subOps[name] = mu
+	}
+	a.subOpMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
+// subscriptionUnchangedLocked 校验订阅在慢速阶段（拉取/测速）期间未被修改；
+// 调用方必须持有 refreshing 锁。
+//
+// 参数：
+//   - name: string，操作开始时的订阅名。
+//   - target: config.Subscription，操作开始时读取的订阅快照。
+//
+// 返回值：error，订阅被改名、改地址、改类型、停用或删除时返回，提交方应丢弃本次结果。
+//
+// 错误情况：无并发副作用；只读校验。
+func (a *App) subscriptionUnchangedLocked(name string, target config.Subscription) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, subscription := range a.cfg.Subscriptions {
+		if subscription.Name != name {
+			continue
+		}
+		switch {
+		case !subscription.IsEnabled():
+			return fmt.Errorf("订阅 %q 已停用，本次结果已丢弃", name)
+		case subscription.URL != target.URL || subscription.Type != target.Type:
+			return fmt.Errorf("订阅 %q 在操作期间被修改，本次结果已丢弃，请重试", name)
+		}
+		return nil
+	}
+	return fmt.Errorf("订阅 %q 已不存在，本次结果已丢弃", name)
 }
 
 // filterEnabledSubscriptionNodes 按订阅启用状态过滤运行节点，同时始终保留手动节点。

@@ -54,6 +54,7 @@ type Overview struct {
 	AutostartRuntime   autostart.RuntimeStatus `json:"autostart_runtime"`    // 注册与托管进程状态分开，启动失败不会隐藏在开关后
 	ServerTime         string                  `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
 	PortRange          [2]int                  `json:"port_range"`
+	Testing            bool                    `json:"testing"` // 节点健康检测进行中；前端应把延迟列显示为「测速中」而非旧值
 	Subs               []SubEntry              `json:"subscriptions"`
 	ManualNodes        []app.ManualNodeEntry   `json:"manual_nodes"`
 	Ports              []PortEntry             `json:"ports"`            // 当前实际监听的一对一节点端口
@@ -104,6 +105,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		AutostartRuntime:   autostartRuntime,
 		ServerTime:         time.Now().Format(time.RFC3339), // 服务器本地时间（含时区偏移）
 		PortRange:          cfg.PortRange,
+		Testing:            s.app.Testing(),
 		Subs:               []SubEntry{},
 		ManualNodes:        s.app.ManualNodes(),
 		Nodes:              []NodeEntry{},

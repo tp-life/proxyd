@@ -100,6 +100,14 @@ type App struct {
 	excludeRe   *regexp.Regexp
 	proxyResume chan struct{} // 恢复代理后通知主循环立即刷新，缓冲合并重复请求。
 	refreshing  sync.Mutex    // 保证刷新流水线串行执行
+	// subOps 按订阅名串行化单订阅的刷新/测速：同一订阅的操作排队，不同订阅的
+	// 慢速阶段（拉取、检测）可以并行，只有提交阶段才获取 refreshing 全局锁。
+	// subOpMu 只保护该表的懒初始化，不覆盖操作本身。
+	subOpMu sync.Mutex
+	subOps  map[string]*sync.Mutex
+	// testing 标记节点健康检测（测速）是否正在进行；检测期间旧延迟尚未失效，
+	// 概览接口据此让前端把延迟列显示为「测速中」，而不是容易误读的上轮结果。
+	testing atomic.Bool
 
 	// mainListenerOn 记录最近一次成功应用的配置里主端口是否为固定 listener 形态
 	// （main-auto/main-node 生效）；用于 regenerateWithLocked 判断是否需要

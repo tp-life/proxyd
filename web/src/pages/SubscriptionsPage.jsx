@@ -46,8 +46,9 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
   // 期间「取消」/关闭对话框必须能立即中断等待，而不是卡到请求结束。
   const saveAbortRef = useRef(null);
   // 单个订阅的同步/测速是同步接口（最长 3 分钟），期间必须给行内按钮明确的加载态，
-  // 否则点击后到完成 toast 之间页面毫无反馈。key 形如 `${name}:${action}`。
-  const [pendingAction, setPendingAction] = useState("");
+  // 否则点击后到完成 toast 之间页面毫无反馈。key 形如 `${name}:${action}`；
+  // 后端按订阅名加锁，不同订阅可并行，因此这里用集合同时跟踪多行的进行中状态。
+  const [pendingActions, setPendingActions] = useState(() => new Set());
 
   /**
    * runSubAction 执行单个订阅的同步或测速，并维护行内加载状态。
@@ -59,15 +60,21 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
    * 返回值说明：返回 Promise<void>。
    *
    * 可能的异常/错误情况：
-   * 已有动作进行中时忽略新的点击；接口错误由 onSubAction 统一 toast，这里只负责状态复位。
+   * 同一订阅已有动作进行中时忽略新的点击（后端对同名订阅串行，重复点击只会排队等待）；
+   * 接口错误由 onSubAction 统一 toast，这里只负责状态复位。
    */
   async function runSubAction(name, action) {
-    if (pendingAction) return;
-    setPendingAction(`${name}:${action}`);
+    const key = `${name}:${action}`;
+    if (pendingActions.has(key)) return;
+    setPendingActions((current) => new Set(current).add(key));
     try {
       await onSubAction(name, action);
     } finally {
-      setPendingAction("");
+      setPendingActions((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
     }
   }
 
@@ -206,8 +213,10 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
           const stateLabel = {
             disabled: "已停用", empty: "无节点", error: "异常", degraded: "使用缓存", healthy: "正常",
           }[subscription.state] || "未知";
-          const testing = pendingAction === `${subscription.name}:test`;
-          const syncing = pendingAction === `${subscription.name}:refresh`;
+          const testing = pendingActions.has(`${subscription.name}:test`);
+          const syncing = pendingActions.has(`${subscription.name}:refresh`);
+          // 同一订阅的同步/测速在后端串行，该行两个按钮一起禁用；其它订阅不受影响。
+          const rowPending = testing || syncing;
           return (
             <article className="subscription-card" key={subscription.name}>
               <div className="subscription-card-head">
@@ -240,8 +249,8 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
               {info && <div className="subscription-usage"><span>{info.usage}</span><span className={classNames(info.urgent && "urgent")}>{info.expire}</span></div>}
               <div className="subscription-card-actions">
                 <Button size="sm" variant="ghost" type="button" onClick={() => onNavigateNodes(subscription.name)}>查看节点</Button>
-                <Button disabled={!subscription.enabled || Boolean(pendingAction)} loading={testing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "test")}>{testing ? "测速中…" : "测速"}</Button>
-                <Button disabled={!subscription.enabled || Boolean(pendingAction)} loading={syncing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "refresh")}>{!syncing && <RefreshCw size={14} aria-hidden="true" />}{syncing ? "同步中…" : "同步"}</Button>
+                <Button disabled={!subscription.enabled || rowPending} loading={testing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "test")}>{testing ? "测速中…" : "测速"}</Button>
+                <Button disabled={!subscription.enabled || rowPending} loading={syncing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "refresh")}>{!syncing && <RefreshCw size={14} aria-hidden="true" />}{syncing ? "同步中…" : "同步"}</Button>
                 <Button aria-label={`编辑订阅 ${subscription.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditor(subscription)}><Pencil size={15} aria-hidden="true" /></Button>
                 <Button aria-label={`删除订阅 ${subscription.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/subscriptions/${encodeURIComponent(subscription.name)}`, "订阅已删除", `订阅 ${subscription.name}`)}><Trash2 size={15} aria-hidden="true" /></Button>
               </div>

@@ -65,6 +65,9 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
     () => new Map((overview.port_assignments || []).map((entry) => [`${entry.subscription}:${entry.node}`, entry.port])),
     [overview.port_assignments],
   );
+  // 手动触发后 busy 立即为「测速」；后台检测期间由 overview.testing 接力，
+  // 避免延迟列在新结果出来前继续展示容易被误读为已完成的上轮延迟。
+  const testing = busy === "测速" || Boolean(overview.testing);
   const visibleNodes = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     const filtered = (overview.nodes || []).filter((node) => {
@@ -186,6 +189,7 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
         mainNode={overview.main_node}
         mappingEnabled={overview.port_mapping_enabled}
         nodes={visibleNodes}
+        testing={testing}
         onMainNode={onMainNode}
       />
 
@@ -234,6 +238,7 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
  * - assignmentMap: Map<string, number>，按来源与节点名索引的稳定端口分配。
  * - mainNode: string，当前主端口固定节点 key。
  * - mappingEnabled: boolean，节点一对一 listener 是否启用。
+ * - testing: boolean，节点健康检测进行中；延迟列显示「测速中…」而不是上一轮结果。
  * - onMainNode: Function，设置主端口节点回调。
  *
  * 返回值说明：
@@ -242,7 +247,7 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
  * 可能的异常/错误情况：
  * 无；节点不可用时按钮禁用。
  */
-function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled = true, onMainNode }) {
+function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled = true, testing = false, onMainNode }) {
   const columns = useMemo(
     () => [
       {
@@ -275,7 +280,9 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
         header: "延迟",
         sortable: true,
         width: "105px",
-        cell: (node) => <span className={delayClass(node)}>{formatDelay(node)}</span>,
+        cell: (node) => testing
+          ? <span className="delay-muted">测速中…</span>
+          : <span className={delayClass(node)}>{formatDelay(node)}</span>,
         sortValue: (node) => node.alive && node.delay > 0 ? node.delay : Number.POSITIVE_INFINITY,
       },
       {
@@ -297,7 +304,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
         ),
       },
     ],
-    [assignmentMap, mainNode, mappingEnabled, onMainNode],
+    [assignmentMap, mainNode, mappingEnabled, onMainNode, testing],
   );
 
   return (
