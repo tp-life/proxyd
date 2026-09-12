@@ -7,9 +7,11 @@ proxyd 是多节点端口映射代理工具：Go 守护进程内嵌 mihomo 做�
 
 - `make`（= `make web build`）：先构建前端到 `internal/api/dist`，再编译内嵌它的 `bin/proxyd`。
 - `make build`：仅编译 Go（无 Node 环境用，需 dist 已存在）。
-- `go test ./...`：全量测试（含 e2e，约 40s）；`go vet ./...`。
+- `go test -tags with_gvisor ./...`：全量测试（含 e2e，约 40s）；`go vet -tags with_gvisor ./...`。
+  构建/测试/发布统一带 `with_gvisor` 标签（ADR 0002，解锁 tailscale 出站与 TUN gvisor 栈）；
+  直接运行 go 命令前需先 `make deps`（go.mod 的 replace 指向被 git 忽略的 third_party 源码）。
 - Web 单独构建：`npm --prefix web run build`。
-- 提交前至少跑 `go build ./... && go test ./...`；动了 `web/src` 必须重新 `make`，dist 产物随仓库提交。
+- 提交前至少跑 `go build -tags with_gvisor ./... && go test -tags with_gvisor ./...`；动了 `web/src` 必须重新 `make`，dist 产物随仓库提交。
 
 ## 模块划分（新增功能的落位规则）
 
@@ -26,7 +28,9 @@ web/src/pages/<Module>Page.jsx + web/src/hooks/use<Module>Feed.js   控制台页
 ```
 
 现有模块：`proxy`（代理主功能，域服务在 `internal/proxy/{core,node,pool,subscribe,ruleurl,sysproxy,tunperm}`，
-编排文件以 `proxy_` 前缀命名）与 `remote`（远程连接隧道）。平台通用服务（`logbuf`/`autostart`/`updatecheck`）不属于任何模块。
+编排文件以 `proxy_` 前缀命名）、`remote`（远程连接隧道）与 `gateway`（LAN 网关旁路由，域服务在
+`internal/gateway`，helper 换行 JSON 协议与白名单分发在 `helperproto.go`，macOS helper 服务端/安装在
+`helper_*_darwin.go`）。平台通用服务（`logbuf`/`autostart`/`updatecheck`）不属于任何模块。
 
 新增模块时按上表各层各加一个文件，不要塞进 proxy 的文件里。
 

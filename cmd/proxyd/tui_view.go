@@ -1319,6 +1319,8 @@ func tuiGroupType(groupType string) string {
 		return "故障转移"
 	case "load-balance":
 		return "负载均衡"
+	case "select":
+		return "手动选择"
 	default:
 		return groupType
 	}

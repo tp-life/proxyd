@@ -24,8 +24,10 @@ type Node struct {
 // 参数：无；方法读取当前 Node.Mapping。
 //
 // 返回值：string，由协议、地址、端口、主凭据组成；链式节点额外包含
-// dialer-proxy 名称，避免同一服务器经不同上游拨号时被错误去重。普通节点保持历史
-// Key 格式不变，从而兼容已经持久化的 main-node 和端口映射快照。
+// dialer-proxy 名称，避免同一服务器经不同上游拨号时被错误去重。凭据提取优先级为
+// uuid → password → auth-key → private-key（后两者覆盖 tailscale/wireguard/ssh 等
+// 隧道类出站）。tailscale 类型无常规 server/port 时以 control-url 顶替 server 位置
+// 参与身份。普通节点保持历史 Key 格式不变，从而兼容已经持久化的 main-node 和端口映射快照。
 //
 // 错误情况：无；缺失或未知类型字段按空字符串参与身份计算。
 func (n *Node) Key() string {
@@ -47,7 +49,18 @@ func (n *Node) Key() string {
 	if cred == "" {
 		cred = get("password")
 	}
-	key := get("type") + "|" + get("server") + "|" + get("port") + "|" + cred
+	if cred == "" {
+		cred = get("auth-key")
+	}
+	if cred == "" {
+		cred = get("private-key")
+	}
+	server := get("server")
+	// tailscale 出站没有常规 server/port，控制面地址才是节点身份的稳定部分。
+	if server == "" && get("type") == TunnelTypeTailscale {
+		server = get("control-url")
+	}
+	key := get("type") + "|" + server + "|" + get("port") + "|" + cred
 	if dialer := n.DialerProxy(); dialer != "" {
 		key += "|dialer=" + dialer
 	}

@@ -143,7 +143,7 @@ func TestCheck(t *testing.T) {
 	// Mapping 无法解析（缺 type）的节点
 	broken := &node.Node{Name: "broken", Mapping: map[string]any{"name": "broken"}}
 
-	Check(context.Background(), []*node.Node{alive, dead, broken}, httpSrv.URL, 5*time.Second, 4)
+	Check(context.Background(), []*node.Node{alive, dead, broken}, httpSrv.URL, 5*time.Second, 4, "")
 
 	if !alive.Alive {
 		t.Fatalf("存活节点 Alive=false, Delay=%d", alive.Delay)
@@ -172,7 +172,7 @@ func TestCheckConcurrencyDefault(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		nodes = append(nodes, socksNode(fmt.Sprintf("n%d", i), socksPort))
 	}
-	Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, 0)
+	Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, 0, "")
 	for _, n := range nodes {
 		if !n.Alive {
 			t.Errorf("节点 %s Alive=false", n.Name)
@@ -225,7 +225,7 @@ func TestCheckLimitsWorkerGoroutines(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 	done := make(chan struct{})
 	go func() {
-		Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, concurrency)
+		Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, concurrency, "")
 		close(done)
 	}()
 
@@ -254,6 +254,29 @@ func TestCheckLimitsWorkerGoroutines(t *testing.T) {
 	}
 }
 
+// TestProbeTimeoutRelaxesTunnelNodes 验证隧道类节点的探测超时按全局超时的
+// tunnelTimeoutFactor 倍放宽，普通节点保持原值。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：隧道节点未放宽、普通节点被放大，或 nil 节点未按普通节点处理时测试失败。
+func TestProbeTimeoutRelaxesTunnelNodes(t *testing.T) {
+	base := 5 * time.Second
+	if got := probeTimeout(socksNode("plain", 1080), base); got != base {
+		t.Errorf("普通节点超时 = %v, 期望 %v", got, base)
+	}
+	tunnel := &node.Node{Mapping: map[string]any{"type": "tailscale", "auth-key": "k"}}
+	if got := probeTimeout(tunnel, base); got != base*tunnelTimeoutFactor {
+		t.Errorf("隧道节点超时 = %v, 期望 %v", got, base*tunnelTimeoutFactor)
+	}
+	if got := probeTimeout(nil, base); got != base {
+		t.Errorf("nil 节点超时 = %v, 期望 %v", got, base)
+	}
+}
+
 // TestCheckBuildsDialerProxyCandidates 验证首次加载前不会直接拨测链式节点，而是
 // 根据已完成测速的上游节点建立候选状态，供应用层加载完整 mihomo 代理表。
 //
@@ -273,7 +296,7 @@ func TestCheckBuildsDialerProxyCandidates(t *testing.T) {
 	exit := socksNode("出口", startSocks5Server(t))
 	entry := socksNode("入口", 2)
 	entry.Mapping["dialer-proxy"] = "出口"
-	Check(context.Background(), []*node.Node{entry, exit}, httpSrv.URL, 5*time.Second, 2)
+	Check(context.Background(), []*node.Node{entry, exit}, httpSrv.URL, 5*time.Second, 2, "")
 	if !exit.Alive || !entry.Alive {
 		t.Fatalf("有效链路应进入候选状态: entry=%+v exit=%+v", entry, exit)
 	}
@@ -284,7 +307,7 @@ func TestCheckBuildsDialerProxyCandidates(t *testing.T) {
 	deadExit := socksNode("失效出口", 1)
 	deadEntry := socksNode("失效入口", 2)
 	deadEntry.Mapping["dialer-proxy"] = "失效出口"
-	Check(context.Background(), []*node.Node{deadEntry, deadExit}, httpSrv.URL, time.Second, 2)
+	Check(context.Background(), []*node.Node{deadEntry, deadExit}, httpSrv.URL, time.Second, 2, "")
 	if deadEntry.Alive || deadEntry.FailReason == "" {
 		t.Fatalf("上游失效时链式节点必须不可用并给出原因: %+v", deadEntry)
 	}
@@ -293,21 +316,21 @@ func TestCheckBuildsDialerProxyCandidates(t *testing.T) {
 	cycleB := socksNode("循环 B", 3)
 	cycleA.Mapping["dialer-proxy"] = "循环 B"
 	cycleB.Mapping["dialer-proxy"] = "循环 A"
-	Check(context.Background(), []*node.Node{cycleA, cycleB}, httpSrv.URL, time.Second, 2)
+	Check(context.Background(), []*node.Node{cycleA, cycleB}, httpSrv.URL, time.Second, 2, "")
 	if cycleA.Alive || cycleB.Alive {
 		t.Fatalf("循环 dialer-proxy 不得进入候选: A=%+v B=%+v", cycleA, cycleB)
 	}
 
 	missing := socksNode("缺少依赖", 2)
 	missing.Mapping["dialer-proxy"] = "不存在的节点"
-	Check(context.Background(), []*node.Node{missing}, httpSrv.URL, time.Second, 2)
+	Check(context.Background(), []*node.Node{missing}, httpSrv.URL, time.Second, 2, "")
 	if missing.Alive || missing.FailReason == "" {
 		t.Fatalf("未知链路目标不得进入候选: %+v", missing)
 	}
 
 	groupEntry := socksNode("分组入口", 2)
 	groupEntry.Mapping["dialer-proxy"] = "上游策略组"
-	Check(context.Background(), []*node.Node{groupEntry}, httpSrv.URL, time.Second, 2, "上游策略组")
+	Check(context.Background(), []*node.Node{groupEntry}, httpSrv.URL, time.Second, 2, "", "上游策略组")
 	if !groupEntry.Alive {
 		t.Fatalf("已配置策略组应允许进入候选: %+v", groupEntry)
 	}

@@ -49,10 +49,36 @@ export function remoteSummary({ data, now = Date.now() }) {
   };
 }
 
+/**
+ * gatewaySummary 提取 LAN 网关的相位、设备与转发指标，汇总特权前置待办。
+ * 参数：context 为 {data: object}，data.gateway 为 /api/gateway 快照；返回统一摘要。
+ * 错误：未读取到数据时展示未知；helper 未安装与平台不支持只给指引入口，不重复告警文案。
+ */
+export function gatewaySummary({ data }) {
+  const gateway = data.gateway;
+  const devices = gateway?.devices || [];
+  const items = [];
+  if (gateway) {
+    if (!gateway.supported) items.push({ id: "gateway-platform", title: "当前平台不支持 LAN 网关", detail: "Windows 不做网关；请使用 macOS 或 Linux 主机。", view: "gateway" });
+    if (gateway.phase === "degraded" && (gateway.error || "").includes("helper")) items.push({ id: "gateway-helper", title: "网关特权 helper 未就绪", detail: gateway.error, view: "gateway" });
+    if (gateway.phase !== "disabled" && devices.length === 0) items.push({ id: "gateway-devices", title: "网关设备表为空", detail: "登记设备并把它指向本机后才开始分流。", view: "gateway" });
+    if (gateway.enabled && !gateway.applied && gateway.phase === "failed") items.push({ id: "gateway-rules", title: "网关转发规则应用失败", detail: "请进入网关页查看执行层状态与修复指引。", view: "gateway" });
+  }
+  return {
+    metrics: [
+      { label: "登记设备", value: gateway ? devices.length : null },
+      { label: "IPv4 转发", value: gateway ? (gateway.forwarding ? "已开启" : "未开启") : null },
+      { label: "转发规则", value: gateway ? (gateway.applied ? "已应用" : "未应用") : null },
+    ],
+    items,
+  };
+}
+
 /** 模块摘要注册表只声明展示入口与投影函数；新增模块不必改动总览页面结构。 */
 const SUMMARY_PROVIDERS = {
   proxy: { view: "proxy/overview", description: "代理流量、节点与连接", summarize: proxySummary },
   remote: { view: "remote/devices", description: "远程服务、设备与会话", summarize: remoteSummary },
+  gateway: { view: "gateway", description: "旁路由网关、设备与转发", summarize: gatewaySummary },
 };
 
 /**

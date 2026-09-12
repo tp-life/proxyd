@@ -13,7 +13,7 @@ import (
 // 参数：t 为 *testing.T；返回无；实际 TCP 可连接性与开关状态不一致时失败。
 func TestProxyModuleStopsAndRestoresListener(t *testing.T) {
 	a := newSystemProxyTestApp(t, filepath.Join(t.TempDir(), "config.yaml"))
-	a.cfg.ManualNodes = []string{"http://127.0.0.1:9#local"}
+	a.cfg.ManualNodes = []any{"http://127.0.0.1:9#local"}
 	a.cfg.SystemProxy = true
 	recorder := &recordingSystemProxy{}
 	a.systemProxy = recorder

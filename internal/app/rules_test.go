@@ -19,7 +19,7 @@ import (
 func TestCustomRuleEditAndReorder(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
-		ManualNodes: []string{"socks5://127.0.0.1:1080#manual"},
+		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
 		Listen:      "127.0.0.1",
 		PortRange:   [2]int{42000, 42010},
 		Mode:        "rule",

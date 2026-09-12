@@ -21,6 +21,7 @@ const GROUP_TYPE_LABELS = {
   "fallback": "故障转移",
   "url-test": "自动测速",
   "load-balance": "负载均衡",
+  "select": "手动选择",
 };
 
 /**
@@ -32,6 +33,7 @@ const GROUP_TYPE_LABELS = {
  * - overview: object，概览数据。
  * - selectedNodes: Set<string>，当前勾选节点。
  * - onCopy/onDelete/onForm/onPost/onSort/onSubmit/onToggleNode: Function，操作回调。
+ *   onPost 同时承载 select 分组的出口切换（POST /api/groups/{name}/select）。
  *
  * 返回值说明：
  * 返回分组页 React 元素。
@@ -207,6 +209,27 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
     if (await onSubmit(editingName)) setCreateOpen(false);
   }
 
+  /**
+   * selectGroupNode 切换 select 分组的手动出口节点。
+   *
+   * 功能说明：
+   * 后端要求目标节点在分组当前可用成员中（存活且属于该组），因此下拉只列出存活成员；
+   * 切换立即热更新并持久化到 state-dir，重启后保持。
+   *
+   * 参数说明：
+   * - group: object，overview 中的完整策略分组（select 类型）。
+   * - nodeName: string，目标出口节点名。
+   *
+   * 返回值说明：返回 Promise<void>。
+   *
+   * 可能的异常/错误情况：
+   * 分组非 select 类型、节点恰好失效或热更新失败时由 onPost 展示后端错误，分组保持原出口。
+   */
+  async function selectGroupNode(group, nodeName) {
+    if (!nodeName || nodeName === group.selected) return;
+    await onPost(`/api/groups/${encodeURIComponent(group.name)}/select`, { node: nodeName }, `分组 ${group.name} 出口已切换到「${nodeName}」`);
+  }
+
   return (
     <div className="stack">
       <PageHeader eyebrow="访问策略" title="策略分组" detail="为指定场景提供独立入口，并查看候选节点健康度。">
@@ -224,6 +247,9 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
             const staleNames = group.subscription
               ? []
               : memberNames.filter((name) => !overview.nodes.some((node) => node.name === name));
+            // select 分组的可切换出口：后端只接受当前存活成员（见 groupMemberAlive），
+            // 这里用同一口径过滤，避免列出注定被 400 拒绝的选项。
+            const aliveMembers = memberNames.filter((name) => overview.nodes.some((node) => node.name === name && node.alive));
             return (
             <li className="group-item" key={group.name}>
               <div className="group-row">
@@ -242,6 +268,20 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
                     ? `${overview.subscriptions.find((subscription) => subscription.name === group.subscription)?.alive || 0} 个可用`
                     : `${(group.nodes || []).filter((name) => overview.nodes.some((node) => node.name === name && node.alive)).length}/${(group.nodes || []).length} 可用`}
                 />
+                {group.type === "select" && (
+                  <div className="group-select">
+                    <span className="group-select-label">当前出口</span>
+                    <Select
+                      ariaLabel={`选择分组 ${group.name} 的出口节点`}
+                      disabled={aliveMembers.length === 0}
+                      placeholder={aliveMembers.length === 0 ? "暂无可用成员" : "选择出口节点"}
+                      triggerClassName="group-select-trigger"
+                      value={aliveMembers.includes(group.selected) ? group.selected : ""}
+                      onValueChange={(nodeName) => selectGroupNode(group, nodeName)}
+                      options={aliveMembers.map((name) => ({ value: name, label: name }))}
+                    />
+                  </div>
+                )}
                 <Button aria-label={`编辑策略分组 ${group.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditDialog(group)}><Pencil size={15} aria-hidden="true" /></Button>
                 <Button aria-label={`删除策略分组 ${group.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/groups/${encodeURIComponent(group.name)}`, "分组已删除", `策略分组 ${group.name}`)}>
                   <Trash2 size={16} aria-hidden="true" />
@@ -265,6 +305,7 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
                       <li className="group-node" key={name}>
                         <i className={node && node.alive ? "on" : ""} aria-hidden="true" />
                         <span className="group-node-name">{name}</span>
+                        {group.type === "select" && group.selected === name && <span className="group-node-selected">当前出口</span>}
                         {node ? (
                           <span className={delayClass(node)}>{formatDelay(node)}</span>
                         ) : (
@@ -301,6 +342,7 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
                 { value: "fallback", label: "故障转移（按顺序切换）" },
                 { value: "url-test", label: "自动测速（选择最快）" },
                 { value: "load-balance", label: "负载均衡（分散连接）" },
+                { value: "select", label: "手动选择（固定出口，可在列表切换）" },
               ]}
             />
           </Field>

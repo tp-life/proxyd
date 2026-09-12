@@ -3,6 +3,9 @@ PKG     := proxyd
 CMD     := ./cmd/proxyd
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
+# ADR 0002：单二进制默认打开 with_gvisor，解锁 mihomo tailscale 出站与 TUN gvisor/mixed 栈；
+# 构建/测试/静态检查统一使用该标签，保证日常开发与发布产物覆盖同一份代码。
+GOTAGS  := -tags with_gvisor
 GORELEASER ?= goreleaser
 TAG ?=
 
@@ -19,9 +22,10 @@ all: web build
 # build 仅编译 Go 程序，并嵌入 internal/api/dist 中当前已有的前端产物。
 # 保留独立目标是为了让无 Node.js 的发布环境能够使用已经生成并提交的静态资源。
 build: deps
-	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)
+	go build $(GOTAGS) -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)
 
-# deps 下载固定版本并应用小型并发补丁；完整源码仅保留在被忽略的 third_party。
+# deps 下载固定版本并应用本地补丁（mihomo 并发修复、metacubex/tailscale varz 去重）；
+# 完整源码仅保留在被忽略的 third_party。
 # 返回：成功时可直接运行 go build/test；下载或补丁失败会终止依赖此目标的构建。
 deps:
 	sh scripts/prepare-mihomo.sh
@@ -31,10 +35,10 @@ web:
 	npm --prefix web run build
 
 test: deps
-	go test ./...
+	go test $(GOTAGS) ./...
 
 vet: deps
-	go vet ./...
+	go vet $(GOTAGS) ./...
 
 clean:
 	rm -rf bin dist

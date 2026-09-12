@@ -657,18 +657,29 @@ func filterEnabledSubscriptionNodes(nodes []*node.Node, subscriptions []config.S
 
 // ManualNodeEntry 是手动节点列表的展示项（供 API 返回）。
 type ManualNodeEntry struct {
-	Index int    `json:"index"`
-	URL   string `json:"url"`
-	Name  string `json:"name"` // 解析出的节点名（fragment/兜底），解析失败为空
+	Index int            `json:"index"`
+	URL   string         `json:"url,omitempty"`   // 字符串条目（代理 URL/分享链接）
+	Type  string         `json:"type,omitempty"`  // 结构化条目的出站协议（tailscale/openvpn/...）
+	Name  string         `json:"name"`            // 解析出的节点名（fragment/name 字段/兜底），解析失败为空
+	Proxy map[string]any `json:"proxy,omitempty"` // 结构化 VPN 出站映射（凭据字段已打码）
 }
 
 // ManualNodes 返回配置中的手动节点列表（供 API 展示）。
+// 结构化条目的出站映射经 config.RedactMapping 打码，完整凭据不进入列表响应。
 func (a *App) ManualNodes() []ManualNodeEntry {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	out := make([]ManualNodeEntry, 0, len(a.cfg.ManualNodes))
-	for i, u := range a.cfg.ManualNodes {
-		out = append(out, ManualNodeEntry{Index: i, URL: u, Name: subscribe.ManualNodeName(u)})
+	for i, entry := range a.cfg.ManualNodes {
+		item := ManualNodeEntry{Index: i, Name: subscribe.ManualNodeName(entry)}
+		switch typed := entry.(type) {
+		case string:
+			item.URL = typed
+		case map[string]any:
+			item.Type, _ = typed["type"].(string)
+			item.Proxy = config.RedactMapping(typed)
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -699,6 +710,38 @@ func (a *App) AddManualNode(rawURL, name string) (ManualNodeEntry, error) {
 		return ManualNodeEntry{}, err
 	}
 	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, URL: rawURL, Name: subscribe.ManualNodeName(rawURL)}, nil
+}
+
+// AddManualProxy 添加结构化隧道类（VPN）手动节点并持久化。
+// name 非空时覆盖映射中的 name 字段；name 为空时要求映射自带 name。
+// 映射按隧道类型白名单与必填凭据校验（subscribe.ParseManualNode），其余字段透传。
+// 与既有手动节点同名（解析后的节点名冲突）会被拒绝。调用方负责随后触发 Refresh。
+func (a *App) AddManualProxy(mapping map[string]any, name string) (ManualNodeEntry, error) {
+	name = strings.TrimSpace(name)
+	candidate := make(map[string]any, len(mapping)+1)
+	for k, v := range mapping {
+		candidate[k] = v
+	}
+	if name != "" {
+		candidate["name"] = name
+	}
+	parsed, err := subscribe.ParseManualNode(candidate)
+	if err != nil {
+		return ManualNodeEntry{}, fmt.Errorf("结构化节点校验失败: %w", err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.cfg.ManualNodes {
+		if subscribe.ManualNodeName(e) == parsed.Name {
+			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", parsed.Name)
+		}
+	}
+	a.cfg.ManualNodes = append(a.cfg.ManualNodes, candidate)
+	if err := a.persistLocked(); err != nil {
+		return ManualNodeEntry{}, err
+	}
+	typ, _ := candidate["type"].(string)
+	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, Name: parsed.Name, Type: typ}, nil
 }
 
 // RemoveManualNode 按下标删除手动节点并持久化。调用方负责随后触发 Refresh。

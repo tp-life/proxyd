@@ -121,7 +121,7 @@ func TestUpdateSubscriptionEnableFailureKeepsDisabled(t *testing.T) {
 		Subscriptions: []config.Subscription{{
 			Name: "offline", URL: "http://[::1", Type: "auto", Enabled: &disabled,
 		}},
-		ManualNodes: []string{"socks5://127.0.0.1:1080#manual"},
+		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
 		Listen:      "127.0.0.1",
 		PortRange:   [2]int{42000, 42010},
 		Mode:        "rule",

@@ -2,6 +2,8 @@ package core
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -655,26 +657,26 @@ func TestMainInboundIsListener(t *testing.T) {
 	cfg := fakeConfig()
 	assigns := []Assignment{{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)}}
 
-	if MainInboundIsListener(cfg, assigns) {
+	if MainInboundIsListener(cfg, assigns, nil) {
 		t.Error("默认（无 main-auto/main-node）应为规则模式")
 	}
 	cfg.MainNode = assigns[0].Node.Key()
-	if !MainInboundIsListener(cfg, assigns) {
+	if !MainInboundIsListener(cfg, assigns, nil) {
 		t.Error("main-node 命中可用节点应为 listener 形态")
 	}
-	if MainInboundIsListener(cfg, nil) {
+	if MainInboundIsListener(cfg, nil, nil) {
 		t.Error("main-node 节点不可用时应回退规则模式")
 	}
 	cfg.MainAuto = true // auto 优先：即使有 main-node 也按 auto 判定
-	if !MainInboundIsListener(cfg, assigns) {
+	if !MainInboundIsListener(cfg, assigns, nil) {
 		t.Error("main-auto 开启且有节点应为 listener 形态")
 	}
-	if MainInboundIsListener(cfg, nil) {
+	if MainInboundIsListener(cfg, nil, nil) {
 		t.Error("main-auto 无可用节点时应回退规则模式")
 	}
 	cfg.MainAuto = false
 	cfg.MainNode = ""
-	if MainInboundIsListener(cfg, assigns) {
+	if MainInboundIsListener(cfg, assigns, nil) {
 		t.Error("main-node 清空后应为规则模式")
 	}
 }
@@ -958,6 +960,203 @@ func TestGenerateGroupTypeAndSubscriptionMembers(t *testing.T) {
 	bMembers := groups["轮询B"]["proxies"].([]any)
 	if len(bMembers) != 1 || bMembers[0] != "B1" {
 		t.Fatalf("轮询B 成员 = %v", bMembers)
+	}
+}
+
+// TestGenerateSelectGroupDefaultSelected 验证 select 分组把持久化选中项写入 mihomo
+// 原生 default-selected 字段，且已失效（不在当前成员中）的选中值被忽略。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：default-selected 缺失、写错或失效值被写入时测试失败。
+func TestGenerateSelectGroupDefaultSelected(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	cfg.Groups = []config.NodeGroup{
+		{Name: "手动出口", Port: 43000, Type: config.GroupTypeSelect, Nodes: []string{"节点A", "节点B"}},
+		{Name: "失效选中", Port: 43001, Type: config.GroupTypeSelect, Nodes: []string{"节点A"}},
+	}
+	assigns := []Assignment{
+		{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)},
+		{Port: 42002, Node: fakeSocks5("节点B", "5.6.7.8", 10002)},
+	}
+
+	buf, err := GenerateWithState(cfg, assigns, nil, nil, map[string]string{
+		"手动出口": "节点B",
+		"失效选中": "已消失的节点",
+	})
+	if err != nil {
+		t.Fatalf("GenerateWithState 失败: %v", err)
+	}
+	m := parseYAML(t, buf)
+	groups := map[string]map[string]any{}
+	for _, raw := range m["proxy-groups"].([]any) {
+		g := raw.(map[string]any)
+		groups[g["name"].(string)] = g
+	}
+	if groups["手动出口"]["type"] != "select" {
+		t.Fatalf("手动出口 type = %v", groups["手动出口"]["type"])
+	}
+	if groups["手动出口"]["default-selected"] != "节点B" {
+		t.Fatalf("default-selected = %v, want 节点B", groups["手动出口"]["default-selected"])
+	}
+	if _, exists := groups["失效选中"]["default-selected"]; exists {
+		t.Fatalf("失效选中值不应写入 default-selected: %v", groups["失效选中"])
+	}
+}
+
+// fakeSSHNode 构造一个 ssh 隧道类节点（ssh 出站无构建标签门槛，可在无 with_gvisor 的
+// 测试进程中通过 mihomo 解析自检）。
+func fakeSSHNode(name, server string, port int) *node.Node {
+	return &node.Node{
+		Name: name,
+		Mapping: map[string]any{
+			"name": name, "type": "ssh", "server": server, "port": port,
+			"username": "u", "password": "p",
+		},
+	}
+}
+
+// TestGenerateTunnelNodesViaGroupAndMainNode 验证隧道类节点不占用本地端口，
+// 但仍作为出站注册、可被分组 select 引用、也可被 main-node 直达。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：隧道节点出现在 listeners、缺失于 proxies/组成员，或 main-node 未解析到
+// 隧道节点名时测试失败。
+func TestGenerateTunnelNodesViaGroupAndMainNode(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	cfg := fakeConfig()
+	tunnel := fakeSSHNode("公司 VPN", "10.0.0.1", 22)
+	tunnel.Alive = true
+	cfg.MainNode = tunnel.Key()
+	cfg.Groups = []config.NodeGroup{{
+		Name: "vpn 出口", Port: 43000, Type: config.GroupTypeSelect, Nodes: []string{"公司 VPN"},
+	}}
+	assigns := []Assignment{{Port: 42001, Node: fakeSocks5("节点A", "1.2.3.4", 10001)}}
+
+	buf, err := GenerateWithState(cfg, assigns, []*node.Node{tunnel}, nil,
+		map[string]string{"vpn 出口": "公司 VPN"})
+	if err != nil {
+		t.Fatalf("GenerateWithState 失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		t.Fatalf("mihomo 无法解析含隧道节点的配置: %v", err)
+	}
+	m := parseYAML(t, buf)
+
+	// 隧道节点注册为出站，但不生成任何固定到它的一对一 listener。
+	foundTunnel := false
+	for _, raw := range m["proxies"].([]any) {
+		if raw.(map[string]any)["name"] == "公司 VPN" {
+			foundTunnel = true
+		}
+	}
+	if !foundTunnel {
+		t.Fatalf("隧道节点未注册为出站: %v", m["proxies"])
+	}
+	for _, raw := range m["listeners"].([]any) {
+		l := raw.(map[string]any)
+		if l["proxy"] == "公司 VPN" && l["port"] != 41999 {
+			t.Fatalf("隧道节点不应获得一对一 listener: %v", l)
+		}
+	}
+
+	// 分组引用隧道节点并恢复选中。
+	groups := map[string]map[string]any{}
+	for _, raw := range m["proxy-groups"].([]any) {
+		g := raw.(map[string]any)
+		groups[g["name"].(string)] = g
+	}
+	if groups["vpn 出口"]["default-selected"] != "公司 VPN" {
+		t.Fatalf("vpn 出口 default-selected = %v", groups["vpn 出口"])
+	}
+
+	// main-node 引用隧道节点：主端口变为固定 listener；节点失效（不在 nodes/Alive）
+	// 时维持既有回退规则模式行为。
+	var mainLn map[string]any
+	for _, raw := range m["listeners"].([]any) {
+		l := raw.(map[string]any)
+		if l["port"] == 41999 {
+			mainLn = l
+		}
+	}
+	if mainLn == nil || mainLn["proxy"] != "公司 VPN" {
+		t.Fatalf("main-node 引用隧道节点应生成固定 listener: %v", m["listeners"])
+	}
+	if _, exists := m["mixed-port"]; exists {
+		t.Fatalf("main-node 生效时不应有顶层 mixed-port: %v", m["mixed-port"])
+	}
+
+	dead := fakeSSHNode("公司 VPN", "10.0.0.1", 22) // Alive=false
+	buf, err = GenerateWithState(cfg, assigns, []*node.Node{dead}, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateWithState(失效隧道节点) 失败: %v", err)
+	}
+	m = parseYAML(t, buf)
+	if m["mixed-port"] != 41999 {
+		t.Fatalf("隧道节点失效时主端口应回退规则模式: %v", m["mixed-port"])
+	}
+}
+
+// TestPrepareOutboundMappingTailscaleStateDir 验证 tailscale 出站的 tsnet state-dir
+// 固定逻辑：未显式设置时改写为 proxyd state-dir 下按节点隔离的目录（不污染原 Mapping），
+// 显式设置时尊重用户值。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：改写缺失、目录名不安全/冲突、原 Mapping 被污染或用户值被覆盖时测试失败。
+func TestPrepareOutboundMappingTailscaleStateDir(t *testing.T) {
+	cfg := fakeConfig()
+	cfg.StateDir = "/tmp/proxyd-state"
+	ts := &node.Node{
+		Name:    "tailscale 节点/A",
+		Mapping: map[string]any{"name": "tailscale 节点/A", "type": "tailscale", "auth-key": "tskey-auth-xxx"},
+	}
+	out := prepareOutboundMapping(cfg, ts)
+	dir, _ := out["state-dir"].(string)
+	if !strings.HasPrefix(dir, "/tmp/proxyd-state/tsnet/") {
+		t.Fatalf("state-dir 未改写为 proxyd 隔离目录: %q", dir)
+	}
+	if strings.Contains(dir, "/A") || strings.ContainsAny(filepath.Base(dir), `/\:*?"<>|`) {
+		t.Fatalf("目录名未安全化: %q", dir)
+	}
+	if _, exists := ts.Mapping["state-dir"]; exists {
+		t.Fatal("改写不得污染节点原 Mapping")
+	}
+
+	// 同名不同凭据的节点获得不同目录；同节点重复生成保持稳定。
+	other := &node.Node{
+		Name:    "tailscale 节点/A",
+		Mapping: map[string]any{"name": "tailscale 节点/A", "type": "tailscale", "auth-key": "tskey-auth-yyy"},
+	}
+	if prepareOutboundMapping(cfg, other)["state-dir"] == dir {
+		t.Fatal("不同 Key 的同名节点不应共享 tsnet 目录")
+	}
+	if prepareOutboundMapping(cfg, ts)["state-dir"] != dir {
+		t.Fatal("同一节点的 tsnet 目录应稳定")
+	}
+
+	// 用户显式设置的 state-dir 被尊重；非 tailscale 节点不触碰。
+	custom := &node.Node{
+		Name:    "custom",
+		Mapping: map[string]any{"name": "custom", "type": "tailscale", "auth-key": "k", "state-dir": "/my/ts"},
+	}
+	if got := prepareOutboundMapping(cfg, custom); got["state-dir"] != "/my/ts" {
+		t.Fatalf("显式 state-dir 被覆盖: %v", got["state-dir"])
+	}
+	plain := fakeSocks5("plain", "1.2.3.4", 1080)
+	if got := prepareOutboundMapping(cfg, plain); got["state-dir"] != nil {
+		t.Fatalf("普通节点不应被注入 state-dir: %v", got)
 	}
 }
 

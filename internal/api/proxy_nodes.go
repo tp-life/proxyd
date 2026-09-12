@@ -11,7 +11,6 @@ import (
 
 	"proxyd/internal/app"
 	"proxyd/internal/autostart"
-	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
 )
 
@@ -33,6 +32,7 @@ type NodeEntry struct {
 	Alive        bool   `json:"alive"`
 	FailReason   string `json:"fail_reason,omitempty"` // 测速失败原因
 	Port         int    `json:"port"`                  // 0 表示未映射
+	Tunnel       bool   `json:"tunnel,omitempty"`      // 隧道类（VPN 语义）出站：不参与端口映射，经分组出口使用
 }
 
 // Overview 是 /api/overview 的响应。
@@ -61,7 +61,7 @@ type Overview struct {
 	PortAssignments    []PortEntry             `json:"port_assignments"` // 稳定分配快照；关闭映射时仍保留
 	Nodes              []NodeEntry             `json:"nodes"`
 	CustomRules        []string                `json:"custom_rules"`
-	Groups             []config.NodeGroup      `json:"groups"`
+	Groups             []GroupEntry            `json:"groups"`
 }
 
 // handleOverview 聚合应用内存快照，返回控制台一次轮询所需的完整只读状态。
@@ -110,7 +110,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		ManualNodes:        s.app.ManualNodes(),
 		Nodes:              []NodeEntry{},
 		CustomRules:        s.app.CustomRules(),
-		Groups:             s.app.Groups(),
+		Groups:             s.groupEntries(),
 	}
 	for _, sub := range s.app.Subscriptions() {
 		subs[sub.Name] = len(ov.Subs)
@@ -121,16 +121,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		ov.Subs = append(ov.Subs, entry)
 	}
 	for _, n := range s.app.Nodes() {
-		ov.Nodes = append(ov.Nodes, NodeEntry{
-			Name:         n.Name,
-			Key:          n.Key(),
-			Type:         nodeType(n),
-			Subscription: n.Subscription,
-			Delay:        n.Delay,
-			Alive:        n.Alive,
-			FailReason:   n.FailReason,
-			Port:         portOf[n.Name],
-		})
+		ov.Nodes = append(ov.Nodes, newNodeEntry(n, portOf[n.Name]))
 		if i, ok := subs[n.Subscription]; ok {
 			ov.Subs[i].Total++
 			if n.Alive {
@@ -169,16 +160,35 @@ func (s *Server) handleListManualNodes(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleAddManualNode 添加手动节点：校验 + 持久化，随后后台刷新纳入节点池。
+// url 字段接受代理 URL/分享链接；proxy 字段接受结构化隧道类（VPN）出站映射
+// （type 限 tailscale/openvpn/zerotier/wireguard/ssh），两者二选一。
 func (s *Server) handleAddManualNode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URL  string `json:"url"`
-		Name string `json:"name,omitempty"`
+		URL   string         `json:"url"`
+		Name  string         `json:"name,omitempty"`
+		Proxy map[string]any `json:"proxy,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.URL) == "" {
-		http.Error(w, "bad request: url required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	entry, err := s.app.AddManualNode(req.URL, req.Name)
+	var (
+		entry app.ManualNodeEntry
+		err   error
+	)
+	switch {
+	case req.Proxy != nil && strings.TrimSpace(req.URL) != "":
+		http.Error(w, "bad request: url 与 proxy 只能二选一", http.StatusBadRequest)
+		return
+	case req.Proxy != nil:
+		entry, err = s.app.AddManualProxy(req.Proxy, req.Name)
+	default:
+		if strings.TrimSpace(req.URL) == "" {
+			http.Error(w, "bad request: url required", http.StatusBadRequest)
+			return
+		}
+		entry, err = s.app.AddManualNode(req.URL, req.Name)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -200,6 +210,22 @@ func (s *Server) handleDelManualNode(w http.ResponseWriter, r *http.Request) {
 	}
 	s.trigger(true)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// newNodeEntry 把运行态节点转换为列表记录；隧道类节点没有端口映射（Port 恒为 0）
+// 是正常状态，通过 Tunnel 标识让控制台与 CLI 区分展示，而不是当作异常。
+func newNodeEntry(n *node.Node, port int) NodeEntry {
+	return NodeEntry{
+		Name:         n.Name,
+		Key:          n.Key(),
+		Type:         nodeType(n),
+		Subscription: n.Subscription,
+		Delay:        n.Delay,
+		Alive:        n.Alive,
+		FailReason:   n.FailReason,
+		Port:         port,
+		Tunnel:       n.IsTunnel(),
+	}
 }
 
 // nodeType 取节点的出站协议名。

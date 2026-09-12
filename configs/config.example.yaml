@@ -13,6 +13,11 @@ subscriptions:
 #   - http://user:pass@1.2.3.4:8080#我的HTTP节点    # http(s)://[user:pass@]host:port[#名称]
 #   - socks5://user:pass@1.2.3.4:1080               # socks5://[user:pass@]host:port[#名称]
 #   - ss://YWVzLTEyOC1nY206cHc=@1.2.3.4:8388#ss节点  # 以及 ss/ssr/vmess/vless/trojan/hy2/tuic 分享链接
+#   - name: ts-exit              # 也接受结构化隧道类（VPN）出站映射，type 限
+#     type: tailscale            # tailscale/openvpn/zerotier/wireguard/ssh；其余字段透传 mihomo
+#     auth-key: tskey-auth-...   # tailscale 必填 auth-key；openvpn 必填 server/port/ca
+#                                # 凭据在列表接口与默认配置导出中打码；隧道节点不占端口映射，
+#                                # 经下方 groups 的分组端口使用（见手册「隧道类（VPN）出站」）
 
 listen: 127.0.0.1              # 映射端口监听地址
 port-range: [42000, 42100]     # 每个可用节点占一个端口（闭区间）
@@ -61,12 +66,16 @@ api-listen: 127.0.0.1:19091            # proxyd 自有 API + 内嵌 React Web �
 # groups:                      # 节点分组端口，也可作为订阅节点 dialer-proxy 的上游目标
 #   - name: hk                 # 组名（不能与节点名/AUTO/PROXY 等保留名冲突）
 #     port: 43000              # 不能与主端口、api 端口、port-range 区间、auto-port 冲突
-#     type: fallback           # url-test | fallback | load-balance；旧配置缺省为 url-test
+#     type: fallback           # url-test | fallback | load-balance | select；旧配置缺省为 url-test
 #     nodes: ["香港 01", "香港 02"]   # 节点名列表，与当前可用节点取交集
 #   - name: airport-a-auto
 #     port: 43001
 #     type: url-test
 #     subscription: airport-a  # 成员动态取该订阅当前可用节点；manual 表示手动节点来源
+#   - name: vpn-exit           # select：手动选择出口（POST /api/groups/{name}/select
+#     port: 43002              # 或 proxyd groups select <组名> <节点名>），选中项持久化在
+#     type: select             # state-dir/group-selected.json，重启与刷新后保持
+#     subscription: manual
 
 # dns-preset: off              # off | fake-ip | redir-host；TUN 建议 fake-ip
 # dns:                         # 可选，透传 mihomo dns 配置；存在时优先于 dns-preset
@@ -79,6 +88,7 @@ rules:
   - MATCH,PROXY
 
 # state-dir: ~/.local/state/proxyd   # 状态目录：端口映射快照 mapping.json、节点快照 nodes.json、
+                                     # select 分组选中项 group-selected.json、tsnet 状态 tsnet/、
                                      # 订阅/规则缓存 cache/（含 *.userinfo.json 用量缓存）、
                                      # geo 数据、proxyd.pid、proxyd.log
 
@@ -136,3 +146,19 @@ rules:
 #       protocol: rdp          # rdp | vnc
 #       remote-port: 3389      # 对端桌面服务真实端口；省略时按协议补默认值
 #       username: DOMAIN\\user # 可选；密码仍由系统 RDP/VNC 客户端安全存储或每次询问
+
+# ---- LAN 网关（旁路由）：局域网设备把网关/DNS 指向本机即获得分流能力 ----
+# 数据面不依赖 TUN（docs/adr/0003 勘误）：macOS 由 root 特权 helper 应用 pf anchor
+#（rdr → redir-port），Linux 用 nftables redirect/tproxy（需 setcap，见报错指引）；
+# 下游 DNS 53 被 redirect 到 mihomo dns（0.0.0.0:1053）。启用要求 proxy 模块已启用。
+# gateway:
+#   disabled: false          # 模块停用标记；false 且设备表非空时生效
+#                            #（零值配置设备表为空 = 不生效，存量配置升级不受影响）
+#   redir-port: 17892        # mihomo redir 透明代理入口（macOS/Linux 通用）；默认 17892
+#   tproxy-port: 17893       # mihomo tproxy 入口（仅 Linux UDP）；默认 17893
+#   dns-redirect: true       # 劫持下游 53 端口到本机 1053（mihomo dns 监听）
+#   devices:                 # 设备登记表：仅表内设备被分流，表外 LAN 流量不受影响
+#     - name: 客厅电视
+#       mac: aa:bb:cc:dd:ee:ff   # 仅识别/展示用，不参与规则匹配
+#       ip: 192.168.1.10         # IPv4 地址或 /32 CIDR
+#       policy: proxy            # direct | proxy | group:<分组名>；留空默认 proxy

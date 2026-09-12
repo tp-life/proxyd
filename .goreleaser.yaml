@@ -32,6 +32,9 @@ builds:
         goarch: arm64
 
     # trimpath 去除构建机绝对路径；时间戳固定为提交时间，提升相同提交重复构建的一致性。
+    # with_gvisor：ADR 0002 单二进制决议，解锁 tailscale 出站与 TUN gvisor/mixed 栈。
+    tags:
+      - with_gvisor
     flags:
       - -trimpath
     ldflags:

@@ -15,14 +15,21 @@ import (
 // defaultConcurrency 是未指定并发数时的默认值。
 const defaultConcurrency = 32
 
+// tunnelTimeoutFactor 是隧道类节点健康检测超时相对全局 health-timeout 的放大倍数：
+// tsnet/openvpn 首次拨号涉及 DERP 协商或 TLS 握手，普通节点的秒级超时对它们必然过紧。
+const tunnelTimeoutFactor = 3
+
 // Check 并发地检测普通节点，并为 dialer-proxy 链式节点建立可加载的候选状态。
 //
 // 参数：
 //   - ctx: context.Context，控制整轮检测的取消；取消后尚未执行的节点标记为不可用。
 //   - nodes: []*node.Node，待检测节点；结果原地写回 Alive、Delay 与 FailReason。
 //   - url: string，普通节点 URLTest 使用的探测地址。
-//   - timeout: time.Duration，单节点网络探测的最大时长。
+//   - timeout: time.Duration，单节点网络探测的最大时长；隧道类节点自动放大
+//     tunnelTimeoutFactor 倍（见 probeTimeout）。
 //   - concurrency: int，最大并发探测数；小于等于 0 时使用默认值 32。
+//   - stateDir: string，proxyd 状态目录，用于 tailscale 节点的 tsnet 状态目录改写
+//     （见 node.WithTunnelStateDir）；为空时不改写。
 //   - dialerTargets: ...string，可作为链式目标的已配置 proxy-group 名称。
 //
 // 返回值：无；单节点失败通过节点状态表达，不中断其它节点检测。
@@ -30,7 +37,7 @@ const defaultConcurrency = 32
 // 错误情况：普通节点的超时、协议解析和网络错误写入 FailReason。链式节点在
 // mihomo 配置加载前无法完成真实 URLTest，因此这里只校验配置结构、依赖存在性和
 // 循环引用，并继承上游延迟形成候选；应用层加载完整代理表后会再次做端到端测速。
-func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Duration, concurrency int, dialerTargets ...string) {
+func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Duration, concurrency int, stateDir string, dialerTargets ...string) {
 	if concurrency <= 0 {
 		concurrency = defaultConcurrency
 	}
@@ -55,7 +62,7 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 			for n := range jobs {
 				// 即使整轮已取消，也让 checkOne 处理每个排队节点。它会从已取消的父上下文
 				// 立即返回并统一清空旧 Alive/Delay 状态，避免刷新取消后残留上轮健康结果。
-				checkOne(ctx, n, url, timeout)
+				checkOne(ctx, n, url, timeout, stateDir)
 			}
 		}()
 	}
@@ -75,24 +82,29 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 //   - ctx: context.Context，继承整轮检测取消信号。
 //   - n: *node.Node，待检测节点，结果原地写回。
 //   - url: string，URLTest 目标地址。
-//   - timeout: time.Duration，该节点允许占用的最大检测时间。
+//   - timeout: time.Duration，普通节点允许占用的最大检测时间；隧道类节点按倍数放宽。
+//   - stateDir: string，proxyd 状态目录，用于 tailscale 节点的 tsnet 状态目录改写。
 //
 // 返回值：无；成功写入延迟并标记 Alive，失败写入首行错误。
 //
 // 错误情况：配置无法解析、网络失败或超时都将节点标记为不可用，不向调用方抛错。
-func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Duration) {
+func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Duration, stateDir string) {
 	n.Alive = false
 	n.Delay = 0
 	n.FailReason = ""
 
-	proxy, err := adapter.ParseProxy(n.Mapping)
+	// 隧道类出站（tailscale）必须经状态目录改写后再建适配器：URLTest 会真正拉起
+	// tsnet，使用默认目录会与运行态实例（gen 生成的配置）身份不一致，且多节点
+	// 共用 <state-dir>/tailscale 互相覆盖。
+	mapping, _ := node.WithTunnelStateDir(stateDir, n)
+	proxy, err := adapter.ParseProxy(mapping)
 	if err != nil {
 		// 配置无法解析的节点视为不可用，跳过探测
 		n.FailReason = "配置解析失败: " + err.Error()
 		return
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, timeout)
+	cctx, cancel := context.WithTimeout(ctx, probeTimeout(n, timeout))
 	defer cancel()
 
 	delay, err := proxy.URLTest(cctx, url, nil)
@@ -189,6 +201,22 @@ func resolveDialerCandidates(nodes []*node.Node, dialerTargets []string) {
 			resolve(n)
 		}
 	}
+}
+
+// probeTimeout 返回单个节点允许占用的最大探测时长。
+//
+// 参数：
+//   - n: *node.Node，待检测节点。
+//   - base: time.Duration，全局 health-timeout。
+//
+// 返回值：time.Duration，隧道类节点放大 tunnelTimeoutFactor 倍，其余节点原样返回。
+//
+// 错误情况：无；nil 节点按普通节点处理。
+func probeTimeout(n *node.Node, base time.Duration) time.Duration {
+	if n.IsTunnel() {
+		return base * tunnelTimeoutFactor
+	}
+	return base
 }
 
 // firstLine 取错误信息首行，避免长堆栈进入 UI。

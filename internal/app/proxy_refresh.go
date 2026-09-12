@@ -10,6 +10,7 @@ import (
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/core"
+	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
 	"proxyd/internal/proxy/ruleurl"
@@ -52,7 +53,7 @@ func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 // 的配置释放端口，再应用目标配置。反向（listener → mixed-port）以及
 // listener 同名仅换 proxy 目标（main-auto ↔ main-node）由 mihomo 安全处理。
 func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
-	willListener := core.MainInboundIsListener(cfg, assigns)
+	willListener := core.MainInboundIsListener(cfg, assigns, a.Nodes())
 	a.mu.RLock()
 	wasListener := a.mainListenerOn
 	a.mu.RUnlock()
@@ -111,7 +112,13 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	if cfg.ProxyDisabled {
 		return a.runner.Suspend()
 	}
-	cfgYAML, err := core.GenerateWithNodes(cfg, assigns, a.Nodes(), imported)
+	// select 分组的持久化选中项随每次生成注入 mihomo default-selected；
+	// 状态文件损坏仅打日志丢弃，mihomo 回退到组成员首位。
+	selected, err := groupstate.Load(a.groupSelectedPath())
+	if err != nil {
+		log.Printf("[groupstate] %v (ignored)", err)
+	}
+	cfgYAML, err := core.GenerateWithState(cfg, assigns, a.Nodes(), imported, selected)
 	if err != nil {
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
@@ -164,7 +171,7 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		copy(subs, a.cfg.Subscriptions)
 		ruleURLs := make([]config.RuleURL, len(a.cfg.RuleURLs))
 		copy(ruleURLs, a.cfg.RuleURLs)
-		manualEntries := make([]string, len(a.cfg.ManualNodes))
+		manualEntries := make([]any, len(a.cfg.ManualNodes))
 		copy(manualEntries, a.cfg.ManualNodes)
 		a.mu.RUnlock()
 
@@ -231,7 +238,7 @@ func (a *App) Testing() bool {
 func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets ...string) {
 	a.testing.Store(true)
 	defer a.testing.Store(false)
-	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, dialerTargets...)
+	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.cfg.StateDir, dialerTargets...)
 }
 
 // applyNodes 执行健康检测后的流水线尾部，并完成链式代理的二阶段验证。
@@ -261,8 +268,15 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if len(alive) == 0 {
 		return fmt.Errorf("all %d nodes failed health check", len(nodes))
 	}
-	if capacity := a.cfg.Capacity(); len(alive) > capacity {
-		log.Printf("[alloc] %d alive nodes exceed port capacity %d, keeping the fastest", len(alive), capacity)
+	// 隧道类节点不参与端口映射，容量提示只统计实际需要一对一端口的节点。
+	mappable := 0
+	for _, n := range alive {
+		if !n.IsTunnel() {
+			mappable++
+		}
+	}
+	if capacity := a.cfg.Capacity(); mappable > capacity {
+		log.Printf("[alloc] %d alive nodes exceed port capacity %d, keeping the fastest", mappable, capacity)
 	}
 
 	prev, err := pool.LoadSnapshot(a.snapshotPath())
@@ -316,6 +330,9 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if err := node.SaveSnapshot(a.nodesSnapshotPath(), nodes); err != nil {
 		log.Printf("[snapshot] 保存节点快照失败: %v", err)
 	}
+	// 顺带调和网关执行层：mihomo 入口刚热更新完毕，失败的 gateway 应用到点重试，
+	// 被外部清除的规则（如 helper 看门狗）也在此收敛。
+	a.reconcileGatewayLocked()
 	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
 	return nil
 }

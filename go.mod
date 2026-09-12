@@ -176,3 +176,6 @@ require (
 
 // make deps 下载原版并应用日志和入站认证并发补丁；生成源码不提交。
 replace github.com/metacubex/mihomo => ./third_party/mihomo
+
+// make deps 下载固定版本并应用 varz 去重补丁；生成源码不提交（ADR 0002）。
+replace github.com/metacubex/tailscale => ./third_party/metacubex-tailscale

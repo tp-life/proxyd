@@ -5,9 +5,12 @@ package app
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"proxyd/internal/config"
+	"proxyd/internal/proxy/groupstate"
+	"proxyd/internal/proxy/node"
 )
 
 // Groups 返回节点分组快照（供 API 展示）。
@@ -17,6 +20,17 @@ func (a *App) Groups() []config.NodeGroup {
 	out := make([]config.NodeGroup, len(a.cfg.Groups))
 	copy(out, a.cfg.Groups)
 	return out
+}
+
+// GroupSelected 返回 select 分组的持久化选中项（分组名 -> 节点名），供 API 展示。
+// 状态文件损坏时打日志并返回空映射，与生成路径的降级语义一致。
+func (a *App) GroupSelected() map[string]string {
+	selected, err := groupstate.Load(a.groupSelectedPath())
+	if err != nil {
+		log.Printf("[groupstate] %v (ignored)", err)
+		return map[string]string{}
+	}
+	return selected
 }
 
 // AddGroup 新增节点分组（一组节点 → 指定端口，组内自动选优），持久化并热更新。
@@ -186,6 +200,97 @@ func (a *App) RemoveGroup(name string) error {
 	err := a.persistLocked()
 	a.mu.Unlock()
 	return err
+}
+
+// SetGroupSelected 修改 select 类型分组的手动选中节点，并以「落盘 → 热更新 → 失败回滚」
+// 的顺序提交。选中项持久化到 state-dir/group-selected.json，配置生成时写入 mihomo 的
+// default-selected 字段，因此重启与订阅刷新后仍保持；mihomo 侧选中节点消失时按其原生
+// 语义回退组成员首位。
+//
+// 参数：
+//   - groupName: string，目标分组名；必须是已配置的 select 类型分组。
+//   - nodeName: string，选中节点名；必须在分组当前可用成员中（隧道类节点允许）。
+//
+// 返回值：error，分组不存在/类型不符/节点不在成员中、状态落盘失败或热更新失败时返回。
+//
+// 错误情况：热更新失败时把选中状态文件回滚到修改前内容并尝试恢复运行态，
+// 回滚错误与原始错误一并返回。选中状态不影响配置文件本身，因此不参与配置事务，
+// 只回滚状态文件而不重写 config.yaml。
+func (a *App) SetGroupSelected(groupName, nodeName string) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
+	a.mu.RLock()
+	group := config.NodeGroup{}
+	found := false
+	for _, g := range a.cfg.Groups {
+		if g.Name == groupName {
+			group = g
+			found = true
+			break
+		}
+	}
+	nodes := make([]*node.Node, len(a.nodes))
+	copy(nodes, a.nodes)
+	a.mu.RUnlock()
+
+	if !found {
+		return fmt.Errorf("分组 %q 不存在", groupName)
+	}
+	groupType := group.Type
+	if groupType == "" {
+		groupType = config.GroupTypeURLTest
+	}
+	if groupType != config.GroupTypeSelect {
+		return fmt.Errorf("分组 %q 类型为 %s，仅 select 分组支持手动选中", groupName, groupType)
+	}
+	if !groupMemberAlive(group, nodes, nodeName) {
+		return fmt.Errorf("节点 %q 不在分组 %q 当前可用成员中", nodeName, groupName)
+	}
+
+	path := a.groupSelectedPath()
+	old, err := groupstate.Load(path)
+	if err != nil {
+		log.Printf("[groupstate] %v (ignored)", err)
+		old = map[string]string{}
+	}
+	next := make(map[string]string, len(old)+1)
+	for k, v := range old {
+		next[k] = v
+	}
+	next[groupName] = nodeName
+	if err := groupstate.Save(path, next); err != nil {
+		return fmt.Errorf("保存分组选中状态失败: %w", err)
+	}
+	if err := a.regenerateCurrentLocked(); err != nil {
+		joined := fmt.Errorf("分组选中热更新失败: %w", err)
+		if rollbackErr := groupstate.Save(path, old); rollbackErr != nil {
+			joined = errors.Join(joined, fmt.Errorf("恢复旧分组选中状态失败: %w", rollbackErr))
+		}
+		if rollbackErr := a.regenerateCurrentLocked(); rollbackErr != nil {
+			joined = errors.Join(joined, fmt.Errorf("恢复旧分组选中运行态失败: %w", rollbackErr))
+		}
+		return joined
+	}
+	return nil
+}
+
+// groupMemberAlive 判断节点是否在分组当前可用成员中，与 core 生成时的成员交集规则一致。
+func groupMemberAlive(group config.NodeGroup, nodes []*node.Node, name string) bool {
+	for _, n := range nodes {
+		if n == nil || !n.Alive || n.Name != name {
+			continue
+		}
+		if group.Subscription != "" {
+			return n.Subscription == group.Subscription
+		}
+		for _, want := range group.Nodes {
+			if want == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cloneNodeGroups 深复制策略组切片，避免事务内修改 Nodes 或 Subscription 时污染旧快照。

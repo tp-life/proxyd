@@ -47,7 +47,7 @@ func (s Subscription) PortMappingEnabled() bool {
 type NodeGroup struct {
 	Name         string   `yaml:"name" json:"name"`
 	Port         int      `yaml:"port" json:"port"`
-	Type         string   `yaml:"type,omitempty" json:"type,omitempty"`                 // url-test|fallback|load-balance；空值迁移为 url-test
+	Type         string   `yaml:"type,omitempty" json:"type,omitempty"`                 // url-test|fallback|load-balance|select；空值迁移为 url-test
 	Subscription string   `yaml:"subscription,omitempty" json:"subscription,omitempty"` // 非空时成员跟随该订阅当前可用节点
 	Nodes        []string `yaml:"nodes,omitempty" json:"nodes,omitempty"`               // 节点名列表；与当前可用节点取交集
 }
@@ -198,6 +198,9 @@ const (
 	GroupTypeFallback = "fallback"
 	// GroupTypeLoadBalance 是 mihomo 的负载均衡分组类型。
 	GroupTypeLoadBalance = "load-balance"
+	// GroupTypeSelect 是手动选择出口的 mihomo 分组类型；选中项由 proxyd 持久化到
+	// state-dir/group-selected.json，生成配置时写入 mihomo 的 default-selected。
+	GroupTypeSelect = "select"
 )
 
 // DefaultGeoXUrl 是默认的 geo 数据下载地址：Loyalsoldier 规则仓库（主流数据源），
@@ -254,9 +257,9 @@ func (c *Config) checkGroup(g NodeGroup) error {
 		g.Type = GroupTypeURLTest
 	}
 	switch g.Type {
-	case GroupTypeURLTest, GroupTypeFallback, GroupTypeLoadBalance:
+	case GroupTypeURLTest, GroupTypeFallback, GroupTypeLoadBalance, GroupTypeSelect:
 	default:
-		return fmt.Errorf("分组类型 %q 无效（url-test|fallback|load-balance）", g.Type)
+		return fmt.Errorf("分组类型 %q 无效（url-test|fallback|load-balance|select）", g.Type)
 	}
 	if g.Subscription == "" && len(g.Nodes) == 0 {
 		return fmt.Errorf("分组 %q 必须配置 nodes 或 subscription", g.Name)

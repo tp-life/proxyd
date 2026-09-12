@@ -1095,6 +1095,15 @@
     @apply mt-5 grid gap-4;
   }
 
+  .dialog-error {
+    @apply m-0 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive;
+  }
+
+  /* VPN 节点表单内的两列并排（端口/协议、用户名/密码）。 */
+  .vpn-field-row {
+    @apply grid grid-cols-2 items-end gap-3;
+  }
+
   /*
    * 订阅页标题区域带有底部分隔线；如果卡片紧贴分隔线，标题和内容会被视觉上
    * 压缩成同一层。这里统一增加顶部外边距，既保持与系统设置首行相同的呼吸感，
@@ -2290,6 +2299,27 @@
 
   .group-node-empty {
     @apply py-1 text-xs text-muted-foreground;
+  }
+
+  /* select 分组的出口切换器：跟随在状态徽标之后，宽度受限避免挤压删除按钮。 */
+  .group-select {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
+  .group-select-label {
+    @apply shrink-0 text-xs text-muted-foreground;
+  }
+
+  .group-select .radix-select {
+    @apply w-48 min-w-0;
+  }
+
+  .group-select-trigger > span:first-child {
+    @apply truncate;
+  }
+
+  .group-node-selected {
+    @apply shrink-0 rounded border border-primary/40 bg-primary/10 px-1.5 py-px text-[11px] text-primary;
   }
 
   .group-node-remove {

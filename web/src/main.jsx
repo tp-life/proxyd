@@ -52,6 +52,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { useConnectionsFeed } from "@/hooks/useConnectionsFeed";
 import { useDesktopFeed } from "@/hooks/useDesktopFeed";
 import { useRemoteFeed } from "@/hooks/useRemoteFeed";
+import { useGatewayFeed } from "@/hooks/useGatewayFeed";
 import { useToast } from "@/hooks/useToast";
 import { useTrafficStream } from "@/hooks/useTrafficStream";
 import { ConnectionsPage } from "@/pages/ConnectionsPage";
@@ -119,6 +120,8 @@ function loadDesktopPage() {
 
 // Remote 与 Desktop 页面分别懒加载；Remote 内更大的 xterm 运行时继续保持第二级懒加载。
 const RemotePage = lazy(loadRemotePage);
+/** 网关页面按需加载；回调无参数，返回模块 Promise，加载错误由 React 页面边界接管。 */
+const GatewayPage = lazy(() => import("@/pages/GatewayPage").then((module) => ({ default: module.GatewayPage })));
 /** 系统任务页面按需加载；回调无参数，返回模块 Promise，加载错误由 React 页面边界接管。 */
 const ConfigHistoryPage = lazy(() => import("@/pages/ConfigHistoryPage").then((module) => ({ default: module.ConfigHistoryPage })));
 const DiagnosticsPage = lazy(() => import("@/pages/DiagnosticsPage").then((module) => ({ default: module.DiagnosticsPage })));
@@ -410,6 +413,8 @@ function App() {
    * 接口失败时由 hook 内部承接到错误条带；调用方无需额外捕获。
    */
   const remote = useRemoteFeed(activeView, requestConfirmation, showToast);
+  /** useGatewayFeed 接入网关页的状态/预检/设备表管理；参数为激活标记与全局提示回调；返回网关页所需状态与操作。 */
+  const gateway = useGatewayFeed(activeView === "gateway", requestConfirmation, showToast);
   /** retryModule 重试已启用模块；参数 module 为状态对象；返回 Promise<void>，失败由 postJSON 提示并刷新状态。 */
   async function retryModule(module) {
     if (moduleBusy) return;
@@ -960,6 +965,11 @@ function App() {
             {isRemoteView(activeView) && (
               <Suspense fallback={<EmptyState title="正在加载远程连接页面" detail="首次进入时按需加载远程管理与终端入口。" />}>
                 <RemotePage view={activeView} {...remote} onOpenTerminal={openTerminal} />
+              </Suspense>
+            )}
+            {activeView === "gateway" && (
+              <Suspense fallback={<EmptyState title="正在加载网关页面" detail="首次进入时按需加载网关状态与设备管理入口。" />}>
+                <GatewayPage {...gateway} />
               </Suspense>
             )}
             {activeView === "desktop" && (

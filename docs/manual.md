@@ -49,6 +49,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 - `http://[user:pass@]host:port[#名称]` / `https://...`（mihomo http 出站，https 自动启用 TLS）
 - `socks5://[user:pass@]host:port[#名称]`
 - 全部分享链接格式：ss / ssr / vmess / vless / trojan / hy2 / tuic（节点名取 `#fragment`）
+- 结构化隧道类（VPN）出站映射：`tailscale` / `openvpn` / `zerotier` / `wireguard` / `ssh`（无分享链接标准，以映射形式录入；tailscale 必填 `auth-key`，openvpn 必填 `server`/`port`/`ca`，其余字段透传 mihomo）。这类节点不参与逐节点端口映射，经分组端口使用，详见「六、规则与代理模式 → 隧道类（VPN）出站」
 
 **去重与过滤**：
 
@@ -70,6 +71,8 @@ make deps       # 首次直接运行 go build/test 前准备 mihomo 依赖
 ```
 
 构建需要 Go、Git 和 `patch`（Windows 可在安装这些工具后的 Git Bash 中执行）。`make build/test/vet/release` 自动运行 `make deps`：按 `go.mod` 的固定版本下载 mihomo，在项目内应用 `patches/mihomo-concurrency.patch`，保留日志级别原子访问和入站认证策略同步修复。`third_party` 是可重新生成的源码目录，已加入 Git 忽略；不会修改 Go 模块缓存。首次准备需要访问模块下载源，后续优先使用缓存；升级版本时需要检查补丁兼容性。原始源码及许可证来自 [mihomo v1.19.30](https://github.com/MetaCubeX/mihomo/tree/v1.19.30)，补丁对应的许可证保存在 `patches/LICENSE.mihomo`。
+
+全部构建与测试统一带 `-tags with_gvisor`（ADR 0002）：该标签解锁 mihomo 的 tailscale 出站与 TUN 的 gvisor/mixed 协议栈，且通过一个 `replace` + `patches/metacubex-tailscale-varz.patch` 解决 mihomo 专用 tailscale 分支与 tailcat 依赖的 expvar 重复注册。绕过 Makefile 直接运行 `go build/test` 时请自带该标签，否则 tailscale 节点会被编译为不可用的 stub，且直接 `go build` 可能因缺少 `third_party/metacubex-tailscale` 而失败（先 `make deps`）。
 
 从干净检出或源码发布包直接运行 Go 命令时，先执行 `make deps`，再执行 `go build ./...`、`go test ./...`。仓库中的 `docs` 仅跟踪本手册，其余设计和排障文档保留在本地。
 
@@ -135,13 +138,15 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd subs list\|add <名> <url>\|del <名>` | 订阅管理（list 含状态列：正常/部分可用/全部失效/无节点/已禁用） |
 | `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] [--mapping on\|off] <名>` | 修改订阅；未给出的字段保持原值；`--mapping` 是该订阅的端口映射开关（只控制其节点的一对一监听） |
 | `proxyd subs refresh <名>` / `proxyd subs test <名>` | 只刷新 / 只测速单个订阅（同步执行，失败原因直接返回） |
-| `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因 |
+| `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因；隧道类（VPN）节点带 `vpn` 标记且无端口映射 |
 | `proxyd nodes add <url> [名称]` | 添加手动节点（http(s)/socks5/分享链接） |
+| `proxyd nodes add --proxy '<出站JSON>' [名称]` | 添加隧道类（VPN）手动节点：`<出站JSON>` 是 mihomo 出站映射，type 限 `tailscale\|openvpn\|zerotier\|wireguard\|ssh`（tailscale 必填 auth-key，openvpn 必填 server/port/ca） |
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
 | `proxyd rules list\|add "<规则>"\|set <下标> "<规则>"\|move <从> <到>\|del <下标>` | 自定义规则的增改删与优先级调整 |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
-| `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组 |
+| `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组（list 含类型与 select 组的当前选中项；type 支持 `url-test\|fallback\|load-balance\|select`） |
 | `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
+| `proxyd groups select <组名> <节点名>` | 选择 select 分组的手动出口节点（持久化到 state-dir，重启/刷新后保持） |
 | `proxyd logs [--tail N] [--level debug\|info\|warning\|error]` | 查看运行中实例的内存日志尾部 |
 | `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听。单个订阅可用 `subs set --mapping on\|off` 单独开关（只影响该订阅节点） |
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
@@ -231,7 +236,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因）、自定义规则、节点分组、TUN 权限、系统代理与开机自启状态 |
+| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因；隧道类节点带 `tunnel: true` 且 port 恒为 0）、自定义规则、节点分组（含 type 与 select 组的 selected）、TUN 权限、系统代理与开机自启状态 |
 | `GET /api/traffic` | 代理 mihomo `/traffic` 流，返回 NDJSON 实时速率；后端自动附加 `secret` 鉴权 |
 | `GET /api/connections` | 代理 mihomo `/connections` 快照，返回活动连接、累计上下行和内存占用；后端自动附加 `secret` 鉴权 |
 | `DELETE /api/connections/{id}` | 关闭指定活动连接；连接 ID 作为单个安全路径段转发 |
@@ -244,8 +249,9 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `DELETE /api/subscriptions/{name}` | 删除订阅 |
 | `POST /api/subscriptions/{name}/refresh` | 只刷新该订阅：重新拉取 + 只检测其节点 + 热更新（同步，最长 3 分钟，失败直接返回原因） |
 | `POST /api/subscriptions/{name}/test` | 只对该订阅的现有节点测速（同步，不拉订阅） |
-| `GET /api/manual-nodes` | 列出手动节点（index/url/解析出的名称） |
+| `GET /api/manual-nodes` | 列出手动节点（index/url 或结构化映射 type + 已打码的 proxy/解析出的名称） |
 | `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台刷新） |
+| `POST /api/manual-nodes` `{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"..."},"name":"可选覆盖"}` | 添加结构化隧道类（VPN）手动节点；type 限 `tailscale/openvpn/zerotier/wireguard/ssh`，与 `url` 二选一，其余字段透传 mihomo |
 | `DELETE /api/manual-nodes/{index}` | 按下标删除手动节点 |
 | `POST /api/port-mapping` `{"enabled":false}` | 热开关逐节点端口映射；关闭时保留稳定分配，核心不再生成对应 listener |
 | `POST /api/port-range` `{"range":"43000-43200"}` | 修改节点映射端口区间（同步：重新分配端口 + 热更新，不重新测速） |
@@ -272,11 +278,12 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/rule-urls` `{"name":"gfwlist","url":"https://..."}` | 新增规则源（持久化 + 立即拉取 + 热更新） |
 | `DELETE /api/rule-urls/{name}` | 删除规则源 |
 | `GET /api/rule-urls/{name}/content` | 规则源可读文本（text/plain；整体 Base64 gfwlist 自动解码；优先缓存，无缓存现场拉取一次并写缓存；源不存在/拉取失败返回 404） |
-| `GET /api/groups` | 列出节点分组 |
+| `GET /api/groups` | 列出节点分组（含归一化后的 `type`；select 分组附带 `selected` 当前选中节点） |
 | `GET /api/logs?tail=200&level=error` | 返回内存日志尾部；`level` 可选 `debug/info/warning/error` |
-| `POST /api/groups` `{"name":"hk","port":43000,"type":"fallback","subscription":"airport-a"}` | 新增节点分组；`type` 支持 `url-test/fallback/load-balance`，成员可来自 `nodes` 或 `subscription` |
+| `POST /api/groups` `{"name":"hk","port":43000,"type":"fallback","subscription":"airport-a"}` | 新增节点分组；`type` 支持 `url-test/fallback/load-balance/select`，成员可来自 `nodes` 或 `subscription` |
 | `PUT /api/groups/{name}` | 编辑分组端口、类型与成员来源；为保护 `dialer-proxy` 引用，暂不支持在线改名 |
 | `DELETE /api/groups/{name}` | 删除节点分组 |
+| `POST /api/groups/{name}/select` `{"node":"节点名"}` | 选择 select 分组的手动出口节点；节点须为该组当前可用成员，选中项持久化到 state-dir 并热更新，失败整体回滚 |
 | `GET /api/desktop` | 返回 RDP/VNC 本机监听与隧道开放状态、已保存连接和当前临时会话；不返回 token 或密码 |
 | `POST /api/desktop/services/{rdp\|vnc}` | 原子更新协议实际服务端口及其 `remote.serve` 开放状态，失败时同时回滚桌面配置和 remote 运行态 |
 | `POST /api/desktop/connections` / `PUT` / `DELETE` | 新增、更新或删除不含密码的桌面连接档案；远端字段引用 `remote.remotes` 名称 |
@@ -354,13 +361,13 @@ tun:
 
 合并顺序：custom-rules 最前 → 规则 URL 导入规则 → 内置规则。全部来源合并去重后上限 10000 条，超出截断打日志。
 
-**节点分组端口**（`groups`）：把若干节点聚合成一个 mihomo proxy-group 并绑定到指定端口，该端口固定走该组；`type` 可选 `url-test`（自动测速择优）、`fallback`（按顺序故障转移）、`load-balance`（负载均衡）。旧配置没有 `type` 时默认迁移为 `url-test`，新 UI 默认推荐 `fallback`：
+**节点分组端口**（`groups`）：把若干节点聚合成一个 mihomo proxy-group 并绑定到指定端口，该端口固定走该组；`type` 可选 `url-test`（自动测速择优）、`fallback`（按顺序故障转移）、`load-balance`（负载均衡）、`select`（手动选择出口）。旧配置没有 `type` 时默认迁移为 `url-test`，新 UI 默认推荐 `fallback`：
 
 ```yaml
 groups:
   - name: hk                # 组名（不能与节点名或 AUTO/PROXY/DIRECT 等保留名冲突）
     port: 43000             # 不能与主端口、api 端口、port-range 区间、auto-port 或其他分组冲突
-    type: fallback          # url-test | fallback | load-balance；旧配置缺省为 url-test
+    type: fallback          # url-test | fallback | load-balance | select；旧配置缺省为 url-test
     nodes: ["香港 01", "香港 02"]  # 节点名列表，与当前可用节点取交集
 
   - name: airport-a-auto
@@ -370,6 +377,39 @@ groups:
 ```
 
 成员来源二选一：配置 `nodes` 时取节点名与当前可用节点的交集；配置 `subscription` 时取该订阅当前可用节点，`manual` 表示手动节点来源。刷新后节点集合变化时分组自动收缩，成员为空则该组本轮跳过（日志有提示）。分组与按节点映射端口完全并存、互不影响。
+
+`select` 类型的分组由用户手动指定出口节点：`POST /api/groups/{name}/select`（`{"node":"节点名"}`）或 `proxyd groups select <组名> <节点名>`；节点须为该组当前可用成员。选中项持久化在 `state-dir/group-selected.json`，生成配置时写入 mihomo 的 `default-selected` 字段，因此重启与订阅刷新后仍保持；选中节点消失时 mihomo 按原生语义回退到组成员首位。分组列表接口与 overview 的 `groups` 条目用 `selected` 字段返回当前选中项。
+
+**隧道类（VPN）出站**：mihomo 内置的整网隧道出站——`tailscale`（tsnet）、`openvpn`、`zerotier`、`wireguard`、`ssh`——与普通代理节点行为差异很大（无常规 server:port 五元组、首次拨号慢、延迟天然偏高），因此 proxyd 对它们**单独归类**（ADR 0002）：
+
+- **不参与逐节点端口映射**：不占用 `port-range` 区间，overview/节点列表中带 `tunnel: true` 标识且 `port` 恒为 0；使用方式是配置一个分组（`subscription: manual` 或 `nodes: [...]`），把应用指向该分组绑定的固定端口。
+- **故障断流（kill switch）**：组内无可用成员时该分组本轮不生成监听端口，连接直接被拒，**不会**回退到 DIRECT 或规则模式——VPN 出口失效时不会明文漏流。
+- **测速放宽**：隧道节点健康检测超时为 `health-timeout` 的 3 倍（tsnet 首次需 DERP 协商）。
+- **main-node 不禁止引用** VPN 节点（高级用户兼容路径），但主端口常被系统代理指向，误选会把整机流量送进隧道，默认请走分组。
+- **录入方式**：tailscale/openvpn 没有分享链接标准，用手动节点的结构化映射录入——Web 表单、`proxyd nodes add --proxy '<出站JSON>'`、API 的 `POST /api/manual-nodes`（`proxy` 字段）或直接在 `manual-nodes` 里写 YAML 映射；Clash YAML 订阅里的同类出站同样按隧道归类。tailscale 必填 `auth-key`（可选 `control-url`/`hostname`）；openvpn 必填 `server`/`port` 与 `ca` 证书材料；其余 mihomo 字段原样透传。
+- **tailscale 状态目录固定**：tsnet 出站的 `state-dir` 由 proxyd 统一改写为 `state-dir/tsnet/<安全节点名>-<身份哈希>/`，按节点隔离，防止重启后重新认证与节点身份漂移；若节点映射里显式设置了 `state-dir`，以用户值为准并打警告日志。
+- **凭据打码**：`auth-key`、私钥、证书材料等纳入与 remote 模块相同的打码清单——节点/手动节点列表、状态接口与默认配置导出中显示为 `***`，完整值只经完整备份导出返回。
+
+```yaml
+manual-nodes:
+  - name: ts-exit
+    type: tailscale
+    auth-key: tskey-auth-...        # 也可配 control-url（自建 headscale）与 hostname
+
+groups:
+  - name: vpn-exit
+    port: 43002                     # 应用指向 127.0.0.1:43002 即走选中的 VPN 出口
+    type: select                    # url-test/fallback 也可用于组内容灾
+    subscription: manual
+```
+
+```sh
+proxyd nodes add --proxy '{"name":"ts-exit","type":"tailscale","auth-key":"tskey-auth-..."}'
+proxyd groups add --type select --subscription manual vpn-exit 43002
+proxyd groups select vpn-exit ts-exit
+```
+
+> 注意区分「远程连接」（第十章）：那是 tailcat 的**入方向**管理隧道（SSH/SCP/RDP），与本节 mihomo 的**出方向** VPN 出口互不相关，两者共存且不使用对方的网络栈。
 
 **链式代理**（订阅 Clash YAML 节点的 `dialer-proxy`）：proxyd 保留节点映射中的 mihomo 标准字段，可让一个代理节点通过另一个节点或 proxyd 策略组建立连接。订阅合并发生同名重命名时会同步修正同订阅内的引用；被引用的健康节点即使因端口范围容量限制没有独立本地入口，也会作为 proxy-only 出站进入 mihomo 配置。
 
@@ -416,7 +456,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 |---|---|---|---|
 | 订阅刷新 | 1 天 | `refresh-interval` | 重新拉取所有订阅与规则源（rule-urls）→ 测速（可访问性检测）→ 重新分配端口 → 热更新核心 |
 | 健康检测 | 5 分钟 | `health-interval` | 复用现有节点列表测速 → 死节点下端口、恢复的节点补位 → 热更新核心 |
-| 单次检测超时 | 5 秒 | `health-timeout` | 经节点出口对 `health-url` 发 HTTP 探测 |
+| 单次检测超时 | 5 秒 | `health-timeout` | 经节点出口对 `health-url` 发 HTTP 探测；隧道类（VPN）节点放宽为 3 倍 |
 | 探测地址 | gstatic 204（HTTPS） | `health-url` | 可换，建议保持 HTTPS（如 `https://cp.cloudflare.com/generate_204`）；HTTP 地址易被机场劫持，导致重复 HEAD 探测失败 |
 
 **端口映射稳定性**：映射快照持久化在 `state-dir/mapping.json`——同一节点在刷新/重启后尽量保持原端口；新节点按延迟从低到高填空闲端口；可用节点多于端口容量时按延迟截断（日志会提示）。
@@ -434,7 +474,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 内容 | 字段 |
 |---|---|
 | 订阅列表 | `subscriptions` |
-| 手动节点（自有代理 URL/分享链接） | `manual-nodes` |
+| 手动节点（自有代理 URL/分享链接/结构化 VPN 出站映射） | `manual-nodes` |
 | 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `main-auto` / `main-node` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
 | 系统代理开关、节点正则过滤、周期等 | `system-proxy` / `include` / `exclude` / `refresh-interval` / ... |
@@ -447,6 +487,8 @@ dns:              # 可选，mihomo dns 配置原样透传
 |---|---|
 | `nodes.json` | 最近一次合并后的节点快照（完整 proxy 配置 + 来源 + 测速结果），启动时立即恢复 |
 | `mapping.json` | 节点 → 端口的稳定映射快照 |
+| `group-selected.json` | select 分组的持久化选中项（分组名 → 节点名） |
+| `tsnet/<节点>-<哈希>/` | tailscale 出站按节点隔离的 tsnet 状态目录（配置历史不备份这些文件） |
 | `cache/<订阅名>.cache` | 各订阅的原始响应缓存（拉取失败时降级用） |
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
 | `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
@@ -466,6 +508,9 @@ subscriptions:            # 订阅列表，CLI/Web 添加的会自动写在这�
     type: auto            # auto | clash | share
 manual-nodes:             # 手动节点（自有代理），CLI/Web 添加的也会写在这里
   - socks5://user:pass@1.2.3.4:1080#我的节点
+  - name: ts-exit         # 结构化隧道类（VPN）出站：tailscale/openvpn/zerotier/wireguard/ssh
+    type: tailscale       # 不占端口映射，经分组端口使用；auth-key 等凭据在导出/列表中打码
+    auth-key: tskey-auth-...
 
 listen: 127.0.0.1         # 映射端口监听地址；改成 0.0.0.0 可共享给局域网
 port-range: [42000, 42100]
@@ -489,7 +534,7 @@ custom-rules:               # 可选，追加式自定义规则，前置到 rule
 rule-urls:                  # 可选，远程规则源（mihomo 文本 / gfwlist），内容不写回配置
   - name: gfwlist
     url: https://...
-groups:                     # 可选，节点分组端口（支持 url-test/fallback/load-balance）
+groups:                     # 可选，节点分组端口（支持 url-test/fallback/load-balance/select）
   - name: hk
     port: 43000
     type: fallback
@@ -498,6 +543,10 @@ groups:                     # 可选，节点分组端口（支持 url-test/fall
     port: 43001
     type: url-test
     subscription: airport-a
+  - name: vpn-exit          # select 手动选择出口：proxyd groups select vpn-exit <节点名>，
+    port: 43002             # 选中项持久化在 state-dir/group-selected.json
+    type: select
+    subscription: manual
 external-controller: 127.0.0.1:19090   # mihomo API
 api-listen: 127.0.0.1:19091            # Web 控制台
 # api-secret: ...        # proxyd 管理面 HTTP Basic 口令（用户名 proxyd）；
@@ -719,7 +768,47 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 - 公共 DERP 中继限速，大流量场景（如长时间文件传输）建议自建 derper。
 - 文件传输通过 `proxyd scp`（包装系统 scp 走隧道）完成，不提供独立的文件传输子协议；不含 tailcat cp/recv、SOCKS 与 exit-node。
 
-## 十一、常见问题
+## 十一、LAN 网关（旁路由）
+
+把运行 proxyd 的主机变成局域网设备的网关：设备把「网关/路由器」（和 DNS）改指本机后，其流量经本机 mihomo 分流，与控制台规则/分组共用同一出口体系。定位是**旁路由**：不接管 DHCP，设备指向错误只影响该设备本身，不会拖垮全家网络。
+
+### 平台矩阵与特权模型
+
+| 平台 | 执行层 | 特权要求 |
+|---|---|---|
+| macOS | pf anchor：下游 TCP `rdr` 到 mihomo `redir-port` | root 特权 helper（launchd 常驻，unix socket 白名单指令，主进程永远普通用户） |
+| Linux | nftables redirect（TCP）/ tproxy（UDP） | setcap 能力位：`cap_net_admin,cap_net_raw,cap_net_bind_service` |
+| Windows | 不支持 | — |
+
+数据面**不依赖 TUN**（ADR 0003 勘误）：redir/tproxy 入口与设备规则都写进 mihomo 配置，设备级分流用 `SRC-IP-CIDR` 规则前置于 custom-rules。启用网关要求代理模块已启用；禁用代理会先自动停用网关（联动持久化）。
+
+### 启用步骤
+
+1. 启用前检查：`proxyd gateway precheck`（或 Web「网关」页预检卡）。
+   - macOS 未就绪时安装 helper：`sudo proxyd gateway helper install`（launchd 系统域常驻；`proxyd gateway helper status|uninstall` 查看/卸载）。helper 只接受 pf 应用/清除与转发开关的白名单指令，不读业务配置、不连网。
+   - Linux 未就绪时按指引执行：`sudo setcap 'cap_net_admin,cap_net_raw,cap_net_bind_service=+ep' <proxyd 二进制路径>` 后重启 proxyd（每次替换二进制需重设，与 TUN 同一条指引）。
+2. 启用模块：Web「网关」页开关，或 `proxyd modules gateway on`。
+3. 登记设备：Web 页「登记设备」，或 `proxyd gateway devices add <名> <ip> [direct|proxy|group:<分组名>]`（策略缺省为 proxy）。设备表为空时网关不生效（零值配置不触碰系统）。
+4. 在下游设备上把网关改指本机局域网 IP；开启 `dns-redirect` 时 DNS 也改指本机。
+
+### DNS 劫持
+
+`gateway.dns-redirect: true`（默认开）时，pf/nftables 把下游 53 端口 redirect 到 mihomo dns 的非特权监听 `0.0.0.0:1053`（helper 白名单不含绑端口操作，53 属特权端口，故监听落在 1053）。用户手写 `dns:` 段已有 `listen` 时不覆盖并打日志，请自行确认其与 redirect 目标一致。
+
+### 已知限制
+
+- **macOS UDP**：阶段一仅支持 DNS 劫持 + 直连（macOS 无 tproxy），QUIC/DoH 行为可能与直连不同；需要完整 UDP 分流请使用 Linux（tproxy）。
+- **看门狗**：主进程失联超过 90 秒（心跳间隔 30 秒），helper 自动清除 pf 规则并恢复 IPv4 转发原值，下游设备回退直连，避免主进程崩溃后下游断网。
+- **pf 主规则集**：macOS 载入方式是在 /etc/pf.conf 基础上追加本模块 anchor 引用后 `pfctl -f` 整体载入（子 anchor 的 rdr 必须被主规则集引用才生效，与 ClashX 增强模式同）；其他软件写在 pf 主层的规则会被替换，`com.apple/*` anchors 不受影响。卸载（`proxyd gateway helper uninstall`）会清 anchor、恢复转发并删除全部文件。
+
+### 故障排查
+
+- Web「网关」页状态卡/预检卡，或 `proxyd gateway status` / `proxyd gateway precheck`。
+- 诊断中心（`proxyd diagnose`）含 gateway 步骤：平台支持性、helper 握手与协议版本、转发开关实际值、规则应用、redir 入口监听。
+- macOS helper 日志：`/var/log/com.proxyd.gateway-helper.log`；握手报版本不兼容时重新 `sudo proxyd gateway helper install`。
+- Linux 报权限不足：确认 setcap 能力位是否在最近一次替换二进制后重设。
+
+## 十二、常见问题
 
 - **启动后没有映射端口**：看日志——订阅拉取失败会用缓存与 nodes.json 快照；全部节点测速失败检查 `health-url` 是否可达。
 - **geo 下载慢/失败**：已内置镜像，仍失败可在配置 `geox-url` 换源；失败不影响代理本体（自动降级）。
@@ -735,7 +824,7 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 
 ## 管理菜单与功能归属
 
-控制台顶部横向排列「概况、代理、远程访问、系统」，侧栏只显示当前大类的子菜单，命令菜单（⌘K/Ctrl+K）可以按页面名、SSH、公钥等关键词直接跳转。远程访问拆为设备与连接、本机服务、访问授权、端口转发、连接审计和远程桌面；不再将全部功能放进服务端/客户端两个长页签。
+控制台顶部横向排列「概况、代理、网关、远程访问、系统」，侧栏只显示当前大类的子菜单，命令菜单（⌘K/Ctrl+K）可以按页面名、SSH、公钥等关键词直接跳转。远程访问拆为设备与连接、本机服务、访问授权、端口转发、连接审计和远程桌面；不再将全部功能放进服务端/客户端两个长页签。网关大类随 gateway 模块启用出现，集中承载状态、预检、设备登记表与使用指引。
 
 页面地址如 `#/remote/access` 可直接打开，支持刷新定位及浏览器前进/后退；旧 `#/remote` 入口兼容到设备与连接。后续功能落位规则见 [管理导航规划](management-navigation.md)。
 
@@ -750,7 +839,10 @@ proxyd modules proxy off
 proxyd modules proxy on
 proxyd modules remote off
 proxyd modules remote on
+proxyd modules gateway on
 ```
+
+`gateway` 模块对应 LAN 网关（见「十一、LAN 网关」）：禁用会清除转发规则并停止调和，设备表保留；启用要求代理模块已启用，禁用代理会先自动停用网关。
 
 配置中的 `proxy-disabled: true` 会停止代理入口、TUN、DNS、活动代理连接与周期刷新，撤销已配置的系统代理，保留 `system-proxy` 的恢复偏好。恢复时立即通知后台刷新订阅。纯远程服务可以使用该设置且不配置代理订阅。
 

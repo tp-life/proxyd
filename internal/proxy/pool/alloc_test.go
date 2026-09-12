@@ -138,6 +138,44 @@ func TestAllocate(t *testing.T) {
 	}
 }
 
+// TestAllocateSkipsTunnelNodes 验证隧道类（VPN 语义）节点不参与每节点端口映射：
+// 不占用端口、不参与容量截断计数，普通节点的分配行为不受影响。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：隧道节点获得端口，或其存在导致普通节点被容量截断时测试失败。
+func TestAllocateSkipsTunnelNodes(t *testing.T) {
+	tunnel := &node.Node{
+		Name: "vpn",
+		Mapping: map[string]any{
+			"name": "vpn", "type": "tailscale", "auth-key": "tskey-auth-xxx",
+		},
+		Delay: 1, // 延迟最低也不应挤占端口
+	}
+	a := mkNode("A", 30)
+	b := mkNode("B", 10)
+
+	// 区间只有 2 个端口：若隧道节点参与分配，最慢的 A 会被截断。
+	got := Allocate([]*node.Node{tunnel, a, b}, 101, 102, nil)
+	if len(got) != 2 {
+		t.Fatalf("隧道节点不应计入端口分配: %+v", got)
+	}
+	for _, as := range got {
+		if as.Node.Name == "vpn" {
+			t.Fatalf("隧道节点不应获得端口: %+v", as)
+		}
+	}
+	want := map[string]int{"B": 101, "A": 102}
+	for _, as := range got {
+		if as.Port != want[as.Node.Name] {
+			t.Errorf("节点 %s 端口 = %d, 期望 %d", as.Node.Name, as.Port, want[as.Node.Name])
+		}
+	}
+}
+
 func TestSnapshotRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mapping.json")

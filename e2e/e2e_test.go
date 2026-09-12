@@ -1112,7 +1112,11 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// 已持久化到配置文件
 	saved, _ = config.Load(cfgPath)
-	if len(saved.ManualNodes) != 1 || !strings.Contains(saved.ManualNodes[0], "#mn-http") {
+	mnEntry := ""
+	if len(saved.ManualNodes) == 1 {
+		mnEntry, _ = saved.ManualNodes[0].(string)
+	}
+	if mnEntry == "" || !strings.Contains(mnEntry, "#mn-http") {
 		t.Errorf("manual-nodes 未持久化: %+v", saved.ManualNodes)
 	}
 	// 等待异步刷新把节点纳入池（参与测速与端口分配）
@@ -1177,8 +1181,9 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// ---- CLI 作为本地 API 客户端：编译真实二进制打运行中实例 ----
+	// 与 Makefile/GoReleaser 发布保持一致使用 with_gvisor（ADR 0002），确保发布形态在 e2e 中被覆盖。
 	binPath := filepath.Join(t.TempDir(), "proxyd")
-	if out, err := exec.Command("go", "build", "-o", binPath, "../cmd/proxyd").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-tags", "with_gvisor", "-o", binPath, "../cmd/proxyd").CombinedOutput(); err != nil {
 		t.Fatalf("go build proxyd: %v\n%s", err, out)
 	}
 	runCLI := func(args ...string) (string, error) {
