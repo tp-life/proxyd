@@ -514,7 +514,9 @@ type Config struct {
 	// 使用指针区分旧配置中的“字段缺失”和用户显式关闭，保证升级后默认继续开启。
 	PortMapping *bool `yaml:"port-mapping,omitempty"`
 
-	RefreshInterval Duration `yaml:"refresh-interval"` // subscription refresh period, default 30m
+	// RefreshInterval 仅用于兼容既有配置文件。订阅已改为只允许用户手动同步，
+	// 调度器不会读取该值创建下载定时器；保留字段可避免升级时拒绝旧 YAML。
+	RefreshInterval Duration `yaml:"refresh-interval"`
 	HealthInterval  Duration `yaml:"health-interval"`  // health check period, default 5m
 	HealthURL       string   `yaml:"health-url"`       // default https://www.gstatic.com/generate_204
 	HealthTimeout   Duration `yaml:"health-timeout"`   // default 5s

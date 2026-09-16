@@ -173,9 +173,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
-
-// make deps 下载原版并应用日志和入站认证并发补丁；生成源码不提交。
-replace github.com/metacubex/mihomo => ./third_party/mihomo
-
-// make deps 下载固定版本并应用 varz 去重补丁；生成源码不提交（ADR 0002）。
-replace github.com/metacubex/tailscale => ./third_party/metacubex-tailscale

@@ -7,11 +7,13 @@ proxyd 是多节点端口映射代理工具：Go 守护进程内嵌 mihomo 做�
 
 - `make`（= `make web build`）：先构建前端到 `internal/api/dist`，再编译内嵌它的 `bin/proxyd`。
 - `make build`：仅编译 Go（无 Node 环境用，需 dist 已存在）。
-- `go test -tags with_gvisor ./...`：全量测试（含 e2e，约 40s）；`go vet -tags with_gvisor ./...`。
-  构建/测试/发布统一带 `with_gvisor` 标签（ADR 0002，解锁 tailscale 出站与 TUN gvisor 栈）；
-  直接运行 go 命令前需先 `make deps`（go.mod 的 replace 指向被 git 忽略的 third_party 源码）。
+- `go test -tags "with_gvisor ts_omit_acme" ./...`：全量测试（含 e2e，约 40s）；
+  `go vet -tags "with_gvisor ts_omit_acme" ./...`。
+  构建/测试/发布统一带 `with_gvisor ts_omit_acme` 标签（ADR 0002）：前者解锁 tailscale 出站与
+  TUN gvisor 栈，后者裁剪未使用的 tsnet ACME 入口，避免两套 Tailscale 重复注册全局指标。
 - Web 单独构建：`npm --prefix web run build`。
-- 提交前至少跑 `go build -tags with_gvisor ./... && go test -tags with_gvisor ./...`；动了 `web/src` 必须重新 `make`，dist 产物随仓库提交。
+- 提交前至少跑 `go build -tags "with_gvisor ts_omit_acme" ./... && go test -tags "with_gvisor ts_omit_acme" ./...`；
+  动了 `web/src` 必须重新 `make`，dist 产物随仓库提交。
 
 ## 模块划分（新增功能的落位规则）
 

@@ -186,7 +186,8 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
    *
    * 功能说明：
    * 链接模式提交 `{url, name?}`；VPN 模式提交 `{proxy}`（结构化隧道出站映射），
-   * 两者对应后端 POST /api/manual-nodes 的二选一入口。
+   * 两者对应后端 POST /api/manual-nodes 的二选一入口。保存后后台只重建现有节点，
+   * 不会连带下载任何订阅。
    *
    * 参数说明：
    * - event: React.FormEvent<HTMLFormElement>，表单提交事件。
@@ -217,7 +218,7 @@ export function NodesPage({ busy, forms, initialSource, overview, onDelete, onFo
     }
     setAdding(true);
     try {
-      const saved = await onPost("/api/manual-nodes", body, "节点已添加，后台刷新中");
+      const saved = await onPost("/api/manual-nodes", body, "节点已添加，后台重建现有节点中");
       if (saved) {
         onForm("manualURL", "");
         onForm("manualName", "");

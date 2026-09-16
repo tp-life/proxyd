@@ -12,7 +12,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
   订阅地址 1 ──► │  订阅拉取/解析 ──► 健康检测 ──► 端口分配 ──► 生成 mihomo 配置 ──► 内嵌核心  │
   订阅地址 2 ──► │  (subscribe)      (pool)      (alloc)      (core/gen)         (mihomo) │
                  │                                                  │                     │
-                 │        调度器（app）：定时刷新订阅 + 定时健康检测，变化时热更新核心        │
+                 │       调度器（app）：订阅仅手动同步 + 定时健康检测，变化时热更新核心       │
                  └──────────────────────────────────────────────────┼─────────────────────┘
                                                                     │
         ┌───────────────────────────────────────────────────────────┼──────────┐
@@ -67,14 +67,13 @@ make            # 一次性完整构建：Web → internal/api/dist → bin/prox
 make all        # 与 make 等价，适合显式写入构建脚本或 CI
 make build      # 产出 bin/proxyd（单文件，无外部依赖）
 make web        # 仅重建 Web 控制台 embed 产物（internal/api/dist）
-make deps       # 首次直接运行 go build/test 前准备 mihomo 依赖
 ```
 
-构建需要 Go、Git 和 `patch`（Windows 可在安装这些工具后的 Git Bash 中执行）。`make build/test/vet/release` 自动运行 `make deps`：按 `go.mod` 的固定版本下载 mihomo，在项目内应用 `patches/mihomo-concurrency.patch`，保留日志级别原子访问和入站认证策略同步修复。`third_party` 是可重新生成的源码目录，已加入 Git 忽略；不会修改 Go 模块缓存。首次准备需要访问模块下载源，后续优先使用缓存；升级版本时需要检查补丁兼容性。原始源码及许可证来自 [mihomo v1.19.30](https://github.com/MetaCubeX/mihomo/tree/v1.19.30)，补丁对应的许可证保存在 `patches/LICENSE.mihomo`。
+Go 依赖直接按 `go.mod` 的固定版本从模块源下载，项目不再通过 `replace`、`third_party` 或源码补丁修改 mihomo。mihomo 内部问题由上游负责修复，本项目在上游版本包含修复后通过常规依赖升级获取。
 
-全部构建与测试统一带 `-tags with_gvisor`（ADR 0002）：该标签解锁 mihomo 的 tailscale 出站与 TUN 的 gvisor/mixed 协议栈，且通过一个 `replace` + `patches/metacubex-tailscale-varz.patch` 解决 mihomo 专用 tailscale 分支与 tailcat 依赖的 expvar 重复注册。绕过 Makefile 直接运行 `go build/test` 时请自带该标签，否则 tailscale 节点会被编译为不可用的 stub，且直接 `go build` 可能因缺少 `third_party/metacubex-tailscale` 而失败（先 `make deps`）。
+全部构建与测试统一带 `-tags "with_gvisor ts_omit_acme"`（ADR 0002）：`with_gvisor` 解锁 mihomo 的 tailscale 出站与 TUN gvisor/mixed 协议栈；`ts_omit_acme` 使用 Tailscale 上游提供的构建裁剪 seam，移除本项目未使用的 tsnet ACME 入口，并避免 mihomo 专用 Tailscale 分支与 tailcat 依赖重复注册进程级 expvar。绕过 Makefile 直接运行 `go build/test/vet` 时必须携带同一组标签。
 
-从干净检出或源码发布包直接运行 Go 命令时，先执行 `make deps`，再执行 `go build ./...`、`go test ./...`。仓库中的 `docs` 仅跟踪本手册，其余设计和排障文档保留在本地。
+从干净检出或源码发布包可以直接执行带上述标签的 `go build`、`go test` 和 `go vet`；Go 会按 `go.mod` 与 `go.sum` 下载并校验依赖。仓库中的 `docs` 仅跟踪本手册，其余设计和排障文档保留在本地。
 
 ### 最快启动
 
@@ -82,12 +81,12 @@ make deps       # 首次直接运行 go build/test 前准备 mihomo 依赖
 proxyd serve https://你的订阅地址
 ```
 
-就这一条命令。首次运行会：
+这条命令会启动服务并保存订阅配置，但不会自动访问订阅地址。首次运行请继续：
 
-1. 拉取订阅并解析节点
-2. 对所有节点做健康检测（延迟测试）
-3. 把可用节点映射到默认端口区间 `42000-42100`
-4. 自动生成默认配置并保存到 `~/.config/proxyd/config.yaml`
+1. 打开 Web 控制台并点击“刷新订阅”，或在另一个终端执行 `proxyd refresh`
+2. 手动同步会拉取订阅、解析并检测节点
+3. 可用节点会映射到默认端口区间 `42000-42100`
+4. 配置保存到 `~/.config/proxyd/config.yaml`，节点保存到 `state-dir/nodes.json`
 
 之后**直接 `proxyd serve` 即可**（不带参数），订阅地址已记住。
 
@@ -209,7 +208,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 
 - **概览**：实时上下行速率条 + 状态摘要（主端口/auto-port/节点/映射统计）+ 入口端口 chip（主端口、auto-port、分组端口、节点映射区间）+ 规则 / 全局 / 直连 模式切换 + 系统代理快捷开关；发现新版时显示 GitHub Release 链接
 - **代理节点**：全局搜索并按来源、协议、状态筛选节点；表格展示名称、来源、协议、稳定分配端口、延迟与失败原因，可添加/删除手动节点并设置主端口固定节点
-- **订阅管理**：以卡片管理订阅的新增、编辑、启停、单独刷新与测速；禁用订阅时保留本地缓存，重新启用后可继续刷新
+- **订阅管理**：以卡片管理订阅的新增、编辑、启停、单独同步与测速；新增、编辑和重新启用只保存设置，不访问远端；点击“同步”后直接拉取、检测并热更新，无确认弹窗，完成或失败均显示通知
 - **代理入口**：集中展示主端口、自动选优端口、分组端口与逐节点稳定分配；支持一键复制地址，并独立热开关 `port-mapping`
 - **策略分组**：展示健康摘要、复制分组端口、新增/编辑/删除分组；可选择类型（url-test/fallback/load-balance）并按手选节点或订阅来源配置成员
 - **访问规则**：搜索、新增、编辑、删除和调整自定义规则顺序；规则 URL 保持只读内容视图并可展开查看可读原文（优先缓存，无缓存时现场拉取；整体 Base64 gfwlist 自动解码）
@@ -245,12 +244,17 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/refresh` | 触发一轮完整刷新：拉订阅 + 规则源 + 测速（异步，返回 202） |
 | `POST /api/test` | 手动测速：只对现有节点做延迟/可用性检测，不拉订阅（异步，返回 202） |
 | `POST /api/subscriptions` `{"url":"..."}` | 添加订阅（name 可选，默认按域名命名） |
-| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式、启用状态或订阅级端口映射开关（`port_mapping`）；改名时同步修正引用该订阅的策略分组；未给出的字段保持原值 |
+| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式、启用状态或订阅级端口映射开关（`port_mapping`）；改名时同步修正引用该订阅的策略分组；未给出的字段保持原值；设置保存不下载订阅 |
 | `DELETE /api/subscriptions/{name}` | 删除订阅 |
 | `POST /api/subscriptions/{name}/refresh` | 只刷新该订阅：重新拉取 + 只检测其节点 + 热更新（同步，最长 3 分钟，失败直接返回原因） |
 | `POST /api/subscriptions/{name}/test` | 只对该订阅的现有节点测速（同步，不拉订阅） |
+| 以下 `draft` 接口 | 仅供需要“预览后确认”的程序化客户端选用；当前 Web 控制台手动同步不会调用这些接口，也不会显示确认弹窗 |
+| `POST /api/subscriptions/{name}/draft` | 生成单订阅刷新草稿：拉取 + 检测 + 安全 diff；不修改运行态与缓存，草稿 30 分钟后过期 |
+| `GET /api/subscriptions/{name}/draft` | 读取当前待确认草稿的脱敏差异视图（不返回节点 Mapping、稳定 Key 或订阅正文） |
+| `POST /api/subscriptions/{name}/draft/{id}/apply` | 确认应用草稿；若预览后的节点健康状态、稳定身份、订阅配置或策略组发生变化则返回 409，要求重新生成 |
+| `DELETE /api/subscriptions/{name}/draft/{id}` | 按随机 ID 丢弃草稿；旧页面的 ID 不会误删后来生成的新草稿 |
 | `GET /api/manual-nodes` | 列出手动节点（index/url 或结构化映射 type + 已打码的 proxy/解析出的名称） |
-| `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台刷新） |
+| `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台重建现有节点，不下载订阅） |
 | `POST /api/manual-nodes` `{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"..."},"name":"可选覆盖"}` | 添加结构化隧道类（VPN）手动节点；type 限 `tailscale/openvpn/zerotier/wireguard/ssh`，与 `url` 二选一，其余字段透传 mihomo |
 | `DELETE /api/manual-nodes/{index}` | 按下标删除手动节点 |
 | `POST /api/port-mapping` `{"enabled":false}` | 热开关逐节点端口映射；关闭时保留稳定分配，核心不再生成对应 listener |
@@ -354,7 +358,7 @@ tun:
 
 **自定义规则**（`custom-rules`，Web/API/配置文件均可管理）：追加式，生成 mihomo 配置时**前置到内置 `rules` 之前**——规则匹配按顺序生效，追加在 GEOSITE/GEOIP/MATCH 之后永远不会命中，所以自定义规则必须前置；内置规则原样保留在后面。每条格式 `类型,内容,策略`（至少 3 段），支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR / GEOSITE / GEOIP 等 mihomo 语法，策略可填 DIRECT / REJECT / 节点名 / 分组名；非法规则在 API 层直接报错（含 mihomo 自检失败的原因），不会静默生效。
 
-**规则 URL 导入**（`rule-urls`）：从远程 URL 导入规则（如 gfwlist），跟随订阅刷新一起拉取（`refresh-interval` 周期），内容缓存到 `state-dir/cache/`，**不会写回配置文件**（config 只存 URL）；拉取失败降级用缓存，都没有则跳过该源打日志。原始内容可在 Web 控制台「查看内容」或 `proxyd rule-urls show <名>` 查看（优先读缓存，无缓存时现场拉取一次并写缓存）。按内容自动识别两种格式：
+**规则 URL 导入**（`rule-urls`）：从远程 URL 导入规则（如 gfwlist），仅在用户手动执行全局“刷新订阅”时与订阅一起拉取，内容缓存到 `state-dir/cache/`，**不会写回配置文件**（config 只存 URL）；拉取失败降级用缓存，都没有则跳过该源打日志。原始内容可在 Web 控制台「查看内容」或 `proxyd rule-urls show <名>` 查看（优先读缓存，无缓存时现场拉取一次并写缓存）。按内容自动识别两种格式：
 
 - mihomo 规则文本：每行 `类型,内容,策略`（≥3 段）原样采用，支持 `#`/`//` 注释与空行
 - gfwlist / AutoProxy（base64 编码）：`||domain` → `DOMAIN-SUFFIX,domain,PROXY`；`@@||domain` → `DOMAIN-SUFFIX,domain,DIRECT`；`!` 注释、`[AutoProxy]` 段头、含 `*`/`/` 的复杂条目跳过
@@ -448,13 +452,13 @@ dns:              # 可选，mihomo dns 配置原样透传
   enable: true
 ```
 
-**geo 数据**：GEOSITE/GEOIP 规则需要数据文件，proxyd 默认从 jsDelivr 镜像（Loyalsoldier 规则仓库）自动下载，无需 GitHub 直连。下载失败时自动降级为本轮不含 GEO 规则运行（日志有提示），下一轮刷新自动重试。可用 `geox-url` 配置换成自己的镜像。
+**geo 数据**：GEOSITE/GEOIP 规则需要数据文件，proxyd 默认从 jsDelivr 镜像（Loyalsoldier 规则仓库）自动下载，无需 GitHub 直连。下载失败时自动降级为本轮不含 GEO 规则运行（日志有提示），后续手动同步或其它配置热更新时会再次尝试。可用 `geox-url` 配置换成自己的镜像。
 
 ## 七、刷新与检测机制
 
 | 机制 | 默认周期 | 配置项 | 行为 |
 |---|---|---|---|
-| 订阅刷新 | 1 天 | `refresh-interval` | 重新拉取所有订阅与规则源（rule-urls）→ 测速（可访问性检测）→ 重新分配端口 → 热更新核心 |
+| 订阅与规则源同步 | 仅手动 | Web“刷新订阅”或对应 API/CLI | 明确操作后才重新下载订阅与规则源 → 测速 → 重新分配端口 → 热更新核心；启动和后台定时任务不会下载 |
 | 健康检测 | 5 分钟 | `health-interval` | 复用现有节点列表测速 → 死节点下端口、恢复的节点补位 → 热更新核心 |
 | 单次检测超时 | 5 秒 | `health-timeout` | 经节点出口对 `health-url` 发 HTTP 探测；隧道类（VPN）节点放宽为 3 倍 |
 | 探测地址 | gstatic 204（HTTPS） | `health-url` | 可换，建议保持 HTTPS（如 `https://cp.cloudflare.com/generate_204`）；HTTP 地址易被机场劫持，导致重复 HEAD 探测失败 |
@@ -463,9 +467,11 @@ dns:              # 可选，mihomo dns 配置原样透传
 
 **订阅级端口映射**：除全局 `port-mapping` 总开关外，每个订阅还有自己的映射开关（订阅 YAML 的 `port-mapping` 字段，默认开启；Web 订阅卡片 / `proxyd subs set --mapping on|off` / `PUT /api/subscriptions/{name}` 均可切换）。两者是叠加关系：全局关闭时全部不监听；全局开启而某订阅关闭时，只有该订阅的节点不生成一对一监听。被关闭的节点仍保留稳定端口分配，并继续参与主端口、auto-port 与策略组选路；手动节点没有订阅级开关，只跟随全局开关。
 
-**节点快照（nodes.json）**：每轮刷新后，把合并后的全量节点（完整 proxy 配置、来源订阅、最近测速结果）持久化到 `state-dir/nodes.json`。下次启动时**立即加载该快照生成配置提供服务**，不必等首次订阅刷新完成；随后刷新成功再覆盖。刷新失败/无网时快照保持可用。快照带格式版本号，解析失败或版本不兼容仅打日志丢弃，不影响启动。
+**节点快照（nodes.json）**：每轮手动同步或健康检测后，把合并后的全量节点（完整 proxy 配置、来源订阅、最近测速结果）持久化到 `state-dir/nodes.json`。下次启动时**只加载该快照生成配置提供服务**，不会自动访问订阅地址；用户下一次手动同步成功后再覆盖。快照带格式版本号，解析失败或版本不兼容时记录日志并按空节点启动，不影响控制台使用。
 
-**失败兜底**：订阅拉取失败时自动使用本地缓存（`state-dir/cache/`），网络抖动不会清空节点；全部订阅失败或全部节点死亡时保持现有配置不动，下一轮再试。
+**失败兜底**：手动同步时订阅拉取失败会自动使用本地缓存（`state-dir/cache/`），网络抖动不会清空节点；全部订阅失败或全部节点死亡时保持现有配置不动，等待用户再次手动同步。后台健康检测只检查已有节点，不会触发订阅下载。
+
+**手动同步反馈**：Web 订阅卡片的“同步”会直接下载、解析、测速并应用该订阅，不弹确认框；成功后显示完成通知，失败时显示具体错误。`POST /api/subscriptions/{name}/refresh` 与 `proxyd subs refresh` 具有相同的立即应用语义。全局“刷新订阅”会同步所有启用订阅及规则 URL，接受请求后显示已开始通知；后台不会周期执行该动作。
 
 ## 八、存储布局
 
@@ -477,7 +483,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 手动节点（自有代理 URL/分享链接/结构化 VPN 出站映射） | `manual-nodes` |
 | 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `main-auto` / `main-node` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
-| 系统代理开关、节点正则过滤、周期等 | `system-proxy` / `include` / `exclude` / `refresh-interval` / ... |
+| 系统代理开关、节点正则过滤、健康检测周期等 | `system-proxy` / `include` / `exclude` / `health-interval` / ... |
 | 远程连接（隧道开关、暴露端口、远端与转发） | `remote`（token 属凭据，导出默认打码） |
 | 远程桌面（服务端口与不含密码的连接档案） | `desktop`（开放状态仍以 `remote.serve` 为准） |
 
@@ -520,7 +526,7 @@ mixed-port: 41999         # 主端口（规则模式），Web/CLI 可在线修�
                           # main-auto 开启时被忽略；节点失效自动回退规则模式
 # auto-port: 41998        # 自动选优端口（固定走延迟最低节点），0=关闭
 # system-proxy: false     # serve 启动时把系统代理指向主端口
-refresh-interval: 24h
+refresh-interval: 24h  # 兼容旧配置保留，当前不再驱动自动订阅同步
 health-interval: 5m
 health-url: https://www.gstatic.com/generate_204
 health-timeout: 5s
@@ -782,6 +788,8 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 
 数据面**不依赖 TUN**（ADR 0003 勘误）：redir/tproxy 入口与设备规则都写进 mihomo 配置，设备级分流用 `SRC-IP-CIDR` 规则前置于 custom-rules。启用网关要求代理模块已启用；禁用代理会先自动停用网关（联动持久化）。
 
+Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文使用 proxyd 专用 `fwmark 0x7078/0xffff`，规则优先级为 `12026`，本地路由表为 `20260`。重复应用会精确替换同一条规则，停用/退出时只清理这些专用对象，不会刷新用户的其他策略路由。宿主机需同时提供 `nft` 与 iproute2 的 `ip` 命令；proxyd 会把自身的 `CAP_NET_ADMIN` 以 ambient capability 传给这两个子进程，因此仍只需对 proxyd 二进制执行上面的 `setcap`。
+
 ### 启用步骤
 
 1. 启用前检查：`proxyd gateway precheck`（或 Web「网关」页预检卡）。
@@ -798,6 +806,7 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 ### 已知限制
 
 - **macOS UDP**：阶段一仅支持 DNS 劫持 + 直连（macOS 无 tproxy），QUIC/DoH 行为可能与直连不同；需要完整 UDP 分流请使用 Linux（tproxy）。
+- **Linux 内核能力**：UDP 透明代理要求内核启用 nftables TPROXY 与 policy routing（主流 Linux 4.18+ 通常具备）；缺少 `NFT_TPROXY`、`nft` 或 `ip` 时，启用会失败并在网关状态/诊断中显示具体阶段。开启 DNS 劫持时 UDP/53 走专用 DNS redirect，其余 UDP 才进入通用 TPROXY。
 - **看门狗**：主进程失联超过 90 秒（心跳间隔 30 秒），helper 自动清除 pf 规则并恢复 IPv4 转发原值，下游设备回退直连，避免主进程崩溃后下游断网。
 - **pf 主规则集**：macOS 载入方式是在 /etc/pf.conf 基础上追加本模块 anchor 引用后 `pfctl -f` 整体载入（子 anchor 的 rdr 必须被主规则集引用才生效，与 ClashX 增强模式同）；其他软件写在 pf 主层的规则会被替换，`com.apple/*` anchors 不受影响。卸载（`proxyd gateway helper uninstall`）会清 anchor、恢复转发并删除全部文件。
 
@@ -807,10 +816,11 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 - 诊断中心（`proxyd diagnose`）含 gateway 步骤：平台支持性、helper 握手与协议版本、转发开关实际值、规则应用、redir 入口监听。
 - macOS helper 日志：`/var/log/com.proxyd.gateway-helper.log`；握手报版本不兼容时重新 `sudo proxyd gateway helper install`。
 - Linux 报权限不足：确认 setcap 能力位是否在最近一次替换二进制后重设。
+- Linux UDP 不通：在网关状态中确认 `policy_routing=present`；诊断项 `gateway_policy_route` 会同时检查 fwmark 规则与 lo 本地路由，避免只装好其中一半时误报可用。
 
 ## 十二、常见问题
 
-- **启动后没有映射端口**：看日志——订阅拉取失败会用缓存与 nodes.json 快照；全部节点测速失败检查 `health-url` 是否可达。
+- **启动后没有映射端口**：首次添加订阅后需手动点击“刷新订阅”或执行 `proxyd refresh`；已有快照仍为空时再检查同步错误与 `health-url` 是否可达。
 - **geo 下载慢/失败**：已内置镜像，仍失败可在配置 `geox-url` 换源；失败不影响代理本体（自动降级）。
 - **geo 报 `permission denied`**：多因曾用 `sudo`（如 TUN 授权）或其他用户运行过 proxyd，导致 `state-dir` 或其中 geo 文件属主异常。启动时 proxyd 会自动删除目录可写但不可读的 geo 文件让 mihomo 重新下载；若日志提示目录本身不可写，执行 `sudo chown -R $(id -un):$(id -gn) <state-dir>` 后重启即可。
 - **启动报 pid/配置文件 `permission denied`**：同样是属主异常。终端里运行 `serve`/`start` 时 proxyd 会探测到权限不足并提示是否修复，确认后执行一次 `sudo chown -R`（sudo 会要求输入登录密码）把属主归还给当前用户，然后继续以普通用户运行；非终端环境（如开机自启）则打印可手动执行的 chown 命令。
@@ -844,7 +854,7 @@ proxyd modules gateway on
 
 `gateway` 模块对应 LAN 网关（见「十一、LAN 网关」）：禁用会清除转发规则并停止调和，设备表保留；启用要求代理模块已启用，禁用代理会先自动停用网关。
 
-配置中的 `proxy-disabled: true` 会停止代理入口、TUN、DNS、活动代理连接与周期刷新，撤销已配置的系统代理，保留 `system-proxy` 的恢复偏好。恢复时立即通知后台刷新订阅。纯远程服务可以使用该设置且不配置代理订阅。
+配置中的 `proxy-disabled: true` 会停止代理入口、TUN、DNS、活动代理连接与周期健康检测，撤销已配置的系统代理，保留 `system-proxy` 的恢复偏好。恢复时只检测缓存/手动节点，不会下载订阅。纯远程服务可以使用该设置且不配置代理订阅。
 
 `remote.disabled: true` 会停止隧道服务端、固定/临时转发、远程桌面连接和 Web Terminal；它不会覆盖原有的 `remote.enabled` 服务端开关。因此原来的纯客户端模式仍然可用。独立执行的 `proxyd ssh` / `remote pipe` 进程不由守护进程模块开关控制。
 

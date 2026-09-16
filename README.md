@@ -13,7 +13,7 @@
 - 可用节点自动映射到指定端口区间，映射关系稳定（重启/刷新后同一节点尽量保持原端口）
 - 逐节点端口映射可独立热开关（`port-mapping`）：关闭时保留稳定分配关系，不启动对应监听端口，重新开启后恢复原映射；每个订阅还可单独开关（只停该订阅节点的监听，不影响选路）
 - 节点快照持久化（`state-dir/nodes.json`）：启动即恢复最近一次的可用节点提供服务，断网/订阅挂掉也不丢节点
-- 定时刷新订阅（`refresh-interval`）+ 定时健康检测（`health-interval`），死节点自动下端口、新节点自动补位
+- 订阅仅在用户手动点击同步时下载；后台只按 `health-interval` 检测已有节点，死节点自动下端口、恢复后自动补位
 - 主端口完整支持 Clash 规则与三种代理模式（rule / global / direct），可热切换；可在线修改端口号（`POST /api/main-port` / `proxyd main-port`）
 - 可选「主端口使用最优节点」（`main-auto`）：主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
 - 可选「主端口固定节点」（`main-node`）：不开优选时主端口跳过规则、直达指定节点；节点失效自动回退规则模式，恢复后自动再生效
@@ -71,7 +71,7 @@ proxyd serve https://example.com/api/v1/client/subscribe?token=xxx
 # 自定义区间：proxyd serve -range 43000-43100 <url>
 ```
 
-**订阅地址会自动保存到默认配置文件 `~/.config/proxyd/config.yaml`**，之后直接 `proxyd`（不带任何参数，等价于 `proxyd serve`）即可。也可以在 Web 控制台里随时增删订阅（同样自动落盘）。
+**订阅地址会自动保存到默认配置文件 `~/.config/proxyd/config.yaml`，但不会在启动时自动下载。** 服务启动后请在 Web 控制台点击“刷新订阅”，或在另一个终端执行 `proxyd refresh` / `proxyd subs refresh <名>`。之后直接 `proxyd`（不带任何参数，等价于 `proxyd serve`）会从节点快照恢复；Web 中增删订阅同样自动落盘，但新增后仍需手动同步。
 
 不给端口区间时默认用 `42000-42100`（主端口 `41999`，规则模式入口），内置默认规则（私网/国内直连，其余走代理）。
 
@@ -176,7 +176,7 @@ PORT   NODE              SUBSCRIPTION   DELAY
 - `rules` / `rule-providers` / `dns`：Clash 语义原样透传 mihomo；手写 `dns` 优先于 `dns-preset`
 - `state-dir`：状态目录（快照/缓存/pid/日志/geo 数据），默认 `~/.local/state/proxyd`——见手册「存储布局」
 
-注意：GEOIP/GEOSITE 规则需要 geo 数据文件。proxyd 默认从 jsDelivr 镜像（Loyalsoldier 主流规则仓库）下载，开箱即用；下载失败时会在日志提示并**自动降级为不含 GEO 规则运行**（其余规则照常），下一轮刷新自动重试恢复。也可以在配置里用 `geox-url` 换成自己的镜像：
+注意：GEOIP/GEOSITE 规则需要 geo 数据文件。proxyd 默认从 jsDelivr 镜像（Loyalsoldier 主流规则仓库）下载，开箱即用；下载失败时会在日志提示并**自动降级为不含 GEO 规则运行**（其余规则照常），后续手动同步或配置热更新时会重试恢复。也可以在配置里用 `geox-url` 换成自己的镜像：
 
 ```yaml
 geox-url:
@@ -196,11 +196,12 @@ geox-url:
 ## 开发
 
 ```sh
-make deps         # 首次直接执行 Go 命令前下载并修补 mihomo（需 Git、patch）
-go test ./...     # 单元测试 + 端到端测试（e2e/，本地假节点全流程验证）
+go test -tags "with_gvisor ts_omit_acme" ./... # 单元测试 + 端到端测试（e2e/，本地假节点全流程验证）
 make              # 推荐：先构建 Web，再编译嵌入最新前端资源的 bin/proxyd
 make web          # 构建 React 控制台到 internal/api/dist，供 Go embed 使用
 make build        # 只构建 Go 二进制，使用已生成的前端 dist，不强制依赖 Node
 ```
 
 项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端；`cli.go` 提供共享 apiClient，功能按域拆分）、`internal/config`（配置；含独立 `remote.go`/`desktop.go`）、`internal/proxy`（代理域）、`internal/remote`（tailcat 隧道唯一实现点）、`internal/desktop`（不依赖 tailcat/HTTP 的桌面会话模型与回收规则）、`internal/app`（用例和配置事务编排）、`internal/api`（各垂直模块 REST 路由与 Web embed 产物）、`web`（React 控制台源码；远程连接与远程桌面各自拥有独立 page/hook）、`internal/autostart`（开机自启）。
+
+mihomo 依赖按其 GPL-3.0 许可证使用，许可证副本见 `LICENSES/mihomo-GPL-3.0.txt`；项目直接消费上游 Go Module，不维护修改后的第三方源码。

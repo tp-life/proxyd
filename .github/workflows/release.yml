@@ -66,7 +66,7 @@ jobs:
           fi
 
       - name: 运行 Go 测试
-        # make test 先下载并修补未纳入版本控制的 mihomo 源码。
+        # make test 使用与发布一致的 with_gvisor + ts_omit_acme 构建标签。
         run: make test
 
       - name: 构建并创建 GitHub Release

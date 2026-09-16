@@ -31,6 +31,47 @@ func TestReadLimitedResponseBodyRejectsOverflow(t *testing.T) {
 	}
 }
 
+// TestLoadAndInvalidateCachedSubscription 验证禁止联网的缓存读取可以恢复节点与用量，
+// 并且来源变更后的失效操作会同时阻止旧正文再次被解析。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建隔离缓存目录和报告断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：缓存写入/解析失败、用量丢失、失效后仍能读到旧节点，或缺失错误不能
+// 通过 errors.Is 识别为 os.ErrNotExist 时测试失败。
+func TestLoadAndInvalidateCachedSubscription(t *testing.T) {
+	stateDir := t.TempDir()
+	subscription := config.Subscription{Name: "cached", URL: "https://example.com/sub", Type: "clash"}
+	body := []byte("proxies:\n  - name: cached-node\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n")
+	if err := writeCache(stateDir, subscription.Name, body); err != nil {
+		t.Fatalf("写入订阅正文缓存失败: %v", err)
+	}
+	wantInfo := UserInfo{Upload: 10, Download: 20, Total: 100}
+	if err := writeUserInfoCache(stateDir, subscription.Name, wantInfo); err != nil {
+		t.Fatalf("写入订阅用量缓存失败: %v", err)
+	}
+
+	nodes, info, err := LoadCachedWithInfo(subscription, stateDir)
+	if err != nil {
+		t.Fatalf("读取订阅缓存失败: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "cached-node" {
+		t.Fatalf("缓存节点解析结果异常: %+v", nodes)
+	}
+	if info != wantInfo {
+		t.Fatalf("缓存用量=%+v，期望 %+v", info, wantInfo)
+	}
+
+	if err := InvalidateCache(stateDir, subscription.Name); err != nil {
+		t.Fatalf("失效订阅缓存失败: %v", err)
+	}
+	if _, _, err := LoadCachedWithInfo(subscription, stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("失效后应返回缓存不存在，实际错误=%v", err)
+	}
+}
+
 func TestFetchCacheFallback(t *testing.T) {
 	stateDir := t.TempDir()
 
@@ -103,6 +144,41 @@ func TestFetchWithInfoCachesSubscriptionUserInfo(t *testing.T) {
 	}
 	if info.Upload != 1024 || info.Download != 2048 || info.Total != 4096 || info.Expire != 1893456000 {
 		t.Fatalf("缓存 userinfo 读取异常: %+v", info)
+	}
+}
+
+// TestFetchPreviewDefersCacheUntilCommit 验证刷新预览不会提前改变已确认缓存。
+//
+// 参数：t 为 Go 测试上下文。
+// 返回值：无。
+// 错误情况：预览阶段出现缓存文件、确认后仍无缓存，或缓存内容不是本次正文时测试失败。
+func TestFetchPreviewDefersCacheUntilCommit(t *testing.T) {
+	stateDir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Subscription-Userinfo", "upload=10; total=100")
+		_, _ = w.Write([]byte(clashFixture))
+	}))
+	defer srv.Close()
+	sub := config.Subscription{Name: "待确认", URL: srv.URL, Type: "clash"}
+
+	fetched, err := FetchPreviewWithInfo(context.Background(), sub, stateDir)
+	if err != nil {
+		t.Fatalf("FetchPreviewWithInfo 失败: %v", err)
+	}
+	if len(fetched.Nodes()) != 3 || fetched.Info().Upload != 10 {
+		t.Fatalf("预览解析结果异常: nodes=%d info=%+v", len(fetched.Nodes()), fetched.Info())
+	}
+	if _, err := os.Stat(cachePath(stateDir, sub.Name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("预览阶段不得创建正文缓存: %v", err)
+	}
+	if err := fetched.CommitCache(stateDir, sub.Name); err != nil {
+		t.Fatalf("确认提交缓存失败: %v", err)
+	}
+	if _, err := os.Stat(cachePath(stateDir, sub.Name)); err != nil {
+		t.Fatalf("确认后正文缓存不存在: %v", err)
+	}
+	if info, err := ReadCachedUserInfo(stateDir, sub.Name); err != nil || info.Upload != 10 {
+		t.Fatalf("确认后用量缓存异常: info=%+v err=%v", info, err)
 	}
 }
 
@@ -229,6 +305,47 @@ func TestFetchNoRetryOn4xx(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("4xx 不应重试，实际请求 %d 次", calls)
+	}
+}
+
+// TestFetchWithInfoFallsBackToMainProxy 验证订阅主链路发生网络错误后，会通过显式
+// 注入的本机主端口 HTTP 代理重试，而不是直接退回旧缓存或向用户报告超时。
+//
+// 参数说明：
+//   - t: *testing.T，管理模拟代理服务器和结果断言。
+//
+// 返回值说明：无；代理收到请求并返回的订阅被正常解析时测试通过。
+//
+// 错误情况：直连失败后未访问代理、代理响应未被解析，或用量信息丢失时测试失败。
+func TestFetchWithInfoFallsBackToMainProxy(t *testing.T) {
+	var proxyCalls int
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		proxyCalls++
+		if request.URL.Host != "127.0.0.1:1" {
+			t.Errorf("代理收到的目标主机 = %q，期望 127.0.0.1:1", request.URL.Host)
+		}
+		w.Header().Set("Subscription-Userinfo", "download=2048; total=4096")
+		_, _ = w.Write([]byte(clashFixture))
+	}))
+	defer proxyServer.Close()
+
+	subscription := config.Subscription{
+		Name: "主端口降级",
+		URL:  "http://127.0.0.1:1/subscription",
+		Type: "clash",
+	}
+	nodes, info, err := FetchWithInfoOptions(
+		context.Background(), subscription, t.TempDir(),
+		FetchOptions{FallbackProxyURL: proxyServer.URL},
+	)
+	if err != nil {
+		t.Fatalf("经主端口代理降级后仍失败: %v", err)
+	}
+	if len(nodes) != 3 || info.Download != 2048 || info.Total != 4096 {
+		t.Fatalf("代理响应解析异常: nodes=%d info=%+v", len(nodes), info)
+	}
+	if proxyCalls != 1 {
+		t.Fatalf("主端口代理请求次数 = %d，期望 1", proxyCalls)
 	}
 }
 

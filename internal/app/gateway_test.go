@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"proxyd/internal/config"
+	"proxyd/internal/gateway"
 )
 
 // gatewayTestDevice 返回一台合法的测试设备。
@@ -46,9 +47,26 @@ func TestModulesIncludesGateway(t *testing.T) {
 	}
 }
 
+// TestSetGatewayEnabledOnDarwinDegradedButCommitted 验证 macOS 缺少特权 helper 时，
+// 网关启用请求会提交配置并进入可重试的 degraded 状态，而不是回滚用户意图。
+//
+// 参数说明：
+//   - t: *testing.T，提供临时配置目录、清理回调和断言报告。
+//
+// 返回值说明：无；通过 testing 状态报告成功、跳过或失败。
+//
+// 错误情况：非 macOS 或当前机器已经安装 helper 时跳过；降级相位、安装指引、重试
+// 时间或配置持久化不符合约定时令测试失败。
 func TestSetGatewayEnabledOnDarwinDegradedButCommitted(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("helper 缺失路径的平台相关断言")
+	}
+	// 本用例只验证 helper 缺失时的降级事务；开发机若已经安装 helper，继续执行会把
+	// 测试设备规则下发到真实特权进程，既无法得到预期错误，也破坏测试环境隔离。
+	// Precheck 只完成协议握手、不修改系统状态；helper 可用时由底层 gateway 集成测试
+	// 覆盖正常路径，这里跳过依赖外部安装状态的反向场景。
+	if precheck := gateway.Precheck(); precheck.Ready {
+		t.Skip("gateway helper 已安装，跳过仅适用于 helper 缺失环境的降级断言")
 	}
 	a := newSystemProxyTestApp(t, filepath.Join(t.TempDir(), "config.yaml"))
 	a.cfg.ManualNodes = []any{"http://127.0.0.1:9#local"}

@@ -1012,27 +1012,40 @@ function App() {
   );
 
   /**
-   * triggerSubscriptionAction 执行单个订阅刷新或测速。
+   * triggerSubscriptionAction 执行单个订阅同步或测速。
    *
    * 参数说明：
    * - name: string，订阅名称。
    * - action: string，`refresh` 或 `test`。
    *
    * 返回值说明：
-   * 返回 Promise<void>。
+   * 返回 Promise<object|null>；成功返回后端 JSON，失败返回 null。
    *
    * 可能的异常/错误情况：
    * 订阅不存在、后端超时或网络失败时展示错误。
    */
   async function triggerSubscriptionAction(name, action) {
-    const label = action === "refresh" ? "刷新" : "测速";
+    const encodedName = encodeURIComponent(name);
+    const actions = {
+      refresh: { method: "POST", path: `/api/subscriptions/${encodedName}/refresh`, label: "同步" },
+      test: { method: "POST", path: `/api/subscriptions/${encodedName}/test`, label: "测速" },
+    };
+    const operation = actions[action];
+    if (!operation) {
+      showToast(`${name} 操作失败：未知订阅动作 ${action}`, "err");
+      return null;
+    }
     try {
-      setBusy(`${name} ${label}`);
-      await requestJSON(`/api/subscriptions/${encodeURIComponent(name)}/${action}`, { method: "POST" });
-      showToast(`${name} ${label}完成`);
+      setBusy(`${name} ${operation.label}`);
+      const result = await requestJSON(operation.path, { method: operation.method });
+      // 单订阅接口会等待下载、解析、测速和热更新全部完成，因此这里展示的是完成
+      // 通知而非仅“已开始”；同步过程中不增加确认对话框，保持一次点击即可执行。
+      showToast(`${name} ${operation.label}完成`);
       await load(true);
+      return result || {};
     } catch (error) {
-      showToast(`${name} ${label}失败：${error.message}`, "err");
+      showToast(`${name} ${operation.label}失败：${error.message}`, "err");
+      return null;
     } finally {
       setBusy("");
     }

@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"proxyd/internal/config"
@@ -105,29 +108,35 @@ func TestUpdateSubscriptionDisableAndRenameCommitsAtomically(t *testing.T) {
 	}
 }
 
-// TestUpdateSubscriptionEnableFailureKeepsDisabled 验证启用订阅必须先获得新内容或可用缓存；
-// 拉取与缓存都失败时，订阅保持禁用且配置文件不发生变化。
+// TestUpdateSubscriptionEnableDoesNotFetch 验证启用订阅只提交设置，不访问远端地址；
+// 尚未手动同步时允许启用，但节点集合保持为空。
 //
 // 参数：
-//   - t: *testing.T，Go 测试上下文，用于创建隔离配置并报告断言失败。
+//   - t: *testing.T，Go 测试上下文，用于创建隔离 HTTP 服务、配置和状态目录。
 //
 // 返回值：无。
 //
-// 错误情况：无效 URL 被当作启用成功、内存 enabled 被改为 true，或磁盘配置被覆盖时测试失败。
-func TestUpdateSubscriptionEnableFailureKeepsDisabled(t *testing.T) {
+// 错误情况：编辑期间产生 HTTP 请求、启用状态未持久化，或未同步订阅凭空产生节点时测试失败。
+func TestUpdateSubscriptionEnableDoesNotFetch(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("proxies: []\n"))
+	}))
+	t.Cleanup(server.Close)
+
 	disabled := false
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
 		Subscriptions: []config.Subscription{{
-			Name: "offline", URL: "http://[::1", Type: "auto", Enabled: &disabled,
+			Name: "manual-only", URL: server.URL, Type: "auto", Enabled: &disabled,
 		}},
-		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
-		Listen:      "127.0.0.1",
-		PortRange:   [2]int{42000, 42010},
-		Mode:        "rule",
-		LogLevel:    "silent",
-		StateDir:    t.TempDir(),
-		Rules:       []string{"MATCH,PROXY"},
+		Listen:    "127.0.0.1",
+		PortRange: [2]int{42000, 42010},
+		Mode:      "rule",
+		LogLevel:  "silent",
+		StateDir:  t.TempDir(),
+		Rules:     []string{"MATCH,PROXY"},
 	}
 	if err := cfg.Save(cfgPath); err != nil {
 		t.Fatalf("保存初始配置失败: %v", err)
@@ -136,21 +145,67 @@ func TestUpdateSubscriptionEnableFailureKeepsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建应用失败: %v", err)
 	}
+	t.Cleanup(a.Shutdown)
 	enabled := true
-	_, err = a.UpdateSubscription(context.Background(), "offline", config.Subscription{
-		Name: "offline", URL: "http://[::1", Type: "auto", Enabled: &enabled,
+	_, err = a.UpdateSubscription(context.Background(), "manual-only", config.Subscription{
+		Name: "manual-only", URL: server.URL, Type: "auto", Enabled: &enabled,
 	})
-	if err == nil {
-		t.Fatal("拉取与缓存都失败时不应启用订阅")
+	if err != nil {
+		t.Fatalf("不访问远端的启用设置应提交成功: %v", err)
 	}
-	if a.cfg.Subscriptions[0].IsEnabled() {
-		t.Fatal("启用失败后内存订阅没有恢复禁用")
+	if requests.Load() != 0 {
+		t.Fatalf("启用订阅不应自动下载，实际请求次数=%d", requests.Load())
+	}
+	if !a.cfg.Subscriptions[0].IsEnabled() {
+		t.Fatal("内存订阅没有提交启用状态")
+	}
+	if len(a.Nodes()) != 0 {
+		t.Fatalf("未手动同步前不应产生订阅节点: %+v", a.Nodes())
 	}
 	onDisk, loadErr := config.Load(cfgPath)
 	if loadErr != nil {
-		t.Fatalf("读取回滚后的配置失败: %v", loadErr)
+		t.Fatalf("读取提交后的配置失败: %v", loadErr)
 	}
-	if onDisk.Subscriptions[0].IsEnabled() {
-		t.Fatal("启用失败后磁盘订阅没有保持禁用")
+	if !onDisk.Subscriptions[0].IsEnabled() {
+		t.Fatal("磁盘订阅没有提交启用状态")
+	}
+}
+
+// TestHealthRefreshNeverFetchesEmptySubscription 验证仅测速路径在没有内存节点时也不会
+// 回退为订阅下载；这覆盖启动、定时健康检查、模块恢复和配置变更共用的安全边界。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建可计数的订阅服务与隔离应用。
+//
+// 返回值：无。
+//
+// 错误情况：Refresh(false) 意外访问订阅、空节点没有返回可诊断错误，或应用创建失败时测试失败。
+func TestHealthRefreshNeverFetchesEmptySubscription(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte("proxies: []\n"))
+	}))
+	t.Cleanup(server.Close)
+
+	a, err := New(&config.Config{
+		Subscriptions: []config.Subscription{{Name: "manual-only", URL: server.URL, Type: "clash"}},
+		Listen:        "127.0.0.1",
+		PortRange:     [2]int{42000, 42010},
+		Mode:          "rule",
+		LogLevel:      "silent",
+		StateDir:      t.TempDir(),
+		Rules:         []string{"MATCH,PROXY"},
+	}, "")
+	if err != nil {
+		t.Fatalf("创建应用失败: %v", err)
+	}
+	t.Cleanup(a.Shutdown)
+
+	if err := a.Refresh(context.Background(), false); err == nil {
+		t.Fatal("没有缓存或手动节点时，仅测速应返回明确错误")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("仅测速不应下载订阅，实际请求次数=%d", requests.Load())
 	}
 }

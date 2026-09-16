@@ -134,15 +134,25 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	return nil
 }
 
-// Refresh 执行一轮完整流水线：fetch=true 时先拉取订阅与规则源，否则复用上次结果。
-// 步骤：拉取/合并 → 健康检测 → 端口分配（稳定映射）→ 生成配置 → 热更新核心。
+// Refresh 执行一轮代理节点流水线：fetch=true 时显式拉取订阅与规则源；fetch=false
+// 时只使用内存节点、已确认的本地订阅缓存和当前配置里的手动节点，绝不访问订阅 URL。
+// 步骤：按请求拉取或重建节点集合 → 健康检测 → 稳定端口分配 → 生成配置 → 热更新核心。
+//
+// 参数：
+//   - ctx: context.Context，控制订阅下载、规则源下载、健康检测和链路验证的取消。
+//   - fetch: bool，只有用户明确执行同步时才传 true；后台健康检查必须传 false。
+//
+// 返回值：error，节点来源为空、全部节点失效、下载失败且无缓存，或 mihomo 热更新失败时返回。
+//
+// 错误情况：fetch=false 即使没有内存节点也不会隐式下载订阅，这是“订阅只允许手动同步”
+// 的关键边界；新安装尚未同步时会返回无节点错误，由调用方保留当前 DIRECT 运行配置。
 func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
 	a.mu.RLock()
 	disabled := a.cfg.ProxyDisabled
 	a.mu.RUnlock()
-	// 周期刷新与健康探测也暂停，避免模块关闭后仍持续拉取订阅和访问外网。
+	// 模块关闭时暂停手动同步与周期健康探测，避免已停用代理继续访问外网。
 	if disabled {
 		return nil
 	}
@@ -165,7 +175,8 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		a.proxyLifecycle.Complete(generation, phase, running, message, 0)
 	}()
 	var nodes []*node.Node
-	if fetch || len(a.Nodes()) == 0 {
+	if fetch {
+		fetchOptions := a.subscriptionFetchOptions()
 		a.mu.RLock()
 		subs := make([]config.Subscription, len(a.cfg.Subscriptions))
 		copy(subs, a.cfg.Subscriptions)
@@ -173,11 +184,12 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		copy(ruleURLs, a.cfg.RuleURLs)
 		manualEntries := make([]any, len(a.cfg.ManualNodes))
 		copy(manualEntries, a.cfg.ManualNodes)
+		stateDir := a.cfg.StateDir
 		a.mu.RUnlock()
 
 		// 订阅与规则源并发拉取
 		ruleCh := make(chan []ruleurl.Result, 1)
-		go func() { ruleCh <- ruleurl.FetchAll(ctx, ruleURLs, a.cfg.StateDir) }()
+		go func() { ruleCh <- ruleurl.FetchAll(ctx, ruleURLs, stateDir) }()
 
 		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
 		for _, err := range manualErrs {
@@ -188,7 +200,7 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 
 		var errs []error
 		var infos map[string]subscribe.UserInfo
-		nodes, infos, errs = subscribe.FetchAllWithInfoAndFilters(ctx, subs, a.cfg.StateDir, a.includeRe, a.excludeRe,
+		nodes, infos, errs = subscribe.FetchAllWithInfoAndFiltersOptions(ctx, subs, stateDir, a.includeRe, a.excludeRe, fetchOptions,
 			map[string][]*node.Node{subscribe.ManualSubscription: manual})
 		for _, err := range errs {
 			if err != nil {
@@ -204,9 +216,57 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		a.subInfos = infos
 		a.mu.Unlock()
 	} else {
-		// 仅测速刷新也必须重新应用当前订阅开关；否则刚从配置恢复的禁用订阅节点
-		// 可能因旧内存快照继续参与健康检测和监听生成。
-		nodes = filterEnabledSubscriptionNodes(a.Nodes(), a.Subscriptions())
+		// 非下载路径仍需重新解析手动节点，因为新增/删除手动节点后 API 会复用这条
+		// 流水线更新运行态。订阅节点只能来自已提交的内存快照，绝不能因为内存为空
+		// 而回退到网络；这样启动、定时健康检查和模块恢复均不会产生订阅请求。
+		a.mu.RLock()
+		manualEntries := append([]any(nil), a.cfg.ManualNodes...)
+		subscriptions := append([]config.Subscription(nil), a.cfg.Subscriptions...)
+		stateDir := a.cfg.StateDir
+		currentInfos := cloneSubscriptionInfos(a.subInfos)
+		a.mu.RUnlock()
+		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
+		for _, err := range manualErrs {
+			if err != nil {
+				log.Printf("[manual] %v", err)
+			}
+		}
+		bySource := map[string][]*node.Node{subscribe.ManualSubscription: manual}
+		for _, existing := range filterEnabledSubscriptionNodes(a.Nodes(), subscriptions) {
+			if existing.Subscription == subscribe.ManualSubscription {
+				continue
+			}
+			bySource[existing.Subscription] = append(bySource[existing.Subscription], existing)
+		}
+		infos := make(map[string]subscribe.UserInfo, len(subscriptions))
+		for _, subscription := range subscriptions {
+			if !subscription.IsEnabled() {
+				continue
+			}
+			if info, ok := currentInfos[subscription.Name]; ok {
+				infos[subscription.Name] = info
+			}
+			if len(bySource[subscription.Name]) > 0 {
+				continue
+			}
+			// 合并去重可能让某个订阅暂时没有内存节点；删除其它订阅或重新启用时，
+			// 只从该订阅最后一次已确认缓存恢复，绝不为了补齐来源访问网络。
+			cached, info, err := subscribe.LoadCachedWithInfo(subscription, stateDir)
+			if err != nil {
+				continue
+			}
+			bySource[subscription.Name] = cached
+			if !info.IsZero() {
+				infos[subscription.Name] = info
+			}
+		}
+		nodes = subscribe.MergeFiltered(bySource, a.includeRe, a.excludeRe)
+		if len(nodes) == 0 {
+			return fmt.Errorf("no cached or manual nodes available; sync a subscription manually first")
+		}
+		a.mu.Lock()
+		a.subInfos = infos
+		a.mu.Unlock()
 	}
 
 	a.checkNodes(ctx, nodes, a.dialerTargets()...)
@@ -399,27 +459,30 @@ func (a *App) dialerTargets() []string {
 	return targets
 }
 
-// restoreSnapshot 启动时加载 nodes.json 节点快照并立即生成 mihomo 配置提供服务，
-// 不必等首次订阅刷新完成。快照缺失/损坏仅打日志丢弃，不致命。
-// 之后 Run 里的首次 Refresh 成功会覆盖；失败则快照保持可用。
-func (a *App) restoreSnapshot() {
+// restoreSnapshot 启动时只加载 nodes.json 节点快照并生成 mihomo 配置，不访问任何
+// 订阅地址。快照缺失、损坏或没有健康节点时仍应用一份 DIRECT 配置，使控制台和主端口
+// 可以正常启动，用户随后可通过手动同步取得节点。
+//
+// 参数：无；快照路径来自当前配置的 state-dir。
+//
+// 返回值：error，仅在 mihomo 配置生成、热加载或 TUN 实际状态校验失败时返回。
+//
+// 错误情况：快照读取失败会记录日志并降级为空节点启动，不会触发订阅下载；应用失败
+// 必须返回给 Run，使要求 TUN 的配置仍能执行流量绕过保护。
+func (a *App) restoreSnapshot() error {
 	snap, err := node.LoadSnapshot(a.nodesSnapshotPath())
 	if err != nil {
 		log.Printf("[snapshot] %v", err)
-		return
 	}
-	if snap == nil || len(snap.Nodes) == 0 {
-		return
+	var nodes []*node.Node
+	if snap != nil {
+		nodes = filterEnabledSubscriptionNodes(snap.Nodes, a.Subscriptions())
 	}
 	var alive []*node.Node
-	for _, n := range snap.Nodes {
+	for _, n := range nodes {
 		if n.Alive {
 			alive = append(alive, n)
 		}
-	}
-	if len(alive) == 0 {
-		log.Printf("[snapshot] 快照 %d 个节点均标记失效，等待首次刷新", len(snap.Nodes))
-		return
 	}
 
 	a.refreshing.Lock()
@@ -431,13 +494,17 @@ func (a *App) restoreSnapshot() {
 	}
 	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
 	if err := a.regenerateLocked(assigns); err != nil {
-		log.Printf("[snapshot] 快照节点生成配置失败（等待首次刷新）: %v", err)
-		return
+		return fmt.Errorf("从节点快照生成启动配置失败: %w", err)
 	}
 	a.mu.Lock()
-	a.nodes = snap.Nodes
+	a.nodes = nodes
 	a.assigns = assigns
 	a.mu.Unlock()
+	if snap == nil || len(nodes) == 0 {
+		log.Printf("[snapshot] 没有可用节点快照，已按空节点启动；请在控制台手动同步订阅")
+		return nil
+	}
 	log.Printf("[snapshot] 已从快照恢复 %d 个节点（%d 个可用，%d 个端口，保存于 %s）",
-		len(snap.Nodes), len(alive), len(assigns), snap.SavedAt.Format("2006-01-02 15:04:05"))
+		len(nodes), len(alive), len(assigns), snap.SavedAt.Format("2006-01-02 15:04:05"))
+	return nil
 }

@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -116,8 +117,17 @@ func (m *Manager) Apply(cfg config.GatewayConfig) error {
 	}
 	m.applied = true
 	if err := m.runner.Forwarding(true); err != nil {
-		m.lastErr = err.Error()
-		return err
+		// 规则已生效但转发开关失败时不能保留半套数据面：下游报文可能被截获，
+		// 却无法按预期完成路由。先清理执行层规则，再把清理失败与原错误一并暴露；
+		// application 事务随后仍会按旧配置做完整回滚。
+		joined := err
+		if clearErr := m.runner.Clear(); clearErr != nil {
+			joined = errors.Join(joined, fmt.Errorf("IPv4 转发开启失败后清理规则失败: %w", clearErr))
+		}
+		m.applied = false
+		m.forwarding = false
+		m.lastErr = joined.Error()
+		return joined
 	}
 	m.forwarding = true
 	m.lastErr = ""

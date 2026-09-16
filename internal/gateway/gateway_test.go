@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,46 @@ func TestManagerApplyFailureRecorded(t *testing.T) {
 	}
 	if s := m.Status(); s.Err != "boom" || s.Applied {
 		t.Errorf("Status = %+v", s)
+	}
+}
+
+// forwardingFailureRunner 模拟规则已应用、但开启 IPv4 转发失败的执行层，
+// 用于验证 Manager 不会留下“已截获但无法转发”的半套运行态。
+type forwardingFailureRunner struct {
+	fakeRunner
+}
+
+// Forwarding 固定返回模拟错误。
+//
+// 参数：enable 表示目标转发状态，本测试只记录调用而不触碰系统。
+// 返回值：error，始终返回测试错误。
+// 错误情况：无额外分支；固定失败是该 fake 的唯一职责。
+func (f *forwardingFailureRunner) Forwarding(enable bool) error {
+	f.forwarding = append(f.forwarding, enable)
+	return errors.New("forwarding boom")
+}
+
+// TestManagerForwardingFailureClearsAppliedRules 验证开启 IPv4 转发失败后，
+// Manager 会立即清理已应用规则并把运行态恢复为未应用。
+//
+// 参数：t 由 testing 注入，用于构造临时 Manager 并报告断言失败。
+// 返回值：无。
+// 错误情况：Apply 未失败、未清理规则或状态仍显示已应用时测试失败。
+func TestManagerForwardingFailureClearsAppliedRules(t *testing.T) {
+	runner := &forwardingFailureRunner{}
+	m := NewManager(t.TempDir(), nil)
+	m.runner = runner
+
+	err := m.Apply(config.GatewayConfig{Devices: []config.GatewayDevice{{Name: "a", IP: "192.168.1.10"}}})
+	if err == nil || !strings.Contains(err.Error(), "forwarding boom") {
+		t.Fatalf("Apply 错误 = %v", err)
+	}
+	if runner.cleared != 1 {
+		t.Fatalf("转发开启失败后清理次数 = %d, 期望 1", runner.cleared)
+	}
+	status := m.Status()
+	if status.Applied || status.Forwarding || status.Err == "" {
+		t.Fatalf("失败后状态 = %+v", status)
 	}
 }
 

@@ -25,39 +25,40 @@ import { classNames, formatUserInfo } from "@/lib/format";
  *
  * 功能说明：
  * 以紧凑卡片展示订阅状态、用量与节点健康度；新增和编辑统一使用 Radix Dialog。
- * 停用操作会提交完整值对象，避免布尔开关覆盖名称、URL 或解析类型。
+ * 停用操作会提交完整值对象，避免布尔开关覆盖名称、URL 或解析类型；只有用户点击
+ * 同步按钮才拉取远端内容，同步完成后显示通知，但不打开确认弹窗。
  *
  * 参数说明：
  * - overview: object，订阅和节点聚合状态。
- * - onDelete/onNavigateNodes/onSubAction/onWrite: Function，删除、跳转、刷新测速与写入回调。
+ * - onDelete/onNavigateNodes/onSubAction/onWrite: Function，删除、跳转、同步/测速与写入回调。
  *
  * 返回值说明：
  * 返回订阅管理页 React 元素。
  *
  * 可能的异常/错误情况：
- * 启用无可用缓存的订阅可能同步失败；失败时弹窗保留或开关回退为服务端状态。
+ * 尚未手动同步的订阅不会产生节点；同步失败时显示错误通知，保存设置本身不访问远端。
  */
 export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, onWrite }) {
   const emptyDraft = { name: "", url: "", type: "auto", enabled: true, port_mapping: true };
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [saving, setSaving] = useState(false);
-  // 保存请求的取消控制器：订阅保存可能触发同步拉取（最长 3 分钟），
-  // 期间「取消」/关闭对话框必须能立即中断等待，而不是卡到请求结束。
+  // 保存请求的取消控制器：即使保存设置不再触发订阅下载，也保留取消能力，避免后端
+  // 热更新或持久化异常时关闭对话框后仍继续等待旧请求并覆盖新的编辑状态。
   const saveAbortRef = useRef(null);
   // 单个订阅的同步/测速是同步接口（最长 3 分钟），期间必须给行内按钮明确的加载态，
-  // 否则点击后到完成 toast 之间页面毫无反馈。key 形如 `${name}:${action}`；
+  // 完成后由上层统一显示通知。key 形如 `${name}:${action}`；
   // 后端按订阅名加锁，不同订阅可并行，因此这里用集合同时跟踪多行的进行中状态。
   const [pendingActions, setPendingActions] = useState(() => new Set());
 
   /**
-   * runSubAction 执行单个订阅的同步或测速，并维护行内加载状态。
+   * runSubAction 执行单个订阅的同步或测速动作，并维护加载状态。
    *
    * 参数说明：
    * - name: string，订阅名称。
    * - action: string，`refresh` 或 `test`。
    *
-   * 返回值说明：返回 Promise<void>。
+   * 返回值说明：返回 Promise<object|null>；成功返回后端状态对象，失败返回 null。
    *
    * 可能的异常/错误情况：
    * 同一订阅已有动作进行中时忽略新的点击（后端对同名订阅串行，重复点击只会排队等待）；
@@ -65,10 +66,10 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
    */
   async function runSubAction(name, action) {
     const key = `${name}:${action}`;
-    if (pendingActions.has(key)) return;
+    if (pendingActions.has(key)) return null;
     setPendingActions((current) => new Set(current).add(key));
     try {
-      await onSubAction(name, action);
+      return await onSubAction(name, action);
     } finally {
       setPendingActions((current) => {
         const next = new Set(current);
@@ -76,6 +77,18 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
         return next;
       });
     }
+  }
+
+  /**
+   * syncSubscription 直接同步并应用一个订阅，成功后由上层显示完成通知。
+   *
+   * 参数说明：name 为目标订阅名称。
+   * 返回值说明：返回 Promise<void>。
+   * 可能的异常/错误情况：网络、解析、健康检测或热更新失败由 onSubAction 显示错误；
+   * 成功路径显示 toast，但不弹出确认框，保持手动操作一次点击即可执行。
+   */
+  async function syncSubscription(name) {
+    await runSubAction(name, "refresh");
   }
 
   /**
@@ -250,7 +263,7 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
               <div className="subscription-card-actions">
                 <Button size="sm" variant="ghost" type="button" onClick={() => onNavigateNodes(subscription.name)}>查看节点</Button>
                 <Button disabled={!subscription.enabled || rowPending} loading={testing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "test")}>{testing ? "测速中…" : "测速"}</Button>
-                <Button disabled={!subscription.enabled || rowPending} loading={syncing} size="sm" variant="outline" type="button" onClick={() => runSubAction(subscription.name, "refresh")}>{!syncing && <RefreshCw size={14} aria-hidden="true" />}{syncing ? "同步中…" : "同步"}</Button>
+                <Button disabled={!subscription.enabled || rowPending} loading={syncing} size="sm" variant="outline" type="button" onClick={() => syncSubscription(subscription.name)}>{!syncing && <RefreshCw size={14} aria-hidden="true" />}{syncing ? "同步中…" : "同步"}</Button>
                 <Button aria-label={`编辑订阅 ${subscription.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditor(subscription)}><Pencil size={15} aria-hidden="true" /></Button>
                 <Button aria-label={`删除订阅 ${subscription.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/subscriptions/${encodeURIComponent(subscription.name)}`, "订阅已删除", `订阅 ${subscription.name}`)}><Trash2 size={15} aria-hidden="true" /></Button>
               </div>

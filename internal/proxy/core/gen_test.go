@@ -13,6 +13,7 @@ import (
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/subscribe"
 )
 
 // fakeConfig 构造最小可用配置。
@@ -137,6 +138,48 @@ func TestGenerate(t *testing.T) {
 	rules, ok := m["rules"].([]any)
 	if !ok || len(rules) != 2 || rules[0] != "DOMAIN-SUFFIX,example.com,DIRECT" || rules[1] != "MATCH,PROXY" {
 		t.Errorf("rules = %v, 未原样透传", m["rules"])
+	}
+}
+
+// TestGenerateAcceptsNumericRealityShortIDFromSubscription 验证第三方转换器输出未加引号
+// 的 Reality short-id 时，从订阅解析到 mihomo 配置自检的完整链路仍然可用。
+//
+// 参数说明：
+//   - t: *testing.T，提供隔离的 mihomo home 目录和断言。
+//
+// 返回值说明：无；ParseClash 产物能生成并通过 mihomo ParseWithBytes 时测试通过。
+//
+// 错误情况：订阅边界未完成类型规范化时，mihomo 会报告无法把数字解码到 string；
+// Reality 公钥、short-id 或其它 VLESS 字段不满足配置约束时也会使测试失败。
+func TestGenerateAcceptsNumericRealityShortIDFromSubscription(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	body := []byte(`
+proxies:
+  - name: converter-reality
+    type: vless
+    server: 192.0.2.1
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000001
+    tls: true
+    flow: xtls-rprx-vision
+    servername: example.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      short-id: 88
+`)
+	nodes, err := subscribe.ParseClash(body, "converter")
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("解析转换订阅失败: nodes=%d err=%v", len(nodes), err)
+	}
+	nodes[0].Alive = true
+	assignments := []Assignment{{Port: 42001, Node: nodes[0]}}
+	generated, err := GenerateWithNodes(fakeConfig(), assignments, nodes, nil)
+	if err != nil {
+		t.Fatalf("生成 mihomo 配置失败: %v", err)
+	}
+	if _, err := executor.ParseWithBytes(generated); err != nil {
+		t.Fatalf("mihomo 无法解析规范化后的 Reality 节点: %v", err)
 	}
 }
 

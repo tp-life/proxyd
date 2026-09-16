@@ -60,11 +60,29 @@ func TestRenderNFTRuleset(t *testing.T) {
 		"type nat hook prerouting priority dstnat; policy accept;",
 		"ip saddr @gw_devices meta l4proto tcp redirect to :17892",
 		"ip saddr @gw_devices udp dport 53 redirect to :1053",
-		"ip saddr @gw_devices meta l4proto udp tproxy to :17893 meta mark set 0x1",
+		"ip saddr @gw_devices meta l4proto udp udp dport != 53 tproxy to :17893 meta mark set 0x7078 accept",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("ruleset 缺 %q:\n%s", want, text)
 		}
+	}
+}
+
+// TestRenderNFTRulesetDNSOffCapturesAllUDP 验证关闭 DNS 专用劫持后，UDP/53
+// 与其他 UDP 一样进入通用 tproxy，避免关闭开关后留下未声明的直连例外。
+//
+// 参数：t 由 testing 注入，用于报告断言失败。
+// 返回值：无。
+// 错误情况：ruleset 仍排除 53 或缺少专用 mark 时测试失败。
+func TestRenderNFTRulesetDNSOffCapturesAllUDP(t *testing.T) {
+	cfg := testGatewayConfig()
+	cfg.DNSRedirect = false
+	text := RenderNFTRuleset(cfg, 1053)
+	if strings.Contains(text, "udp dport != 53") {
+		t.Errorf("dns-redirect 关闭时不应排除 UDP/53:\n%s", text)
+	}
+	if !strings.Contains(text, "tproxy to :17893 meta mark set 0x7078 accept") {
+		t.Errorf("关闭 DNS 劫持后应保留完整 UDP tproxy 规则:\n%s", text)
 	}
 }
 

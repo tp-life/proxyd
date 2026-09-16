@@ -214,7 +214,8 @@ func (a *App) AddRuleURL(ru config.RuleURL) error {
 	a.cfg.RuleURLs = append(a.cfg.RuleURLs, ru)
 	a.mu.Unlock()
 
-	// 立即拉取这一个源；失败只记入状态，规则等下一轮刷新再试
+	// 添加规则源是用户明确发起的远端操作，因此立即拉取这一个源；失败只记入状态，
+	// 等用户下一次执行全局手动同步时再试，不创建后台周期下载。
 	res := ruleurl.Fetch(context.Background(), ru, a.cfg.StateDir)
 	a.applyRuleResults([]ruleurl.Result{res})
 

@@ -195,6 +195,7 @@ func (a *App) applyRemoteRuntime(cfg config.RemoteConfig) error {
 
 // RetryModule 立即重试模块，已禁用模块不隐式启用。
 // 参数 ctx 为有界请求上下文，id 为模块标识；返回 error，网络失败保持真实运行状态。
+// 代理模块重试只检测缓存/手动节点，不等同于“同步订阅”，因此不会访问订阅 URL。
 func (a *App) RetryModule(ctx context.Context, id string) error {
 	cfg := a.Config()
 	switch id {
@@ -202,7 +203,7 @@ func (a *App) RetryModule(ctx context.Context, id string) error {
 		if cfg.ProxyDisabled {
 			return fmt.Errorf("代理模块已禁用")
 		}
-		return a.Refresh(ctx, true)
+		return a.Refresh(ctx, false)
 	case "remote":
 		a.remoteMutationMu.Lock()
 		defer a.remoteMutationMu.Unlock()

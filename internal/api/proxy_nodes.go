@@ -159,9 +159,16 @@ func (s *Server) handleListManualNodes(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, s.app.ManualNodes())
 }
 
-// handleAddManualNode 添加手动节点：校验 + 持久化，随后后台刷新纳入节点池。
+// handleAddManualNode 添加手动节点：校验 + 持久化，随后后台仅重建现有节点池。
 // url 字段接受代理 URL/分享链接；proxy 字段接受结构化隧道类（VPN）出站映射
 // （type 限 tailscale/openvpn/zerotier/wireguard/ssh），两者二选一。
+//
+// 参数：w 写出新节点或请求错误；r 的 JSON 在 url 与 proxy 字段之间二选一。
+//
+// 返回值：无；成功返回 HTTP 201 和脱敏后的手动节点展示值。
+//
+// 错误情况：JSON、节点协议/必填字段、名称唯一性或持久化失败时返回 400；后续
+// 后台重建只解析本地配置并测试节点，不会因为手动节点变化而下载订阅。
 func (s *Server) handleAddManualNode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL   string         `json:"url"`
@@ -193,11 +200,18 @@ func (s *Server) handleAddManualNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.trigger(true)
+	s.trigger(false)
 	w.WriteHeader(http.StatusCreated)
 	writeJSON(w, entry)
 }
 
+// handleDelManualNode 删除手动节点，并在后台仅使用剩余缓存数据更新运行态。
+//
+// 参数：w 写出空响应或错误；r 的路径 index 是手动节点在配置列表中的下标。
+//
+// 返回值：无；成功返回 HTTP 204。
+//
+// 错误情况：下标非法或节点不存在时返回 400/404；后台重建不会拉取任何订阅。
 func (s *Server) handleDelManualNode(w http.ResponseWriter, r *http.Request) {
 	index, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
@@ -208,7 +222,7 @@ func (s *Server) handleDelManualNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	s.trigger(true)
+	s.trigger(false)
 	w.WriteHeader(http.StatusNoContent)
 }
 

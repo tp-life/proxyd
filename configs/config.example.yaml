@@ -39,7 +39,7 @@ mixed-port: 41999              # 主端口：走全局规则模式（rule/global
 #   dns-hijack:
 #     - 0.0.0.0:53             # 劫持 IPv4 DNS；启用时建议同时配置 dns 或 DNS 预设
 
-refresh-interval: 24h          # 订阅刷新周期（默认一天一次；可随时在 Web 控制台手动刷新）
+refresh-interval: 24h          # 兼容旧配置保留，当前已停用；订阅只允许在 Web/CLI 手动同步
 health-interval: 5m            # 节点可用性检测周期
 health-url: https://www.gstatic.com/generate_204
 health-timeout: 5s

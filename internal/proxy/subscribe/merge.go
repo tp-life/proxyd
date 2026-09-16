@@ -193,6 +193,24 @@ func FetchAllWithInfo(ctx context.Context, subs []config.Subscription, stateDir 
 //
 // 错误情况：单源失败仅写入对应错误槽位；静态来源不会产生 UserInfo。
 func FetchAllWithInfoAndFilters(ctx context.Context, subs []config.Subscription, stateDir string, includeRe, excludeRe *regexp.Regexp, static ...map[string][]*node.Node) ([]*node.Node, map[string]UserInfo, []error) {
+	return FetchAllWithInfoAndFiltersOptions(ctx, subs, stateDir, includeRe, excludeRe, FetchOptions{}, static...)
+}
+
+// FetchAllWithInfoAndFiltersOptions 并发拉取订阅，并为每个网络来源应用相同的降级策略。
+//
+// 参数说明：
+//   - ctx: context.Context，用于取消全部 worker、HTTP 请求与重试退避。
+//   - subs: []config.Subscription，保持配置顺序的订阅列表。
+//   - stateDir: string，订阅正文和用量缓存目录。
+//   - includeRe/excludeRe: *regexp.Regexp，节点名称包含/排除过滤器。
+//   - options: FetchOptions，主链路失败时使用的本机主端口代理配置。
+//   - static: 手动节点等非 HTTP 来源，按来源名参与最终合并。
+//
+// 返回值说明：合并节点、有效用量映射和与 subs 一一对应的错误槽位。
+//
+// 错误情况：单个来源的所有网络路径失败时只写对应槽位；有缓存时返回
+// *FetchWarning 并继续合并缓存节点，不会取消其它并发来源。
+func FetchAllWithInfoAndFiltersOptions(ctx context.Context, subs []config.Subscription, stateDir string, includeRe, excludeRe *regexp.Regexp, options FetchOptions, static ...map[string][]*node.Node) ([]*node.Node, map[string]UserInfo, []error) {
 	nodesBySub := make(map[string][]*node.Node, len(subs)+len(static))
 	for _, m := range static {
 		for src, nodes := range m {
@@ -221,7 +239,7 @@ func FetchAllWithInfoAndFilters(ctx context.Context, subs []config.Subscription,
 			defer wg.Done()
 			for i := range jobs {
 				sub := subs[i]
-				nodes, info, err := FetchWithInfo(ctx, sub, stateDir)
+				nodes, info, err := FetchWithInfoOptions(ctx, sub, stateDir, options)
 				if err != nil {
 					var warning *FetchWarning
 					errs[i] = err

@@ -47,6 +47,14 @@ func cmdTest(args []string) error {
 	return nil
 }
 
+// cmdSubs 执行订阅列表、添加、编辑、手动同步/测速与删除命令。
+//
+// 参数：args 为 `subs` 后的 CLI 参数，可包含 `-c` 配置文件和具体子命令参数。
+//
+// 返回值：error，参数非法、运行实例不可达或 API 拒绝操作时返回；成功返回 nil。
+//
+// 错误情况：添加订阅只保存配置，不触发后台下载；用户需明确执行 `subs refresh`
+// 才会同步节点。单订阅同步最长等待 200 秒，以覆盖服务端三分钟用例超时。
 func cmdSubs(args []string) error {
 	cfgFile, rest, err := parseCFlag("subs", args)
 	if err != nil {
@@ -86,7 +94,7 @@ func cmdSubs(args []string) error {
 			map[string]string{"name": rest[1], "url": rest[2]}, nil); err != nil {
 			return err
 		}
-		fmt.Printf("订阅 %q 已添加（后台刷新中）\n", rest[1])
+		fmt.Printf("订阅 %q 已添加；请执行 proxyd subs refresh %q 手动同步节点\n", rest[1], rest[1])
 		return nil
 	case "set":
 		return cmdSubsSet(c, rest[1:])
@@ -112,7 +120,7 @@ func cmdSubs(args []string) error {
 		if err := c.do(http.MethodDelete, "/api/subscriptions/"+url.PathEscape(rest[1]), nil, nil); err != nil {
 			return err
 		}
-		fmt.Printf("订阅 %q 已删除（后台刷新中）\n", rest[1])
+		fmt.Printf("订阅 %q 已删除（后台重建现有节点中）\n", rest[1])
 		return nil
 	default:
 		return fmt.Errorf("未知操作 %q，用法: proxyd subs list|add <name> <url>|set [flags] <name>|refresh <name>|test <name>|del <name>", sub)
@@ -137,7 +145,14 @@ func subStateText(state string) string {
 	}
 }
 
-// cmdSubsSet 修改订阅的名称/地址/类型/启停/端口映射；未给出的字段保持原值（客户端先读现状再合并提交）。
+// cmdSubsSet 修改订阅的名称、地址、类型、启停或端口映射，未给出的字段保持原值。
+//
+// 参数：c 为连接运行实例的 API 客户端；args 为 `subs set` 后的选项和订阅名。
+//
+// 返回值：error，参数冲突、订阅不存在、概览读取或设置提交失败时返回；成功返回 nil。
+//
+// 错误情况：客户端先读取现状再合并完整值；修改 URL、类型或启用状态只保存设置，
+// 不会触发订阅下载，用户需要另行执行 `subs refresh`。
 func cmdSubsSet(c *apiClient, args []string) error {
 	setFS := flag.NewFlagSet("subs set", flag.ExitOnError)
 	rename := setFS.String("rename", "", "新名称")
@@ -194,8 +209,7 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	if *mapping != "" {
 		body["port_mapping"] = *mapping == "on"
 	}
-	// 修改启用中的订阅会同步重新拉取（服务端最长 3 分钟），放宽客户端超时
-	if err := c.doTimeout(http.MethodPut, "/api/subscriptions/"+url.PathEscape(items[0]), body, nil, 200*time.Second); err != nil {
+	if err := c.do(http.MethodPut, "/api/subscriptions/"+url.PathEscape(items[0]), body, nil); err != nil {
 		return err
 	}
 	fmt.Printf("订阅 %q 已更新\n", items[0])

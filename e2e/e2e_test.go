@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -456,9 +457,41 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("dup sub accepted: status=%d", resp.StatusCode)
 	}
 
+	// 新增只保存设置，必须先看到空节点状态；随后显式调用单订阅同步，避免测试
+	// 把“新增后自动下载”重新固化为产品行为。
+	secondName := saved.Subscriptions[1].Name
+	var beforeManualSync struct {
+		Subs []struct {
+			Name  string `json:"name"`
+			Total int    `json:"total"`
+		} `json:"subscriptions"`
+	}
+	beforeResp, beforeErr := http.Get(base + "/api/overview")
+	if beforeErr != nil {
+		t.Fatalf("读取手动同步前概览失败: %v", beforeErr)
+	}
+	_ = json.NewDecoder(beforeResp.Body).Decode(&beforeManualSync)
+	beforeResp.Body.Close()
+	for _, subscription := range beforeManualSync.Subs {
+		if subscription.Name == secondName && subscription.Total != 0 {
+			t.Fatalf("新增订阅不应自动同步，手动同步前节点数=%d", subscription.Total)
+		}
+	}
+	manualSyncResp, manualSyncErr := http.Post(
+		base+"/api/subscriptions/"+url.PathEscape(secondName)+"/refresh",
+		"application/json",
+		nil,
+	)
+	if manualSyncErr != nil {
+		t.Fatalf("手动同步第二订阅失败: %v", manualSyncErr)
+	}
+	manualSyncResp.Body.Close()
+	if manualSyncResp.StatusCode != http.StatusOK {
+		t.Fatalf("手动同步第二订阅状态码=%d", manualSyncResp.StatusCode)
+	}
+
 	// ---- 按订阅查看节点：第二订阅内容与第一订阅完全相同（节点全部重叠），
 	// 去重后节点归属名字序最小的订阅（"127.0.0.1" < "test"）----
-	secondName := saved.Subscriptions[1].Name
 	{
 		deadline := time.Now().Add(20 * time.Second)
 		for {
@@ -1181,9 +1214,10 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// ---- CLI 作为本地 API 客户端：编译真实二进制打运行中实例 ----
-	// 与 Makefile/GoReleaser 发布保持一致使用 with_gvisor（ADR 0002），确保发布形态在 e2e 中被覆盖。
+	// 与 Makefile/GoReleaser 发布保持一致：with_gvisor 覆盖 VPN/TUN 能力，
+	// ts_omit_acme 裁剪未使用的证书入口并避免双 Tailscale 全局指标冲突。
 	binPath := filepath.Join(t.TempDir(), "proxyd")
-	if out, err := exec.Command("go", "build", "-tags", "with_gvisor", "-o", binPath, "../cmd/proxyd").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-tags", "with_gvisor ts_omit_acme", "-o", binPath, "../cmd/proxyd").CombinedOutput(); err != nil {
 		t.Fatalf("go build proxyd: %v\n%s", err, out)
 	}
 	runCLI := func(args ...string) (string, error) {
@@ -1303,8 +1337,16 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
-// TestSnapshotRestore 验证节点快照持久化：首轮刷新写入 nodes.json 后重启，
-// 订阅源不可用且缓存被清除时，仍能从快照立即恢复节点与端口映射提供服务。
+// TestSnapshotRestore 验证节点快照持久化和“启动不自动同步”边界：首轮手动刷新写入
+// nodes.json 后重启，即使订阅源仍在线且订阅缓存被清除，也只从快照恢复节点与端口。
+//
+// 参数：
+//   - t: *testing.T，Go 端到端测试上下文，用于启动本地订阅、SOCKS5 与回显服务。
+//
+// 返回值：无。
+//
+// 错误情况：快照/端口未恢复、代理流量不可用、Run 启动期间再次请求订阅，或关闭
+// 调度器超时时测试失败。
 func TestSnapshotRestore(t *testing.T) {
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "via-snap")
@@ -1313,7 +1355,9 @@ func TestSnapshotRestore(t *testing.T) {
 	socks := fakeSocks5(t, echo.Listener.Addr().String())
 	_, socksPort, _ := net.SplitHostPort(socks)
 
+	var subscriptionRequests atomic.Int32
 	sub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		subscriptionRequests.Add(1)
 		fmt.Fprintf(w, `proxies:
   - name: node-snap
     type: socks5
@@ -1322,6 +1366,7 @@ func TestSnapshotRestore(t *testing.T) {
     udp: true
 `, socksPort)
 	}))
+	defer sub.Close()
 
 	stateDir := t.TempDir()
 	lo := freePort(t)
@@ -1356,6 +1401,9 @@ func TestSnapshotRestore(t *testing.T) {
 	if err := a1.Refresh(ctx, true); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
+	if subscriptionRequests.Load() != 1 {
+		t.Fatalf("首轮手动同步请求次数=%d，期望 1", subscriptionRequests.Load())
+	}
 	portOf1 := map[string]int{}
 	for _, as := range a1.Assignments() {
 		portOf1[as.Node.Name] = as.Port
@@ -1368,13 +1416,12 @@ func TestSnapshotRestore(t *testing.T) {
 	}
 	a1.Shutdown()
 
-	// 订阅源下线 + 清掉订阅缓存：只能靠 nodes.json 快照恢复
-	sub.Close()
+	// 清掉订阅正文缓存但保持订阅源在线：第二轮如果偷偷自动同步，请求计数会暴露。
 	if err := os.RemoveAll(filepath.Join(stateDir, "cache")); err != nil {
 		t.Fatal(err)
 	}
 
-	// 第二轮：Run 启动即恢复快照（初始刷新会失败，但快照保持可用）
+	// 第二轮：Run 启动只恢复快照，不访问仍然在线的订阅源。
 	a2, err := app.New(newCfg(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -1402,7 +1449,7 @@ func TestSnapshotRestore(t *testing.T) {
 		t.Errorf("端口映射不稳定: %d -> %d", portOf1["node-snap"], assigns[0].Port)
 	}
 
-	// 快照节点立即可用（无需等首次刷新）
+	// 快照节点立即可用（无需等待或执行订阅同步）。
 	proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", assigns[0].Port))
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 10 * time.Second}
 	resp, err := client.Get("http://example.invalid/")
@@ -1415,10 +1462,13 @@ func TestSnapshotRestore(t *testing.T) {
 		t.Errorf("got %q, want via-snap", body)
 	}
 
-	// 初次刷新（订阅已挂）失败后，快照节点仍在
+	// 等待一段时间确认启动路径没有排队异步同步，且快照节点继续保留。
 	time.Sleep(2 * time.Second)
 	if len(a2.Nodes()) == 0 || len(a2.Assignments()) == 0 {
-		t.Error("刷新失败后快照节点/映射被清空")
+		t.Error("启动后快照节点/映射被清空")
+	}
+	if subscriptionRequests.Load() != 1 {
+		t.Errorf("Run 不应自动同步订阅，累计请求次数=%d，期望仍为 1", subscriptionRequests.Load())
 	}
 
 	cancel2()

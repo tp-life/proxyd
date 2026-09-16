@@ -10,6 +10,16 @@ import (
 	"proxyd/internal/config"
 )
 
+const (
+	// linuxTProxyMark 是 proxyd 为 Linux UDP 透明代理保留的报文标记。
+	// 采用非通用的固定值而不是示例里常见的 0x1，降低与宿主机现有策略路由冲突的概率；
+	// 执行层必须用相同值安装带掩码的 ip rule，二者共同构成一个不可拆分的数据面约定。
+	linuxTProxyMark = 0x7078
+	// linuxTProxyMarkMask 限定策略路由只匹配 proxyd 写入的低 16 位完整标记，
+	// 避免只按“非零 mark”匹配而接管其他防火墙或 QoS 模块标记的流量。
+	linuxTProxyMarkMask = 0xffff
+)
+
 // RenderPFAnchor 生成 macOS pf anchor 文本：设备表内下游地址的 TCP 流量 rdr 到
 // 127.0.0.1:redir-port（mihomo redir 入口）；开启 dns-redirect 时把下游 UDP 53
 // rdr 到 127.0.0.1:1053（mihomo dns 非特权监听）。设备表之外的 LAN 地址不匹配
@@ -43,7 +53,8 @@ func RenderPFAnchor(cfg config.GatewayConfig, dnsListenPort int) string {
 // RenderNFTRuleset 生成 Linux nftables ruleset 文本（table inet proxyd-gw，
 // 供 `nft -f -` 整体替换）：设备表内存为 ip 集合，下游 TCP redirect 到
 // redir-port；开启 dns-redirect 时 UDP 53 redirect 到 dns 监听端口；
-// tproxy-port 非零时附加 UDP tproxy 链（需配套 ip rule/fwmark，见注释）。
+// tproxy-port 非零时附加 UDP tproxy 链；配套 ip rule 与本地路由由 Linux
+// 执行层在同一次 Apply 中安装，调用方不需要额外执行系统命令。
 //
 // 参数：
 //   - cfg: config.GatewayConfig，网关配置（端口未补默认值时按默认值渲染）。
@@ -71,11 +82,18 @@ func RenderNFTRuleset(cfg config.GatewayConfig, dnsListenPort int) string {
 	}
 	b.WriteString("    }\n")
 	if cfg.EffectiveTProxyPort() > 0 {
-		// tproxy 链需要 `ip rule fwmark 0x1 lookup 100` + 本地路由表配合，
-		// 该路由规则不属于 nft -f 文本，由执行层/手册另行保证。
+		// TPROXY 不修改原始目的地址，因此必须给报文打上专用 mark，再由执行层的
+		// policy routing 把它交回 lo。显式 accept 终止本链，避免以后追加规则时
+		// 已完成 TPROXY 的报文继续被同一条链重复处理。
 		b.WriteString("    chain tproxy {\n")
 		b.WriteString("        type filter hook prerouting priority mangle; policy accept;\n")
-		fmt.Fprintf(&b, "        ip saddr @gw_devices meta l4proto udp tproxy to :%d meta mark set 0x1\n", cfg.EffectiveTProxyPort())
+		if cfg.DNSRedirect {
+			// DNS 劫持由后续 nat prerouting 链 redirect 到 mihomo DNS 监听器；若这里
+			// 先把 UDP/53 送进通用 tproxy，DNS 专用入口与 fake-ip 语义将被绕过。
+			fmt.Fprintf(&b, "        ip saddr @gw_devices meta l4proto udp udp dport != 53 tproxy to :%d meta mark set 0x%x accept\n", cfg.EffectiveTProxyPort(), linuxTProxyMark)
+		} else {
+			fmt.Fprintf(&b, "        ip saddr @gw_devices meta l4proto udp tproxy to :%d meta mark set 0x%x accept\n", cfg.EffectiveTProxyPort(), linuxTProxyMark)
+		}
 		b.WriteString("    }\n")
 	}
 	b.WriteString("}\n")

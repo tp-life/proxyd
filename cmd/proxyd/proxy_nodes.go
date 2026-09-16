@@ -14,6 +14,14 @@ import (
 	"proxyd/internal/app"
 )
 
+// cmdNodes 执行节点列表与手动节点的添加、删除命令。
+//
+// 参数：args 为 `nodes` 后的 CLI 参数，可包含 `-c`、子命令、节点 URL/JSON 与名称。
+//
+// 返回值：error，参数、结构化 JSON、节点查找或管理 API 调用失败时返回；成功返回 nil。
+//
+// 错误情况：手动节点变更会在后台重建现有节点池，但该重建明确不下载订阅；
+// 隧道节点的结构化映射必须是 JSON object，否则在发出请求前返回错误。
 func cmdNodes(args []string) error {
 	cfgFile, rest, err := parseCFlag("nodes", args)
 	if err != nil {
@@ -85,7 +93,7 @@ func cmdNodes(args []string) error {
 			if err := c.do(http.MethodPost, "/api/manual-nodes", body, &entry); err != nil {
 				return err
 			}
-			fmt.Printf("手动节点已添加: %s（类型 %s，下标 %d，后台刷新中）\n", entry.Name, entry.Type, entry.Index)
+			fmt.Printf("手动节点已添加: %s（类型 %s，下标 %d，后台重建现有节点中）\n", entry.Name, entry.Type, entry.Index)
 			return nil
 		}
 		if len(items) < 1 || len(items) > 2 {
@@ -99,7 +107,7 @@ func cmdNodes(args []string) error {
 		if err := c.do(http.MethodPost, "/api/manual-nodes", body, &entry); err != nil {
 			return err
 		}
-		fmt.Printf("手动节点已添加: %s（下标 %d，后台刷新中）\n", entry.Name, entry.Index)
+		fmt.Printf("手动节点已添加: %s（下标 %d，后台重建现有节点中）\n", entry.Name, entry.Index)
 		return nil
 	case "del":
 		if len(rest) != 2 {
@@ -116,7 +124,7 @@ func cmdNodes(args []string) error {
 		if err := c.do(http.MethodDelete, "/api/manual-nodes/"+strconv.Itoa(idx), nil, nil); err != nil {
 			return err
 		}
-		fmt.Printf("手动节点 %q 已删除（后台刷新中）\n", rest[1])
+		fmt.Printf("手动节点 %q 已删除（后台重建现有节点中）\n", rest[1])
 		return nil
 	default:
 		return fmt.Errorf("未知操作 %q，用法: proxyd nodes [list]|add <url> [名称]|add --proxy '<出站JSON>' [名称]|del <名称|下标>", sub)
