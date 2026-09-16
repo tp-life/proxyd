@@ -58,6 +58,40 @@ func (n *Node) IsTunnel() bool {
 	return n != nil && IsTunnel(n.Mapping)
 }
 
+// IsTailscale 判断节点是否为交由 mihomo 管理的 Tailscale 出站。
+//
+// 参数：无；方法读取当前 Node.Mapping 的 type 字段。
+//
+// 返回值：bool，节点非 nil 且 type=tailscale 时返回 true。
+//
+// 错误情况：无；映射缺失、type 类型错误或 nil 节点均返回 false。该判断只表达
+// 出站所有权，不引入 Tailscale SDK；登录、控制面和数据面生命周期全部由 mihomo
+// 的 Tailscale Adapter 负责。
+func (n *Node) IsTailscale() bool {
+	if n == nil {
+		return false
+	}
+	typ, _ := n.Mapping["type"].(string)
+	return typ == TunnelTypeTailscale
+}
+
+// TailscaleExitNode 返回 Tailscale 出站配置的 exit-node 标识。
+//
+// 参数：无；方法读取当前 Node.Mapping 的 mihomo 标准字段 `exit-node`。
+//
+// 返回值：string，去除首尾空白后的节点 IP、名称或 auto:* 选择器；未配置时为空。
+//
+// 错误情况：无；非 Tailscale 节点、字段缺失或字段类型错误均返回空字符串。只有
+// 配置了 Exit Node 的出站才能用全局公网 health-url 判断连通性；仅访问 Tailnet 或
+// 子网路由的出站不能用公网目标判死。
+func (n *Node) TailscaleExitNode() string {
+	if !n.IsTailscale() {
+		return ""
+	}
+	value, _ := n.Mapping["exit-node"].(string)
+	return strings.TrimSpace(value)
+}
+
 // TunnelStateDir 计算隧道节点隔离的 tsnet 状态目录，防止重启后重新认证与节点身份漂移。
 // 目录名 = 安全化节点名 + Key 哈希：Key 含 `|`、URL 等路径不安全字符，不能直接做目录名；
 // 哈希后缀保证重名节点（不同凭据/控制面）仍获得隔离目录。

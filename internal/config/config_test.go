@@ -959,7 +959,7 @@ func TestIsLoopbackAPIListen(t *testing.T) {
 // 错误情况：私钥字段未命中或公开字段被误判为敏感时测试失败。
 func TestSensitiveConfigKeyVPNFields(t *testing.T) {
 	sensitive := []string{
-		"key",                                    // openvpn 客户端私钥
+		"ca", "cert", "key", // openvpn 证书与客户端私钥
 		"auth-key", "tls-auth", "auth-user-pass", // contains auth
 		"private-key", "private-key-passphrase",
 		"tls-crypt", "tls-crypt-v2", "pre-shared-key",

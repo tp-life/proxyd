@@ -13,6 +13,7 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
+	proxytailscale "proxyd/internal/proxy/tailscale"
 )
 
 // vpnGroupTestServer 构造带一个 select 分组和一个 fallback 分组的测试服务，
@@ -40,6 +41,107 @@ func vpnGroupTestServer(t *testing.T) *Server {
 	srv.runRefresh = func(context.Context, bool) error { return nil }
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return srv
+}
+
+// TestTerminateTailscaleSetupAPI 验证 DELETE 接口会调用一体化终止事务并返回清理
+// 摘要；重复删除同一名称时返回 404，而不是静默报告成功。
+//
+// 参数说明：t 是 Go 测试上下文，用于隔离状态目录和报告 HTTP/配置断言失败。
+//
+// 返回值说明：无；成功与不存在分支分别通过状态码和应用配置快照断言。
+//
+// 错误情况：路由参数未传入应用层、终止后节点或组残留、响应无法解码，或重复删除
+// 未返回 404 时测试失败。
+func TestTerminateTailscaleSetupAPI(t *testing.T) {
+	application, err := app.New(&config.Config{
+		Listen:    "127.0.0.1",
+		PortRange: [2]int{42000, 42010},
+		MixedPort: 41999,
+		Mode:      "rule",
+		LogLevel:  "silent",
+		StateDir:  t.TempDir(),
+		Rules:     []string{"MATCH,PROXY"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(application.Shutdown)
+	if _, err := application.SetupTailscale(context.Background(), proxytailscale.Setup{
+		Name: "campone", ControlURL: "http://127.0.0.1:1", AuthMode: proxytailscale.AuthModeApproval, AccessMode: proxytailscale.AccessModeProxy,
+	}); err != nil {
+		t.Fatalf("准备 Tailscale 接入失败: %v", err)
+	}
+
+	server := New("127.0.0.1:0", application)
+	t.Cleanup(func() { server.Shutdown(context.Background()) })
+	remove := func() *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodDelete, "/api/tailscale/setups/campone", nil)
+		request.SetPathValue("name", "campone")
+		server.handleTerminateTailscaleSetup(recorder, request)
+		return recorder
+	}
+
+	recorder := remove()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("终止接口 status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result app.TailscaleTerminationResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil || result.Name != "campone" {
+		t.Fatalf("终止响应异常: result=%+v err=%v", result, err)
+	}
+	if cfg := application.Config(); len(cfg.ManualNodes) != 0 || len(cfg.Groups) != 0 {
+		t.Fatalf("API 终止后配置仍有残留: manual=%d groups=%d", len(cfg.ManualNodes), len(cfg.Groups))
+	}
+	if duplicate := remove(); duplicate.Code != http.StatusNotFound {
+		t.Fatalf("重复终止 status=%d, want 404", duplicate.Code)
+	}
+}
+
+// TestPreviewOpenVPNProfileAPI 验证 .ovpn 导入端点只返回远端与认证需求摘要，不会
+// 回显 CA、客户端私钥或内联 auth-user-pass 凭据。
+//
+// 参数说明：t 是 Go 测试上下文，用于构造隔离应用与 HTTP recorder。
+//
+// 返回值说明：无；通过状态码、摘要字段和响应原文的敏感词检查表达成功。
+//
+// 错误情况：profile 无法解析、摘要字段缺失，或任何证书/用户名/密码内容进入响应
+// 时测试失败；这保证导入预览符合管理接口的凭据最小暴露原则。
+func TestPreviewOpenVPNProfileAPI(t *testing.T) {
+	srv := vpnGroupTestServer(t)
+	profile := `remote vpn.example.com 443 tcp
+auth-user-pass
+<ca>
+-----BEGIN CERTIFICATE-----
+SENSITIVE-CA
+-----END CERTIFICATE-----
+</ca>`
+	body, err := json.Marshal(map[string]string{"profile": profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/openvpn/import", strings.NewReader(string(body)))
+	srv.handlePreviewOpenVPNProfile(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("导入预览 status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var preview struct {
+		Server               string `json:"server"`
+		Port                 int    `json:"port"`
+		Proto                string `json:"proto"`
+		RequiresUserPassword bool   `json:"requires_user_password"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.Server != "vpn.example.com" || preview.Port != 443 || preview.Proto != "tcp" || !preview.RequiresUserPassword {
+		t.Fatalf("导入摘要异常: %+v", preview)
+	}
+	if strings.Contains(recorder.Body.String(), "SENSITIVE-CA") || strings.Contains(recorder.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("导入预览泄露证书材料: %s", recorder.Body.String())
+	}
 }
 
 // TestGroupSelectAPI 验证 POST /api/groups/{name}/select 的请求校验与领域约束
@@ -121,8 +223,9 @@ func TestListGroupsExposesTypeAndSelected(t *testing.T) {
 }
 
 // TestAddManualNodeProxyAPI 验证 POST /api/manual-nodes 的 proxy 结构化入口：
-// 隧道类映射校验通过后持久化，列表响应中凭据字段（auth-key 等）已打码；
-// url 与 proxy 混用、非隧道类型、缺必填凭据均返回 400。
+// 隧道类映射校验通过后持久化，mihomo 原生 Tailscale 参数保持透传，列表响应中
+// 凭据字段（auth-key 等）已打码；url 与 proxy 混用、非隧道类型返回 400；Tailscale
+// 缺少 auth-key 时进入 mihomo/tsnet 管理员审批模式，因此结构化入口必须允许保存。
 func TestAddManualNodeProxyAPI(t *testing.T) {
 	srv := vpnGroupTestServer(t)
 
@@ -140,11 +243,11 @@ func TestAddManualNodeProxyAPI(t *testing.T) {
 	if rec := post(`{"proxy":{"name":"x","type":"ss","server":"h","port":8388}}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("非隧道类型 status=%d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
-	if rec := post(`{"proxy":{"name":"x","type":"tailscale"}}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("缺 auth-key status=%d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	if rec := post(`{"proxy":{"name":"approval","type":"tailscale","control-url":"https://hs.example.com"}}`); rec.Code != http.StatusCreated {
+		t.Errorf("管理员审批节点 status=%d, want 201 (body=%s)", rec.Code, rec.Body.String())
 	}
 
-	rec := post(`{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"tskey-auth-secret"},"name":""}`)
+	rec := post(`{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"tskey-auth-secret","exit-node":"auto:any","accept-routes":true,"udp":true,"ip-version":"ipv4-prefer"},"name":""}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("添加结构化节点 status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -172,9 +275,12 @@ func TestAddManualNodeProxyAPI(t *testing.T) {
 	if err := json.Unmarshal(list.Body.Bytes(), &entries); err != nil {
 		t.Fatal(err)
 	}
-	// 测试配置自带一个字符串手动节点（下标 0），结构化节点在下标 1。
-	if len(entries) != 2 || entries[1].Type != "tailscale" || entries[1].Proxy["auth-key"] != "***" {
+	// 测试配置自带一个字符串节点（下标 0）和审批节点（下标 1），带密钥节点在下标 2。
+	if len(entries) != 3 || entries[2].Type != "tailscale" || entries[2].Proxy["auth-key"] != "***" {
 		t.Fatalf("结构化手动节点列表条目异常: %+v", entries)
+	}
+	if entries[2].Proxy["exit-node"] != "auto:any" || entries[2].Proxy["accept-routes"] != true || entries[2].Proxy["udp"] != true || entries[2].Proxy["ip-version"] != "ipv4-prefer" {
+		t.Fatalf("Tailscale mihomo 原生参数未完整透传: %+v", entries[2].Proxy)
 	}
 }
 

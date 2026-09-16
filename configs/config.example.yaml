@@ -15,7 +15,7 @@ subscriptions:
 #   - ss://YWVzLTEyOC1nY206cHc=@1.2.3.4:8388#ss节点  # 以及 ss/ssr/vmess/vless/trojan/hy2/tuic 分享链接
 #   - name: ts-exit              # 也接受结构化隧道类（VPN）出站映射，type 限
 #     type: tailscale            # tailscale/openvpn/zerotier/wireguard/ssh；其余字段透传 mihomo
-#     auth-key: tskey-auth-...   # tailscale 必填 auth-key；openvpn 必填 server/port/ca
+#     auth-key: tskey-auth-...   # tailscale 可选：缺失时由 mihomo/tsnet 进入管理员审批；OpenVPN 推荐通过 Web 导入 inline .ovpn
 #                                # 凭据在列表接口与默认配置导出中打码；隧道节点不占端口映射，
 #                                # 经下方 groups 的分组端口使用（见手册「隧道类（VPN）出站」）
 

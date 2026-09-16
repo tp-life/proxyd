@@ -412,6 +412,8 @@ func sensitiveConfigKey(key string) bool {
 // mihomo VPN 类出站的私钥材料字段（见 adapter/outbound/openvpn.go 等），
 // 名称太短或太泛用，不能用包含匹配（会误伤 public-key/host-key 等公开字段）。
 var sensitiveConfigKeyExact = map[string]bool{
+	"ca":                     true, // openvpn CA 证书材料，可能暴露内部 PKI 信息
+	"cert":                   true, // openvpn 客户端证书材料
 	"key":                    true, // openvpn 客户端私钥
 	"private-key":            true, // wireguard/ssh 私钥
 	"private-key-passphrase": true, // ssh 私钥口令
@@ -517,9 +519,9 @@ type Config struct {
 	// RefreshInterval 仅用于兼容既有配置文件。订阅已改为只允许用户手动同步，
 	// 调度器不会读取该值创建下载定时器；保留字段可避免升级时拒绝旧 YAML。
 	RefreshInterval Duration `yaml:"refresh-interval"`
-	HealthInterval  Duration `yaml:"health-interval"`  // health check period, default 5m
-	HealthURL       string   `yaml:"health-url"`       // default https://www.gstatic.com/generate_204
-	HealthTimeout   Duration `yaml:"health-timeout"`   // default 5s
+	HealthInterval  Duration `yaml:"health-interval"` // health check period, default 5m
+	HealthURL       string   `yaml:"health-url"`      // default https://www.gstatic.com/generate_204
+	HealthTimeout   Duration `yaml:"health-timeout"`  // default 5s
 
 	Include string `yaml:"include,omitempty"` // regexp allow-list on node names; empty means allow all
 	Exclude string `yaml:"exclude,omitempty"` // regexp deny-list on node names; applied after include

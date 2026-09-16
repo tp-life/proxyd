@@ -19,7 +19,7 @@ type Node struct {
 	FailReason string
 }
 
-// Key 返回用于订阅去重和端口快照的稳定节点身份。
+// Key 返回用于端口快照、main-node 持久化以及通用去重基础的稳定节点身份。
 //
 // 参数：无；方法读取当前 Node.Mapping。
 //
@@ -28,6 +28,7 @@ type Node struct {
 // uuid → password → auth-key → private-key（后两者覆盖 tailscale/wireguard/ssh 等
 // 隧道类出站）。tailscale 类型无常规 server/port 时以 control-url 顶替 server 位置
 // 参与身份。普通节点保持历史 Key 格式不变，从而兼容已经持久化的 main-node 和端口映射快照。
+// 合并节点时应调用 DedupKey；它会为拥有独立 tsnet 状态的 Tailscale 出站补充名称维度。
 //
 // 错误情况：无；缺失或未知类型字段按空字符串参与身份计算。
 func (n *Node) Key() string {
@@ -65,6 +66,28 @@ func (n *Node) Key() string {
 		key += "|dialer=" + dialer
 	}
 	return key
+}
+
+// DedupKey 返回节点合并阶段使用的领域身份，不改变端口快照与 main-node 持久化所用
+// 的历史 Key 格式。
+//
+// 参数说明：无；方法读取 Node.Name 与 Node.Mapping，不修改节点内容。
+//
+// 返回值说明：普通节点直接返回 Key；Tailscale 节点额外包含出站名称，因为 mihomo
+// 会按名称为每个出站分配独立 tsnet 状态目录与设备身份。同一控制面下两个没有
+// auth-key 的审批节点因此仍是两个聚合实体，不能按空凭据合并。
+//
+// 错误情况：无；nil 节点返回空字符串。名称为空的异常 Tailscale 节点仍生成稳定
+// 后缀，后续配置解析会负责报告缺少名称，而不会在此阶段 panic。
+func (n *Node) DedupKey() string {
+	if n == nil {
+		return ""
+	}
+	key := n.Key()
+	if !n.IsTailscale() {
+		return key
+	}
+	return key + "|identity=" + strings.TrimSpace(n.Name)
 }
 
 // DialerProxy 返回该节点配置的链式拨号目标。

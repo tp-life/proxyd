@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/core"
@@ -149,6 +150,20 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
+	return a.refreshLocked(ctx, fetch)
+}
+
+// refreshLocked 执行完整节点刷新流水线，但不自行获取 refreshing 锁。
+//
+// 参数说明：
+//   - ctx: context.Context，控制订阅下载、规则源下载、健康检测与运行态应用。
+//   - fetch: bool，true 时显式下载订阅；false 时只使用现有内存与本地缓存。
+//
+// 返回值说明：error，节点来源为空、检测全部失败或 mihomo 热更新失败时返回。
+//
+// 错误情况：调用方必须已经持有 refreshing 锁。该拆分让 Tailscale 一体化接入能把
+// “修改配置 → 刷新节点池 → 持久化”纳入同一事务，避免在锁间隙被其它刷新覆盖。
+func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 	a.mu.RLock()
 	disabled := a.cfg.ProxyDisabled
 	a.mu.RUnlock()
@@ -301,7 +316,7 @@ func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets 
 	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.cfg.StateDir, dialerTargets...)
 }
 
-// applyNodes 执行健康检测后的流水线尾部，并完成链式代理的二阶段验证。
+// applyNodes 执行健康检测后的流水线尾部，并完成 mihomo 托管节点的二阶段验证。
 //
 // 参数：
 //   - ctx: context.Context，控制完整链路 URLTest 的取消与超时传播。
@@ -310,7 +325,8 @@ func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets 
 // 返回值：error，没有任何可用节点、端口分配后的配置无法加载，或完整链路全部失败时返回。
 //
 // 错误情况：调用方必须持有 a.refreshing 锁。普通节点已经由 pool.Check 直接测速；
-// dialer-proxy 节点先以依赖候选身份加载，随后通过 Runner.URLTest 验证真实完整链路。
+// dialer-proxy 节点先以依赖候选身份加载，Tailscale 则避免在核心外启动临时 tsnet；
+// 配置了 Exit Node 的 Tailscale 与普通链式节点随后通过 Runner.URLTest 验证真实链路。
 // 若候选失败，会重新分配端口并热加载一次，确保失败链路不会残留在最终监听入口。
 func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	// 先更新应用节点快照，让 GenerateWithNodes 能看到未分配端口的链路依赖。
@@ -348,10 +364,10 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 		return err
 	}
 
-	// pool.Check 无法在首次配置加载前解析 dialer-proxy 的运行时依赖。此处使用刚刚
-	// 生效的 mihomo 代理表执行真实 URLTest；只在可用性发生变化时重新生成配置，
-	// 延迟数值变化本身不触发第二次热更新，避免无意义地重建 listener。
-	if a.verifyDialerNodes(ctx, nodes) {
+	// pool.Check 无法在首次配置加载前解析 dialer-proxy 的运行时依赖，也不得为
+	// Tailscale 单独启动第二个 tsnet。此处使用刚生效的 mihomo 代理表执行真实
+	// URLTest；只在可用性变化时重生成，延迟变化不触发无意义的 listener 重建。
+	if a.verifyMihomoManagedNodes(ctx, nodes) {
 		alive = alive[:0]
 		for _, n := range nodes {
 			if n.Alive {
@@ -393,27 +409,63 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	// 顺带调和网关执行层：mihomo 入口刚热更新完毕，失败的 gateway 应用到点重试，
 	// 被外部清除的规则（如 helper 看门狗）也在此收敛。
 	a.reconcileGatewayLocked()
+	a.ensureInteractiveTailscaleEnrollments(nodes)
 	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
 	return nil
 }
 
-// verifyDialerNodes 使用已加载的 mihomo 代理表验证所有链式节点的真实端到端可用性。
+// ensureInteractiveTailscaleEnrollments 为没有 auth-key 的 mihomo Tailscale 出站恢复
+// 管理员审批状态观察，并在进程重启后主动触发一次 tsnet 登录。
+//
+// 参数说明：nodes 是刚成功加载到 mihomo 代理表的完整节点集合。
+//
+// 返回值说明：无；触发在有界后台协程执行，不阻塞刷新事务。
+//
+// 错误情况：已经存在注册状态的节点不会重复触发；网络或审批等待错误由 Runner
+// 状态记录。这样待审批配置即使重启，也能重新在管理面获得同一身份的注册链接。
+func (a *App) ensureInteractiveTailscaleEnrollments(nodes []*node.Node) {
+	for _, candidate := range nodes {
+		if candidate == nil || !candidate.Alive || !candidate.IsTailscale() {
+			continue
+		}
+		authKey, _ := candidate.Mapping["auth-key"].(string)
+		if strings.TrimSpace(authKey) != "" {
+			continue
+		}
+		if _, exists := a.runner.TailscaleEnrollment(candidate.Name); exists {
+			continue
+		}
+		a.runner.BeginTailscaleEnrollment(candidate.Name, "approval")
+		go func(name string) {
+			triggerCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			a.runner.TriggerTailscaleEnrollment(triggerCtx, name)
+		}(candidate.Name)
+	}
+}
+
+// verifyMihomoManagedNodes 使用已加载的 mihomo 代理表验证需要运行态探测的节点。
 //
 // 参数：
 //   - ctx: context.Context，整轮刷新取消时终止后续测试。
-//   - nodes: []*node.Node，包含普通节点和 dialer-proxy 节点的本轮节点集合。
+//   - nodes: []*node.Node，包含普通、dialer-proxy 与 Tailscale 节点的本轮节点集合。
 //
-// 返回值：bool，只要任一链式节点从候选可用变为不可用就返回 true，提示调用方重生成配置。
+// 返回值：bool，只要任一候选从可用变为不可用就返回 true，提示调用方重生成配置。
 //
 // 错误情况：代理不存在、上游组不可用、网络失败与超时均写入 FailReason。检测串行执行，
 // 因为 Runner 为保护 mihomo 全局代理表会持锁；这样避免并发 URLTest 与热更新产生竞态。
-func (a *App) verifyDialerNodes(ctx context.Context, nodes []*node.Node) bool {
+// 未配置 Exit Node 的 Tailscale 只承载 Tailnet/子网路由，公网 health-url 对其没有意义，
+// 因此保持“mihomo 已加载”候选状态，实际连接仍由 mihomo 按首次流量懒启动。
+func (a *App) verifyMihomoManagedNodes(ctx context.Context, nodes []*node.Node) bool {
 	availabilityChanged := false
 	for _, n := range nodes {
-		if n == nil || n.DialerProxy() == "" || !n.Alive {
+		if !needsMihomoRuntimeProbe(n) {
 			continue
 		}
-		delay, err := a.runner.URLTest(ctx, n.Name, a.cfg.HealthURL, a.cfg.HealthTimeout.D())
+		// Tailscale 首次启动可能需要完成控制面登录与 DERP 协商；继续复用代理域的
+		// 隧道超时策略，避免迁移到正式 mihomo 运行态后退化为普通节点的短超时。
+		timeout := pool.ProbeTimeout(n, a.cfg.HealthTimeout.D())
+		delay, err := a.runner.URLTest(ctx, n.Name, a.cfg.HealthURL, timeout)
 		if err != nil {
 			n.Alive = false
 			n.Delay = 0
@@ -425,6 +477,26 @@ func (a *App) verifyDialerNodes(ctx context.Context, nodes []*node.Node) bool {
 		n.FailReason = ""
 	}
 	return availabilityChanged
+}
+
+// needsMihomoRuntimeProbe 判断候选节点是否需要在正式 mihomo 代理表中执行公网测速。
+//
+// 参数：
+//   - n: *node.Node，已经完成预检查的节点。
+//
+// 返回值：bool，普通 dialer-proxy 节点或配置了 Exit Node 的 Tailscale 返回 true。
+//
+// 错误情况：无；nil、预检查失败及仅访问 Tailnet/子网路由的 Tailscale 返回 false。
+// Tailscale 的判断优先于 dialer-proxy，避免“使用上游拨号但未配置 Exit Node”的节点
+// 被拿公网 health-url 误判为失效。
+func needsMihomoRuntimeProbe(n *node.Node) bool {
+	if n == nil || !n.Alive {
+		return false
+	}
+	if n.IsTailscale() {
+		return n.TailscaleExitNode() != ""
+	}
+	return n.DialerProxy() != ""
 }
 
 // firstErrorLine 把底层多行错误压缩为适合节点状态展示的一行文本。

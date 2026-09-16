@@ -118,6 +118,8 @@ func (s *Server) Start() error {
 	// 代理域路由，按关注点分散在各 proxy_*.go 的 register 方法中。
 	s.registerProxySubscriptionRoutes(mux)
 	s.registerProxyNodeRoutes(mux)
+	s.registerProxyTailscaleRoutes(mux)
+	s.registerProxyOpenVPNRoutes(mux)
 	s.registerProxyRuleRoutes(mux)
 	s.registerProxyGroupRoutes(mux)
 	s.registerProxyPortRoutes(mux)

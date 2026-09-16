@@ -737,6 +737,11 @@
     @apply mt-0;
   }
 
+  /* 同一业务大类下存在多个任务分组时留出稳定间距，避免 VPN 接入与常规代理项视觉混排。 */
+  .nav-section + .nav-section {
+    @apply mt-3;
+  }
+
   .nav-item {
     @apply relative flex h-10 w-full items-center gap-3 rounded-lg border border-transparent bg-transparent px-3 text-left text-sm font-medium text-sidebar-muted outline-none transition-colors duration-200;
   }
@@ -1095,13 +1100,74 @@
     @apply mt-5 grid gap-4;
   }
 
+  /*
+   * 节点录入使用比通用确认框更宽的编辑画布。普通节点需要容纳地址与名称两列，
+   * Tailscale/OpenVPN 的证书、路由和认证字段更多，因此再扩大一档并提高视口上限。
+   */
+  .node-dialog {
+    width: min(720px, calc(100vw - 32px));
+    max-height: min(90vh, 820px);
+  }
+
+  .tunnel-dialog {
+    width: min(960px, calc(100vw - 32px));
+    max-height: min(92vh, 900px);
+  }
+
+  /*
+   * 所有节点输入按同一双列轨道排布；分段选择、提示、组合行和长文本独占整行。
+   * 采用顶部对齐是为了避免某列存在 hint 时把另一列输入框向下推，确保控件基线一致。
+   */
+  .node-dialog-form {
+    @apply grid-cols-2 items-start gap-x-5 gap-y-4;
+  }
+
+  /* Input 组件高度为 40px，这里把 Radix Select 同步到同一高度以统一横向基线。 */
+  .node-dialog-form .radix-select-trigger {
+    @apply h-10;
+  }
+
+  .node-dialog-form > .segmented,
+  .node-dialog-form > .notice-row,
+  .node-dialog-form > .vpn-field-row,
+  .node-dialog-form > .grid,
+  .node-dialog-form > .dialog-error,
+  .node-dialog-form > .openvpn-import-summary,
+  .node-dialog-form > .field:has(.openvpn-profile-input),
+  .node-dialog-form > .field:has(textarea) {
+    grid-column: 1 / -1;
+  }
+
+  /* 原生文件控件保留系统文件选择能力，同时与项目 Input 的高度和边框保持一致。 */
+  .openvpn-profile-input {
+    @apply block h-10 w-full cursor-pointer rounded-md border bg-background px-3 py-2 text-sm text-foreground file:mr-3 file:border-0 file:bg-transparent file:text-sm file:font-medium disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  /* 导入摘要只展示非敏感元数据；兼容性警告独占下一行，避免与移除按钮争夺宽度。 */
+  .openvpn-import-summary {
+    @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-primary/25 bg-primary/5 p-3 text-xs;
+  }
+
+  .openvpn-import-summary > div {
+    @apply grid min-w-0 gap-1;
+  }
+
+  .openvpn-import-summary strong,
+  .openvpn-import-summary span {
+    @apply truncate;
+  }
+
+  .openvpn-import-summary ul {
+    @apply col-span-2 m-0 grid gap-1 pl-5 text-warning;
+  }
+
   .dialog-error {
     @apply m-0 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive;
   }
 
-  /* VPN 节点表单内的两列并排（端口/协议、用户名/密码）。 */
+  /* VPN 节点表单内的两列并排（端口/协议、用户名/密码），从顶部统一输入基线。 */
   .vpn-field-row {
-    @apply grid grid-cols-2 items-end gap-3;
+    @apply grid grid-cols-2 items-start gap-5;
   }
 
   /*
@@ -1272,6 +1338,40 @@
   .item-list code,
   .rule-url code {
     @apply min-w-0 flex-1 truncate text-xs text-muted-foreground;
+  }
+
+  /*
+   * VPN 独立页把“配置节点”和“关联策略组”拆成连续面板。行内名称区允许徽标换行，
+   * 摘要占据剩余空间，状态与删除操作固定在尾部，避免长控制地址挤乱对齐。
+   */
+  .tunnel-resource-stack {
+    @apply grid gap-4;
+  }
+
+  .tunnel-resource-list > li,
+  .tunnel-group-list > li {
+    @apply flex-wrap;
+  }
+
+  .tunnel-resource-name {
+    @apply flex min-w-0 shrink-0 items-center gap-2;
+  }
+
+  .tunnel-resource-name > b {
+    @apply max-w-64 truncate;
+  }
+
+  .tunnel-resource-list code,
+  .tunnel-group-list code {
+    @apply basis-48;
+  }
+
+  .tunnel-resource-empty {
+    @apply m-0 rounded-lg border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground;
+  }
+
+  .tunnel-group-selected {
+    @apply shrink-0 rounded border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-primary;
   }
 
   .copy-link {
@@ -2699,6 +2799,23 @@
   /* 手机以单列卡片保留触控空间，长列表仅在弹窗中滚动。 */
   .fixed-node-list { grid-template-columns: minmax(0, 1fr); }
   .fixed-node-filters { grid-template-columns: minmax(0, 1fr); }
+
+  /* 节点和 VPN 弹窗在窄屏回退到单列，保证证书、地址与辅助说明不会横向挤压。 */
+  .node-dialog,
+  .tunnel-dialog {
+    width: min(calc(100vw - 24px), 720px);
+    max-height: calc(100dvh - 24px);
+    @apply p-5;
+  }
+
+  .node-dialog-form,
+  .vpn-field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .node-dialog-form > * {
+    grid-column: 1;
+  }
 
   .workspace {
     @apply overflow-x-hidden;

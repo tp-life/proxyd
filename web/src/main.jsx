@@ -58,7 +58,7 @@ import { useTrafficStream } from "@/hooks/useTrafficStream";
 import { ConnectionsPage } from "@/pages/ConnectionsPage";
 import { GroupsPage } from "@/pages/GroupsPage";
 import { LogsPage } from "@/pages/LogsPage";
-import { NodesPage } from "@/pages/NodesPage";
+import { NodesPage, OpenVPNPage, TailscalePage } from "@/pages/NodesPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { ProxyOverviewPage } from "@/pages/ProxyOverviewPage";
 import { useDashboardFeed } from "@/hooks/useDashboardFeed";
@@ -906,6 +906,20 @@ function App() {
                 onTest={() => triggerOperation("/api/test", "测速")}
               />
             )}
+            {activeView === "proxy/tailscale" && (
+              <TailscalePage
+                overview={overview}
+                onDelete={deleteJSON}
+                onPost={postJSON}
+              />
+            )}
+            {activeView === "proxy/openvpn" && (
+              <OpenVPNPage
+                overview={overview}
+                onDelete={deleteJSON}
+                onPost={postJSON}
+              />
+            )}
             {activeView === "subscriptions" && (
               <SubscriptionsPage
                 overview={overview}
@@ -1122,6 +1136,8 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
 function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
   const currentGroup = NAV_ITEMS.find((item) => item.id === activeView)?.group;
   const module = modules.find((item) => item.id === currentGroup);
+  const currentItems = navItems.filter((item) => item.group === currentGroup);
+  const sectionNames = [...new Set(currentItems.map((item) => item.section || ""))];
 
   /**
    * renderItem 渲染任务入口，桌面和移动端共用同一注册项。
@@ -1160,7 +1176,12 @@ function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, co
         </div>
         <nav className="nav-list" aria-label="当前大类子菜单">
           <div className="nav-section-title">{NAV_GROUPS.find((group) => group.id === currentGroup)?.label}</div>
-          {navItems.filter((item) => item.group === currentGroup).map(renderItem)}
+          {sectionNames.map((section) => (
+            <div className="nav-section" key={section || currentGroup}>
+              {section && <div className="nav-heading">{section}</div>}
+              {currentItems.filter((item) => (item.section || "") === section).map(renderItem)}
+            </div>
+          ))}
         </nav>
         {module && <div className="module-sidebar-control"><span>{module.name} · {module.enabled ? "已启用" : "已禁用"}</span><Button size="sm" variant="outline" disabled={Boolean(moduleBusy)} onClick={() => onToggleModule(module)}>{moduleBusy === module.id ? "应用中…" : module.enabled ? "禁用模块" : "启用模块"}</Button></div>}
         <div className={classNames("sidebar-status", !connected && "pending")}><i aria-hidden="true" /><span>本机服务</span><b>{connected ? "运行中" : "连接中"}</b></div>

@@ -49,7 +49,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 - `http://[user:pass@]host:port[#名称]` / `https://...`（mihomo http 出站，https 自动启用 TLS）
 - `socks5://[user:pass@]host:port[#名称]`
 - 全部分享链接格式：ss / ssr / vmess / vless / trojan / hy2 / tuic（节点名取 `#fragment`）
-- 结构化隧道类（VPN）出站映射：`tailscale` / `openvpn` / `zerotier` / `wireguard` / `ssh`（无分享链接标准，以映射形式录入；tailscale 必填 `auth-key`，openvpn 必填 `server`/`port`/`ca`，其余字段透传 mihomo）。这类节点不参与逐节点端口映射，经分组端口使用，详见「六、规则与代理模式 → 隧道类（VPN）出站」
+- 结构化隧道类（VPN）出站映射：`tailscale` / `openvpn` / `zerotier` / `wireguard` / `ssh`（无分享链接标准，以映射形式录入；Tailscale 与 OpenVPN 另提供一体化向导；OpenVPN 可直接导入 inline `.ovpn`）。这类节点不参与逐节点端口映射，经分组端口使用，详见「六、规则与代理模式 → 隧道类（VPN）出站」
 
 **去重与过滤**：
 
@@ -139,7 +139,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd subs refresh <名>` / `proxyd subs test <名>` | 只刷新 / 只测速单个订阅（同步执行，失败原因直接返回） |
 | `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因；隧道类（VPN）节点带 `vpn` 标记且无端口映射 |
 | `proxyd nodes add <url> [名称]` | 添加手动节点（http(s)/socks5/分享链接） |
-| `proxyd nodes add --proxy '<出站JSON>' [名称]` | 添加隧道类（VPN）手动节点：`<出站JSON>` 是 mihomo 出站映射，type 限 `tailscale\|openvpn\|zerotier\|wireguard\|ssh`（tailscale 必填 auth-key，openvpn 必填 server/port/ca） |
+| `proxyd nodes add --proxy '<出站JSON>' [名称]` | 添加隧道类（VPN）手动节点：`<出站JSON>` 是 mihomo 出站映射，type 限 `tailscale\|openvpn\|zerotier\|wireguard\|ssh`（tailscale 的 auth-key 可选，缺失时由 tsnet 输出交互注册链接；openvpn 必填 server/port/ca） |
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
 | `proxyd rules list\|add "<规则>"\|set <下标> "<规则>"\|move <从> <到>\|del <下标>` | 自定义规则的增改删与优先级调整 |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
@@ -256,6 +256,12 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `GET /api/manual-nodes` | 列出手动节点（index/url 或结构化映射 type + 已打码的 proxy/解析出的名称） |
 | `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台重建现有节点，不下载订阅） |
 | `POST /api/manual-nodes` `{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"..."},"name":"可选覆盖"}` | 添加结构化隧道类（VPN）手动节点；type 限 `tailscale/openvpn/zerotier/wireguard/ssh`，与 `url` 二选一，其余字段透传 mihomo |
+| `POST /api/tailscale/setups` | 一体化创建 Tailscale 出站、单成员 select 分组、固定代理入口与可选 TUN 规则；`auth_mode` 支持 `approval`/`auth-key`，`port: 0` 自动分配 |
+| `DELETE /api/tailscale/setups/{name}` | 终止失败、启动中或等待审批的接入，并以事务方式删除 Tailscale 出站、引用该节点且已清空的组、受管 TUN 路由和内存注册状态；同名随后可重新创建 |
+| `GET /api/tailscale/enrollments[/{name}]` | 读取当前进程观察到的注册状态；管理员审批模式包含一次性 `registration_url`，Headscale 的 `/register/<Auth ID>` 链接还会返回独立的 `auth_id`；二者均不写入配置文件 |
+| `POST /api/openvpn/import` `{"profile":"..."}` | 解析 `.ovpn` 并只返回 server/port/proto、认证需求与兼容性警告；不回显证书、私钥或内联密码 |
+| `POST /api/openvpn/setups` | 一体化创建 OpenVPN 出站、单成员 select 分组、固定代理入口与可选 TUN 规则；支持原始 `profile`、`auth-user-pass` 与 `private_key_passphrase` |
+| `DELETE /api/openvpn/setups/{name}` | 以事务方式删除 OpenVPN 出站、所有成员引用、已清空的组及该组受管 TUN 路由 |
 | `DELETE /api/manual-nodes/{index}` | 按下标删除手动节点 |
 | `POST /api/port-mapping` `{"enabled":false}` | 热开关逐节点端口映射；关闭时保留稳定分配，核心不再生成对应 listener |
 | `POST /api/port-range` `{"range":"43000-43200"}` | 修改节点映射端口区间（同步：重新分配端口 + 热更新，不重新测速） |
@@ -388,9 +394,9 @@ groups:
 
 - **不参与逐节点端口映射**：不占用 `port-range` 区间，overview/节点列表中带 `tunnel: true` 标识且 `port` 恒为 0；使用方式是配置一个分组（`subscription: manual` 或 `nodes: [...]`），把应用指向该分组绑定的固定端口。
 - **故障断流（kill switch）**：组内无可用成员时该分组本轮不生成监听端口，连接直接被拒，**不会**回退到 DIRECT 或规则模式——VPN 出口失效时不会明文漏流。
-- **测速放宽**：隧道节点健康检测超时为 `health-timeout` 的 3 倍（tsnet 首次需 DERP 协商）。
+- **mihomo 统一管理 Tailscale**：proxyd 不直接调用 Tailscale SDK，也不在预检查阶段启动第二个 tsnet。预检查只验证 mihomo 能否解析出站；配置了 `exit-node` 时，正式加载后再通过 mihomo 代理表访问 `health-url`，未配置 Exit Node 的 Tailnet/子网路由出站不使用公网目标判死，由 mihomo 在首次匹配流量时懒启动。其它需要网络探测的隧道节点仍把超时放宽为 `health-timeout` 的 3 倍。
 - **main-node 不禁止引用** VPN 节点（高级用户兼容路径），但主端口常被系统代理指向，误选会把整机流量送进隧道，默认请走分组。
-- **录入方式**：tailscale/openvpn 没有分享链接标准，用手动节点的结构化映射录入——Web 表单、`proxyd nodes add --proxy '<出站JSON>'`、API 的 `POST /api/manual-nodes`（`proxy` 字段）或直接在 `manual-nodes` 里写 YAML 映射；Clash YAML 订阅里的同类出站同样按隧道归类。tailscale 必填 `auth-key`（可选 `control-url`/`hostname`）；openvpn 必填 `server`/`port` 与 `ca` 证书材料；其余 mihomo 字段原样透传。
+- **录入方式**：Web 的 Tailscale 与 OpenVPN 页面都提供一体化向导，以单个事务创建出站、单成员 `select` 分组、固定代理入口和可选 TUN 规则；任何一步失败都会恢复旧配置与运行态。OpenVPN 可直接上传 inline `.ovpn`，也可继续手工填写 `server`/`port`/`ca`；高级用户仍可通过 `proxyd nodes add --proxy '<出站JSON>'`、API 的 `POST /api/manual-nodes`（`proxy` 字段）或直接在 `manual-nodes` 写 YAML 映射。Tailscale 的 `auth-key` 可省略；省略时 mihomo/tsnet 生成注册链接，控制台显示后交给 Headscale 管理员批准。
 - **tailscale 状态目录固定**：tsnet 出站的 `state-dir` 由 proxyd 统一改写为 `state-dir/tsnet/<安全节点名>-<身份哈希>/`，按节点隔离，防止重启后重新认证与节点身份漂移；若节点映射里显式设置了 `state-dir`，以用户值为准并打警告日志。
 - **凭据打码**：`auth-key`、私钥、证书材料等纳入与 remote 模块相同的打码清单——节点/手动节点列表、状态接口与默认配置导出中显示为 `***`，完整值只经完整备份导出返回。
 
@@ -398,7 +404,11 @@ groups:
 manual-nodes:
   - name: ts-exit
     type: tailscale
-    auth-key: tskey-auth-...        # 也可配 control-url（自建 headscale）与 hostname
+    auth-key: tskey-auth-...        # 凭据只交给 mihomo tsnet，不由 proxyd 调用 SDK
+    exit-node: auto:any             # 可选；留空表示仅访问 Tailnet/子网路由
+    accept-routes: true
+    udp: true
+    ip-version: ipv4-prefer
 
 groups:
   - name: vpn-exit
@@ -412,6 +422,14 @@ proxyd nodes add --proxy '{"name":"ts-exit","type":"tailscale","auth-key":"tskey
 proxyd groups add --type select --subscription manual vpn-exit 43002
 proxyd groups select vpn-exit ts-exit
 ```
+
+**Headscale 管理员审批示例**：在「代理节点 → 添加节点 → VPN 节点 → Tailscale」选择“管理员审批”，填写 `https://hs.example.com`、设备名与访问方式后点击“创建并发起注册”。proxyd 会主动触发 mihomo 的懒加载 tsnet 出站，并在同一对话框显示注册链接、Auth ID 与可复制的 `headscale auth register --user <USER> --auth-id <AUTH_ID>` 审批命令；管理员需把 `<USER>` 替换为实际 Headscale 用户。解析器只接受 tsnet 明确的用户登录提示，不会把 `/machine/register` 等控制面 DEBUG 地址误显示为注册链接。启动中、等待审批或注册失败时可点击“终止并删除”：操作会取消主动探测，并以单个事务清理出站、已清空的引用组、受管 TUN 路由和启动快照，完成后允许同名重新创建；单纯“关闭”只退出对话框，不会删除已经提交的配置。该流程等价于 Tailscale 客户端首次执行 `tailscale up --login-server=...` 的控制面注册，但使用独立的 tsnet 设备身份，不复用本机 Tailscale 客户端状态。首次注册不需要 `--force-reauth`；后续重启复用隔离的 `state-dir/tsnet/...` 身份目录。
+
+**OpenVPN `.ovpn` 导入与认证**：在「代理 → OpenVPN → 添加 OpenVPN」选择文件后，proxyd 解析 `remote`、`proto`、算法、keepalive 及 `<ca>/<cert>/<key>/<tls-auth>/<tls-crypt*>` 内联块，并在提交时转换成 mihomo 原生出站。单文件导入无法读取 `.ovpn` 所引用的 `ca.crt`、`client.key` 等外部相对路径；这类配置会明确拒绝，请先转换成 inline block。多个 `remote` 只使用第一项，mihomo 不支持的非关键指令会在导入摘要中列出。
+
+- `auth-user-pass`：支持。外部凭据文件不会从 proxyd 主机读取，页面会要求填写用户名与登录密码；若 profile 使用 `<auth-user-pass>` 内联内容则直接导入。
+- `askpass`：支持传统加密 PEM 与现代 PKCS#8 `ENCRYPTED PRIVATE KEY`。mihomo 没有 askpass 配置字段，因此 proxyd 只在创建请求内使用该口令解密客户端私钥，**askpass 本身不落盘**；解密后的私钥写入权限为 0600 的 proxyd 配置文件，并在列表、状态和默认导出中打码。
+- `.ovpn` 的系统路由指令不会直接修改宿主机路由；透明访问范围由向导的“访问方式 + TUN 目标 IP/CIDR”统一管理。只用代理入口时，支持 SOCKS/HTTP 代理的应用连接分组端口；数据库、远程桌面等直连私网 IP 的应用通常选择 TUN 或 both。
 
 > 注意区分「远程连接」（第十章）：那是 tailcat 的**入方向**管理隧道（SSH/SCP/RDP），与本节 mihomo 的**出方向** VPN 出口互不相关，两者共存且不使用对方的网络栈。
 

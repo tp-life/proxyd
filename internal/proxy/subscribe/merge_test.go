@@ -46,6 +46,33 @@ func TestMergeDedup(t *testing.T) {
 	}
 }
 
+// TestMergeKeepsDistinctTailscaleIdentities 验证同一 Headscale 控制面下的多个
+// 交互审批节点不会因为 auth-key 同为空而被通用出站去重逻辑合并。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文，用于报告合并结果断言失败。
+//
+// 返回值说明：无；通过节点数量与名称断言表达 Tailscale 身份边界。
+//
+// 错误情况：若去重只使用 type、control-url 与空 auth-key，后出现的节点会消失，
+// 对应策略组无法生成，注册触发器最终会报告 mihomo 中不存在该代理。
+func TestMergeKeepsDistinctTailscaleIdentities(t *testing.T) {
+	home := &node.Node{Name: "home", Mapping: map[string]any{
+		"name": "home", "type": "tailscale", "control-url": "https://hs.example.com", "hostname": "home",
+	}}
+	test := &node.Node{Name: "test", Mapping: map[string]any{
+		"name": "test", "type": "tailscale", "control-url": "https://hs.example.com", "hostname": "test",
+	}}
+
+	out := Merge(map[string][]*node.Node{ManualSubscription: {home, test}}, nil)
+	if len(out) != 2 {
+		t.Fatalf("同一控制面的独立 Tailscale 身份必须全部保留，got=%d nodes=%v", len(out), out)
+	}
+	if out[0].Name != "home" || out[1].Name != "test" {
+		t.Fatalf("Tailscale 节点顺序或名称异常: first=%q second=%q", out[0].Name, out[1].Name)
+	}
+}
+
 // TestFetchAllSkipsDisabledSubscription 验证禁用订阅不会进入拉取或合并流水线。
 // 测试使用无法解析的 URL；如果实现误发请求，对应错误槽位就会出现错误。
 //

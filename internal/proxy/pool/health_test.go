@@ -265,15 +265,72 @@ func TestCheckLimitsWorkerGoroutines(t *testing.T) {
 // 错误情况：隧道节点未放宽、普通节点被放大，或 nil 节点未按普通节点处理时测试失败。
 func TestProbeTimeoutRelaxesTunnelNodes(t *testing.T) {
 	base := 5 * time.Second
-	if got := probeTimeout(socksNode("plain", 1080), base); got != base {
+	if got := ProbeTimeout(socksNode("plain", 1080), base); got != base {
 		t.Errorf("普通节点超时 = %v, 期望 %v", got, base)
 	}
 	tunnel := &node.Node{Mapping: map[string]any{"type": "tailscale", "auth-key": "k"}}
-	if got := probeTimeout(tunnel, base); got != base*tunnelTimeoutFactor {
+	if got := ProbeTimeout(tunnel, base); got != base*tunnelTimeoutFactor {
 		t.Errorf("隧道节点超时 = %v, 期望 %v", got, base*tunnelTimeoutFactor)
 	}
-	if got := probeTimeout(nil, base); got != base {
+	if got := ProbeTimeout(nil, base); got != base {
 		t.Errorf("nil 节点超时 = %v, 期望 %v", got, base)
+	}
+}
+
+// TestCheckDefersTailscaleNetworkToMihomo 验证预健康检查只让 mihomo 解析 Tailscale
+// 出站配置，不会在正式核心之外启动 tsnet 并访问控制面。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无；通过候选状态与未知延迟断言表达结果。
+//
+// 错误情况：若预检查错误地执行 URLTest，指向本机拒绝端口的 control-url 会导致
+// 节点失败；正确实现应只完成配置解析并把节点交给正式 mihomo 运行时。
+func TestCheckDefersTailscaleNetworkToMihomo(t *testing.T) {
+	tailscale := &node.Node{
+		Name: "mihomo-tsnet",
+		Mapping: map[string]any{
+			"name":        "mihomo-tsnet",
+			"type":        "tailscale",
+			"auth-key":    "tskey-auth-test",
+			"control-url": "http://127.0.0.1:1",
+		},
+	}
+	// stateDir 留空可让 mihomo 使用其安全默认目录；本测试只验证解析阶段不拨号，
+	// 不调用进程级 SetHomeDir，避免与同包并行测试共享全局路径状态。
+	Check(context.Background(), []*node.Node{tailscale}, "http://127.0.0.1:1", 50*time.Millisecond, 1, "")
+	if !tailscale.Alive {
+		t.Fatalf("Tailscale 配置候选不应在预检查阶段拨号: reason=%q", tailscale.FailReason)
+	}
+	if tailscale.Delay != 0 || tailscale.FailReason != "" {
+		t.Fatalf("Tailscale 预检查状态异常: delay=%d reason=%q", tailscale.Delay, tailscale.FailReason)
+	}
+}
+
+// TestCheckCancelledTailscaleCandidate 验证刷新取消后不会把尚未交给 mihomo 的
+// Tailscale 配置错误标记为可用。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无；通过 Alive 与 FailReason 断言表达结果。
+//
+// 错误情况：取消信号未传播、候选仍被标记为可用或没有失败原因时测试失败。
+func TestCheckCancelledTailscaleCandidate(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tailscale := &node.Node{
+		Name: "cancelled-tsnet",
+		Mapping: map[string]any{
+			"name":     "cancelled-tsnet",
+			"type":     "tailscale",
+			"auth-key": "tskey-auth-test",
+		},
+	}
+	Check(ctx, []*node.Node{tailscale}, "https://example.com", time.Second, 1, "")
+	if tailscale.Alive || tailscale.FailReason == "" {
+		t.Fatalf("已取消 Tailscale 候选状态异常: %+v", tailscale)
 	}
 }
 

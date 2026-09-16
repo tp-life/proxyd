@@ -41,6 +41,38 @@ func TestIsTunnel(t *testing.T) {
 	}
 }
 
+// TestTailscaleRuntimeMetadata 验证 Tailscale 运行时判定只读取 mihomo 出站映射，
+// 不依赖任何 Tailscale SDK 类型；同时确保 Exit Node 文本会规范化空白。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无；通过断言表达结果。
+//
+// 错误情况：普通节点被误判为 Tailscale、nil 节点 panic，或 exit-node 未正确读取时失败。
+func TestTailscaleRuntimeMetadata(t *testing.T) {
+	tailscale := &Node{Mapping: map[string]any{
+		"type":      "tailscale",
+		"auth-key":  "tskey-auth-test",
+		"exit-node": "  auto:any  ",
+	}}
+	if !tailscale.IsTailscale() {
+		t.Fatal("type=tailscale 的节点应由 mihomo Tailscale Adapter 管理")
+	}
+	if got := tailscale.TailscaleExitNode(); got != "auto:any" {
+		t.Fatalf("TailscaleExitNode() = %q, want auto:any", got)
+	}
+
+	ordinary := &Node{Mapping: map[string]any{"type": "socks5", "exit-node": "100.64.0.1"}}
+	if ordinary.IsTailscale() || ordinary.TailscaleExitNode() != "" {
+		t.Fatal("非 Tailscale 节点不得暴露 Tailscale 运行时元数据")
+	}
+	var nilNode *Node
+	if nilNode.IsTailscale() || nilNode.TailscaleExitNode() != "" {
+		t.Fatal("nil 节点应安全返回 Tailscale=false、ExitNode 为空")
+	}
+}
+
 // TestNodeKeyTunnelCredentials 验证隧道类节点的稳定身份扩展：
 // 凭据按 uuid → password → auth-key → private-key 优先级提取，
 // tailscale 无 server 时以 control-url 顶替 server 位置。

@@ -19,14 +19,14 @@ const defaultConcurrency = 32
 // tsnet/openvpn 首次拨号涉及 DERP 协商或 TLS 握手，普通节点的秒级超时对它们必然过紧。
 const tunnelTimeoutFactor = 3
 
-// Check 并发地检测普通节点，并为 dialer-proxy 链式节点建立可加载的候选状态。
+// Check 并发地检测普通节点，并为 Tailscale 与 dialer-proxy 节点建立可加载候选状态。
 //
 // 参数：
 //   - ctx: context.Context，控制整轮检测的取消；取消后尚未执行的节点标记为不可用。
 //   - nodes: []*node.Node，待检测节点；结果原地写回 Alive、Delay 与 FailReason。
 //   - url: string，普通节点 URLTest 使用的探测地址。
 //   - timeout: time.Duration，单节点网络探测的最大时长；隧道类节点自动放大
-//     tunnelTimeoutFactor 倍（见 probeTimeout）。
+//     tunnelTimeoutFactor 倍（见 ProbeTimeout）。
 //   - concurrency: int，最大并发探测数；小于等于 0 时使用默认值 32。
 //   - stateDir: string，proxyd 状态目录，用于 tailscale 节点的 tsnet 状态目录改写
 //     （见 node.WithTunnelStateDir）；为空时不改写。
@@ -34,9 +34,10 @@ const tunnelTimeoutFactor = 3
 //
 // 返回值：无；单节点失败通过节点状态表达，不中断其它节点检测。
 //
-// 错误情况：普通节点的超时、协议解析和网络错误写入 FailReason。链式节点在
-// mihomo 配置加载前无法完成真实 URLTest，因此这里只校验配置结构、依赖存在性和
-// 循环引用，并继承上游延迟形成候选；应用层加载完整代理表后会再次做端到端测速。
+// 错误情况：普通节点的超时、协议解析和网络错误写入 FailReason。Tailscale 出站
+// 不在预检查阶段拨号，避免在正式 mihomo 核心之外启动第二个 tsnet；这里只验证
+// mihomo 能否解析配置。链式节点同样先校验结构、依赖和循环引用，需公网探测的
+// Tailscale Exit Node 与普通链式节点由应用层在完整代理表加载后执行端到端测速。
 func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Duration, concurrency int, stateDir string, dialerTargets ...string) {
 	if concurrency <= 0 {
 		concurrency = defaultConcurrency
@@ -76,7 +77,7 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 	resolveDialerCandidates(nodes, dialerTargets)
 }
 
-// checkOne 检测一个不含 dialer-proxy 的普通节点。
+// checkOne 检测一个不含 dialer-proxy 的节点，或建立 Tailscale 配置候选。
 //
 // 参数：
 //   - ctx: context.Context，继承整轮检测取消信号。
@@ -85,7 +86,8 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 //   - timeout: time.Duration，普通节点允许占用的最大检测时间；隧道类节点按倍数放宽。
 //   - stateDir: string，proxyd 状态目录，用于 tailscale 节点的 tsnet 状态目录改写。
 //
-// 返回值：无；成功写入延迟并标记 Alive，失败写入首行错误。
+// 返回值：无；普通节点成功时写入延迟并标记 Alive；Tailscale 配置可解析时标记为
+// mihomo 候选且延迟保持 0；失败写入首行错误。
 //
 // 错误情况：配置无法解析、网络失败或超时都将节点标记为不可用，不向调用方抛错。
 func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Duration, stateDir string) {
@@ -93,9 +95,10 @@ func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Durati
 	n.Delay = 0
 	n.FailReason = ""
 
-	// 隧道类出站（tailscale）必须经状态目录改写后再建适配器：URLTest 会真正拉起
-	// tsnet，使用默认目录会与运行态实例（gen 生成的配置）身份不一致，且多节点
-	// 共用 <state-dir>/tailscale 互相覆盖。
+	// Tailscale 映射仍使用正式运行时相同的隔离 state-dir 做语义校验，但预检查绝不
+	// 调用 URLTest：URLTest 会启动 tsnet，造成健康检查实例与正式 mihomo 实例同时
+	// 管理同一身份。解析得到的临时 Adapter 必须关闭，因为 NewTailscale 会注册 DNS
+	// transport，即使尚未拨号也持有进程级资源。
 	mapping, _ := node.WithTunnelStateDir(stateDir, n)
 	proxy, err := adapter.ParseProxy(mapping)
 	if err != nil {
@@ -103,8 +106,21 @@ func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Durati
 		n.FailReason = "配置解析失败: " + err.Error()
 		return
 	}
+	defer func() {
+		// 健康探测 Adapter 不属于正式 mihomo 代理表，必须在本轮结束时释放。关闭失败
+		// 不改变已经完成的网络探测结论；正式运行态会由 Runner/Executor 独立管理。
+		_ = proxy.Close()
+	}()
+	if n.IsTailscale() {
+		if err := ctx.Err(); err != nil {
+			n.FailReason = firstLine(err.Error())
+			return
+		}
+		n.Alive = true
+		return
+	}
 
-	cctx, cancel := context.WithTimeout(ctx, probeTimeout(n, timeout))
+	cctx, cancel := context.WithTimeout(ctx, ProbeTimeout(n, timeout))
 	defer cancel()
 
 	delay, err := proxy.URLTest(cctx, url, nil)
@@ -177,13 +193,17 @@ func resolveDialerCandidates(nodes []*node.Node, dialerTargets []string) {
 			states[n] = 2
 			return false
 		}
-		if _, err := adapter.ParseProxy(n.Mapping); err != nil {
+		proxy, err := adapter.ParseProxy(n.Mapping)
+		if err != nil {
 			n.Alive = false
 			n.Delay = 0
 			n.FailReason = "配置解析失败: " + err.Error()
 			states[n] = 2
 			return false
 		}
+		// 链式候选这里只验证 mihomo 配置结构，不属于正式代理表；及时关闭可释放
+		// Tailscale DNS transport、SSH 会话池等适配器级资源，且不会发起任何网络连接。
+		_ = proxy.Close()
 
 		// 已知节点依赖继承其延迟，未知名称可能是稍后生成的 proxy-group；后者使用
 		// 最大值避免在端口容量不足时挤掉已经完成真实测速的普通节点。
@@ -203,7 +223,10 @@ func resolveDialerCandidates(nodes []*node.Node, dialerTargets []string) {
 	}
 }
 
-// probeTimeout 返回单个节点允许占用的最大探测时长。
+// ProbeTimeout 返回单个节点允许占用的最大探测时长。
+//
+// 该策略同时提供给预检查和应用层的 mihomo 运行态探测，确保 Tailscale 等隧道
+// 节点即使改由正式 mihomo 代理表管理，也仍有足够时间完成首次控制面与中继协商。
 //
 // 参数：
 //   - n: *node.Node，待检测节点。
@@ -212,7 +235,7 @@ func resolveDialerCandidates(nodes []*node.Node, dialerTargets []string) {
 // 返回值：time.Duration，隧道类节点放大 tunnelTimeoutFactor 倍，其余节点原样返回。
 //
 // 错误情况：无；nil 节点按普通节点处理。
-func probeTimeout(n *node.Node, base time.Duration) time.Duration {
+func ProbeTimeout(n *node.Node, base time.Duration) time.Duration {
 	if n.IsTunnel() {
 		return base * tunnelTimeoutFactor
 	}

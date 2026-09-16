@@ -71,6 +71,8 @@ func parseManualProxy(mapping map[string]any) (*node.Node, error) {
 }
 
 // validateManualProxyRequired 校验隧道类出站的必填凭据/地址字段。
+// Tailscale 的 auth-key 故意保持可选：缺失时 mihomo/tsnet 会进入交互式注册并
+// 输出控制面登录地址，供 proxyd 的一体化接入向导呈现给管理员审批。
 func validateManualProxyRequired(mapping map[string]any) error {
 	str := func(key string) string {
 		value, _ := mapping[key].(string)
@@ -78,10 +80,6 @@ func validateManualProxyRequired(mapping map[string]any) error {
 	}
 	typ, _ := mapping["type"].(string)
 	switch typ {
-	case node.TunnelTypeTailscale:
-		if str("auth-key") == "" {
-			return errors.New("tailscale 出站必须提供 auth-key")
-		}
 	case node.TunnelTypeOpenVPN:
 		if str("server") == "" {
 			return errors.New("openvpn 出站必须提供 server")
