@@ -44,8 +44,8 @@
 ```sh
 make              # 一次性完整构建：先构建 Web，再生成嵌入前端的 bin/proxyd
 make all          # 与 make 等价，适合在脚本或 CI 中显式调用
-make build        # 输出 bin/proxyd
-make release      # 用 GoReleaser 生成本地快照包（需预先安装 GoReleaser v2）
+make build        # 输出 bin/proxyd；Linux/Windows 自动使用 UPX 压缩
+make release      # 生成本地快照包（需预先安装 GoReleaser v2 与 UPX）
 ```
 
 正式版本通过 tag 自动发布。以下命令会先确认工作区干净，重建 Web、运行全量 Go 测试，
@@ -59,6 +59,10 @@ GitHub Actions 随后自动创建 Release，并上传 macOS（amd64/arm64）、L
 Windows（amd64）构建包、源码包和 `SHA256SUMS`。所有最终归档还会通过 GitHub Artifact
 Attestations 生成 SLSA provenance，可使用 `gh attestation verify <归档文件> --repo tp-life/proxyd`
 验证构建来源。
+
+Linux 与 Windows 二进制在编译后使用 UPX `-6` 压缩，并在归档前执行 UPX 完整性检测。
+UPX 上游当前不支持现代 macOS Mach-O，强制压缩后的程序会被系统终止，因此 macOS
+构建仍只使用 Go 的 `-s -w` 裁剪；该平台不会调用不安全的 `--force-macos`。
 
 ## 使用
 
@@ -199,7 +203,7 @@ geox-url:
 go test -tags "with_gvisor ts_omit_acme" ./... # 单元测试 + 端到端测试（e2e/，本地假节点全流程验证）
 make              # 推荐：先构建 Web，再编译嵌入最新前端资源的 bin/proxyd
 make web          # 构建 React 控制台到 internal/api/dist，供 Go embed 使用
-make build        # 只构建 Go 二进制，使用已生成的前端 dist，不强制依赖 Node
+make build        # 只构建 Go 二进制；Linux/Windows 需 UPX，macOS 因上游不支持而跳过压缩
 ```
 
 项目结构：`cmd/proxyd`（CLI/守护进程/本地 API 客户端；`cli.go` 提供共享 apiClient，功能按域拆分）、`internal/config`（配置；含独立 `remote.go`/`desktop.go`）、`internal/proxy`（代理域）、`internal/remote`（tailcat 隧道唯一实现点）、`internal/desktop`（不依赖 tailcat/HTTP 的桌面会话模型与回收规则）、`internal/app`（用例和配置事务编排）、`internal/api`（各垂直模块 REST 路由与 Web embed 产物）、`web`（React 控制台源码；远程连接与远程桌面各自拥有独立 page/hook）、`internal/autostart`（开机自启）。

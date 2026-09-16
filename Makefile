@@ -8,6 +8,8 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # 重复注册全局 expvar。构建、测试、静态检查和发布必须统一使用这一组标签。
 GOTAGS  := -tags "with_gvisor ts_omit_acme"
 GORELEASER ?= goreleaser
+UPX ?= upx
+UPX_COMPRESS := ./scripts/upx-compress.sh
 TAG ?=
 
 # TAG 只通过环境传给 shell，避免把用户输入直接拼进命令文本。
@@ -20,10 +22,13 @@ export TAG
 # 使用 `make` 或 `make all` 即可完成一次性完整构建，避免误用旧的 internal/api/dist。
 all: web build
 
-# build 仅编译 Go 程序，并嵌入 internal/api/dist 中当前已有的前端产物。
-# 保留独立目标是为了让无 Node.js 的发布环境能够使用已经生成并提交的静态资源。
+# build 编译 Go 程序、嵌入 internal/api/dist 中当前已有的前端产物，并在目标格式受
+# 支持时使用 UPX 压缩。macOS Mach-O 被 UPX 上游明确标记为不受支持，因此脚本会安全
+# 跳过；Linux ELF 与 Windows PE 缺少 UPX 时则让构建失败，避免误以为产物已经压缩。
+# 可通过 UPX=/绝对路径/upx 覆盖命令位置，适合 CI 或未把 UPX 加入 PATH 的环境。
 build:
 	go build $(GOTAGS) -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)
+	UPX="$(UPX)" $(UPX_COMPRESS) bin/$(BINARY) "$$(go env GOOS)"
 
 # web 从 React 源码生成供 Go embed 打包的 internal/api/dist 静态资源。
 web:
@@ -39,15 +44,19 @@ clean:
 	rm -rf bin dist
 
 # release 使用与 GitHub Actions 相同的 GoReleaser 配置生成本地快照包。
-# 参数：可用 GORELEASER=/path/to/goreleaser 覆盖命令位置；不接收发布 tag。
+# 参数：可用 GORELEASER=/path/to/goreleaser、UPX=/path/to/upx 覆盖命令位置；不接收发布 tag。
 # 返回值：成功时在 dist/ 生成五个平台包、源码包和 SHA256SUMS，不创建 GitHub Release。
-# 错误情况：缺少 GoReleaser、Web 构建失败或任一平台交叉编译失败时返回非零状态。
+# 错误情况：缺少 GoReleaser/UPX、Web 构建失败、UPX 完整性检测失败或任一平台交叉编译失败时返回非零状态。
 release: web
 	@command -v "$(GORELEASER)" >/dev/null 2>&1 || { \
 		echo "错误：未找到 goreleaser，请先安装 GoReleaser v2，或通过 GORELEASER 指定路径。" >&2; \
 		exit 1; \
 	}
-	$(GORELEASER) release --snapshot --clean
+	@command -v "$(UPX)" >/dev/null 2>&1 || { \
+		echo "错误：未找到 UPX，请先安装 UPX，或通过 UPX 指定路径。" >&2; \
+		exit 1; \
+	}
+	UPX="$(UPX)" $(GORELEASER) release --snapshot --clean
 
 # tag 创建并推送触发 GitHub Release 的 annotated tag。
 # 参数：TAG，必须是 vMAJOR.MINOR.PATCH，可选 SemVer prerelease/build 后缀，例如 v1.2.3-rc.1。

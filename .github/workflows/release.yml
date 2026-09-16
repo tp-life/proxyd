@@ -69,6 +69,24 @@ jobs:
         # make test 使用与发布一致的 with_gvisor + ts_omit_acme 构建标签。
         run: make test
 
+      - name: 安装并校验 UPX
+        shell: bash
+        env:
+          # 固定版本与官方 SHA-256，避免 latest 漂移或下载内容被替换后进入发布产物。
+          UPX_VERSION: "5.2.1"
+          UPX_SHA256: "402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          directory="$RUNNER_TEMP/upx-${UPX_VERSION}-amd64_linux"
+          curl --fail --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          printf '%s  %s\n' "$UPX_SHA256" "$archive" | sha256sum --check --strict
+          tar --extract --xz --file "$archive" --directory "$RUNNER_TEMP"
+          "$directory/upx" --version
+          echo "$directory" >> "$GITHUB_PATH"
+
       - name: 构建并创建 GitHub Release
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:

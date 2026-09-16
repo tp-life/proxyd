@@ -38,6 +38,13 @@ builds:
       - -s -w -X main.version=v{{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+    # 每个目标完成编译后统一进入项目脚本：Linux/Windows 使用 UPX -6 原地压缩并
+    # 执行完整性检测，macOS 因现代 Mach-O 不受 UPX 支持而安全跳过。
+    hooks:
+      post:
+        - cmd: ./scripts/upx-compress.sh "{{ .Path }}" "{{ .Target }}"
+          output: true
+
 archives:
   - id: proxyd
     ids:

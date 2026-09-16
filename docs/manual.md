@@ -65,9 +65,13 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 ```sh
 make            # 一次性完整构建：Web → internal/api/dist → bin/proxyd
 make all        # 与 make 等价，适合显式写入构建脚本或 CI
-make build      # 产出 bin/proxyd（单文件，无外部依赖）
+make build      # 产出 bin/proxyd；Linux/Windows 自动使用 UPX 压缩
 make web        # 仅重建 Web 控制台 embed 产物（internal/api/dist）
 ```
+
+Linux 与 Windows 构建要求 PATH 中存在 UPX（也可使用 `UPX=/绝对路径/upx make build`），
+编译后默认以 `-6` 压缩并执行完整性检测。UPX 当前不支持现代 macOS Mach-O；项目在
+macOS 上会明确跳过 UPX，继续使用 Go `-s -w` 裁剪，避免 `--force-macos` 生成无法启动的程序。
 
 Go 依赖直接按 `go.mod` 的固定版本从模块源下载，项目不再通过 `replace`、`third_party` 或源码补丁修改 mihomo。mihomo 内部问题由上游负责修复，本项目在上游版本包含修复后通过常规依赖升级获取。
 
