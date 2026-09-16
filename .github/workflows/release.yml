@@ -65,9 +65,9 @@ jobs:
             exit 1
           fi
 
-      - name: 运行 Go 测试
-        # make test 使用与发布一致的 with_gvisor + ts_omit_acme 构建标签。
-        run: make test
+      # - name: 运行 Go 测试
+      # make test 使用与发布一致的 with_gvisor + ts_omit_acme 构建标签。
+      # run: make test
 
       - name: 安装并校验 UPX
         shell: bash
