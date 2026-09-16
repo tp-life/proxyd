@@ -65,6 +65,11 @@ func main() {
 			err = cmdDiagnose(os.Args[2:])
 		case "modules":
 			err = cmdModules(os.Args[2:])
+		case "gateway":
+			err = cmdGateway(os.Args[2:])
+		case "gateway-helper":
+			// 内部子命令：macOS 特权 helper 服务端，由 launchd 以 root 托管。
+			err = cmdGatewayHelperServe(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -161,7 +166,10 @@ usage:
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
   proxyd diagnose [-c 配置] [设备] [--json]  分阶段诊断与脱敏报告
   proxyd config history list|export <ID>|preview <ID>|restore <ID> [--yes]
-  proxyd modules [-c 配置] list | proxy|remote on|off|retry  模块管理
+  proxyd modules [-c 配置] list | proxy|remote|gateway on|off|retry  模块管理
+  proxyd gateway [-c 配置] status|precheck   LAN 网关状态 / 启用前检查（helper/能力位指引）
+  proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
+  proxyd gateway helper install|uninstall|status   （macOS）特权 helper 本地安装管理（需管理员授权）
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
   proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式（需系统权限）
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
@@ -178,11 +186,13 @@ usage:
   proxyd subs refresh|test <名>         只刷新/测速单个订阅
   proxyd nodes                          按订阅分组列出节点/端口/延迟
   proxyd nodes add <url> [名称]         添加手动节点（http/socks5/分享链接）
+  proxyd nodes add --proxy '<出站JSON>' [名称]   添加隧道类（VPN）手动节点（tailscale/openvpn 等）
   proxyd nodes del <名称|下标>          删除手动节点
   proxyd rules list|add "<规则>"|set <下标> "<规则>"|move <从> <到>|del <下标>   自定义规则
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
   proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点...]   修改分组
+  proxyd groups select <组名> <节点名>   选择 select 分组的出口节点（持久化）
   proxyd logs [--tail N] [--level info|warning|error|debug]   查看最近日志
   proxyd port-range <起-止>             修改节点映射端口区间
   proxyd port-mapping [on|off|status]   开关/查看节点一对一端口映射
@@ -486,7 +496,7 @@ func cmdCheck(args []string) error {
 		return fmt.Errorf("no nodes parsed from subscriptions")
 	}
 	log.Printf("[check] %d nodes after merge, running health checks...", len(nodes))
-	pool.Check(ctx, nodes, cfg.HealthURL, cfg.HealthTimeout.D(), 32)
+	pool.Check(ctx, nodes, cfg.HealthURL, cfg.HealthTimeout.D(), 32, cfg.StateDir)
 
 	aliveNodes := make([]*node.Node, 0, len(nodes))
 	for _, n := range nodes {

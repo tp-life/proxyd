@@ -79,8 +79,8 @@ func (a *App) AddSubscription(name, url string) (config.Subscription, error) {
 //   - config.Subscription，补齐名称、类型和 enabled 后的已提交值。
 //   - error，字段校验、唯一性校验或持久化失败时返回。
 //
-// 错误情况：该方法只提交配置，不拉取订阅；启用后的首次拉取由 API 异步触发。
-// 持久化失败会删除刚追加的内存项，保持运行态与磁盘一致。
+// 错误情况：该方法只提交配置，新增且启用也不会自动拉取；用户必须明确点击同步后，
+// 节点才会进入运行态。持久化失败会删除刚追加的内存项，保持内存与磁盘一致。
 func (a *App) AddSubscriptionEntry(sub config.Subscription) (config.Subscription, error) {
 	sub.Name = strings.TrimSpace(sub.Name)
 	sub.URL = strings.TrimSpace(sub.URL)
@@ -119,22 +119,21 @@ func (a *App) AddSubscriptionEntry(sub config.Subscription) (config.Subscription
 }
 
 // UpdateSubscription 编辑订阅名称、URL、类型和启用状态，并把策略组引用、节点运行态
-// 与配置文件作为一次事务提交。启用订阅前必须成功拉取远端内容，或通过 FetchWarning
-// 明确证明存在可解析缓存；否则旧的禁用状态保持不变。
+// 与配置文件作为一次事务提交。该设置用例不访问订阅 URL：来源 URL/类型变化时移除旧来源
+// 节点，重新启用但内存中没有旧节点时保持为空，直到用户明确执行手动同步。
 //
 // 参数：
-//   - ctx: context.Context，控制订阅拉取和目标节点健康检测的取消/超时。
+//   - ctx: context.Context，保留用于兼容调用方；编辑过程不执行网络 I/O。
 //   - currentName: string，要编辑的现有订阅名。
 //   - next: config.Subscription，目标订阅值；Enabled 为 nil 时沿用旧状态。
 //
 // 返回值：
 //   - config.Subscription，规范化并成功提交的目标值。
-//   - error，订阅不存在、字段/唯一性非法、拉取无缓存、无可用出口、核心热更新、
-//     配置持久化或回滚失败时返回。
+//   - error，订阅不存在、字段/唯一性非法、核心热更新、配置持久化或回滚失败时返回。
 //
 // 错误情况：方法持有 refreshing 锁串行化整个事务。任何提交失败都会恢复旧订阅、
 // 策略组引用、节点、端口 assignments、用量信息和 mihomo 配置；组合失败不会被吞掉。
-func (a *App) UpdateSubscription(ctx context.Context, currentName string, next config.Subscription) (config.Subscription, error) {
+func (a *App) UpdateSubscription(_ context.Context, currentName string, next config.Subscription) (config.Subscription, error) {
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
 
@@ -149,12 +148,12 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 			break
 		}
 	}
-	stateDir := a.cfg.StateDir
 	oldSubscriptions := append([]config.Subscription(nil), a.cfg.Subscriptions...)
 	oldGroups := cloneNodeGroups(a.cfg.Groups)
 	oldNodes := append([]*node.Node(nil), a.nodes...)
 	oldAssignments := append([]pool.Assignment(nil), a.assigns...)
 	oldInfos := cloneSubscriptionInfos(a.subInfos)
+	stateDir := a.cfg.StateDir
 	a.mu.RUnlock()
 	if index < 0 {
 		return config.Subscription{}, fmt.Errorf("订阅 %q 不存在", currentName)
@@ -187,32 +186,19 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		}
 	}
 
-	// 来源未变化（URL/类型未改且保持启用）时无需重新拉取：复用现有节点及其健康状态，
-	// 只更新订阅归属标签。改名/原样保存因此立即完成，不再阻塞在订阅网络 I/O 上。
-	// 旧配置可能缺省 type（等价 auto），比较前先归一化，避免误判为来源变化。
+	// 编辑订阅永远不隐式下载。来源未变化且原本已启用时复用现有节点及健康状态；
+	// URL/类型变化后旧节点已经不能代表新来源，必须移除并等待用户手动同步。重新启用
+	// 同样只复用仍在内存中的同源节点，不从磁盘缓存或网络悄悄恢复。
+	// 旧配置可能缺省 type（等价 auto），比较前先归一化，避免误判来源变化。
 	currentType := current.Type
 	if currentType == "" {
 		currentType = "auto"
 	}
 	sourceChanged := current.URL != next.URL || currentType != next.Type
-	needFetch := next.IsEnabled() && (!current.IsEnabled() || sourceChanged)
 
 	var freshNodes []*node.Node
 	var freshInfo subscribe.UserInfo
-	if needFetch {
-		var fetchErr error
-		freshNodes, freshInfo, fetchErr = subscribe.FetchWithInfo(ctx, next, stateDir)
-		if fetchErr != nil {
-			var warning *subscribe.FetchWarning
-			if !errors.As(fetchErr, &warning) {
-				return config.Subscription{}, fmt.Errorf("启用订阅前拉取失败且没有可用缓存: %w", fetchErr)
-			}
-			log.Printf("[subscribe] %v", fetchErr)
-		}
-		if len(freshNodes) == 0 {
-			return config.Subscription{}, fmt.Errorf("订阅 %q 没有可用的节点内容，未提交启用", next.Name)
-		}
-	} else if next.IsEnabled() {
+	if next.IsEnabled() && current.IsEnabled() && !sourceChanged {
 		for _, existing := range oldNodes {
 			if existing == nil || existing.Subscription != current.Name {
 				continue
@@ -221,7 +207,7 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 			cloned.Subscription = next.Name
 			freshNodes = append(freshNodes, &cloned)
 		}
-		// 用量缓存跟随改名迁移，避免概览页的流量/到期信息在改名后丢失
+		// 用量缓存只随同一来源改名迁移；URL/类型变化后旧用量已不再对应新订阅。
 		if info, ok := oldInfos[current.Name]; ok {
 			freshInfo = info
 		}
@@ -252,26 +238,12 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		nodesBySource[next.Name] = freshNodes
 	}
 	nextNodes := subscribe.MergeFiltered(nodesBySource, a.includeRe, a.excludeRe)
-	if needFetch {
-		checkList := make([]*node.Node, 0, len(freshNodes))
-		for _, candidate := range nextNodes {
-			if candidate.Subscription == next.Name {
-				checkList = append(checkList, candidate)
-			}
-		}
-		a.checkNodes(ctx, checkList, groupNames(nextGroups)...)
-	}
 
 	alive := make([]*node.Node, 0, len(nextNodes))
 	for _, candidate := range nextNodes {
 		if candidate.Alive {
 			alive = append(alive, candidate)
 		}
-	}
-	// 健康节点保护只约束真正改变来源的提交（换 URL/重新启用）；纯改名不会降低可用性，
-	// 不应因为节点此刻全部失效而被拒绝。
-	if needFetch && len(nextNodes) > 0 && len(alive) == 0 {
-		return config.Subscription{}, fmt.Errorf("订阅设置未提交：当前没有任何健康节点可维持代理运行")
 	}
 	previousSnapshot, snapshotErr := pool.LoadSnapshot(a.snapshotPath())
 	if snapshotErr != nil {
@@ -284,14 +256,12 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 	a.cfg.Groups = nextGroups
 	a.nodes = nextNodes
 	a.assigns = nextAssignments
-	if next.IsEnabled() && !freshInfo.IsZero() {
+	// 先清除旧名和目标名的用量，再按“同一来源且仍启用”的条件恢复，避免 URL
+	// 变化后界面继续展示旧订阅套餐信息。
+	delete(a.subInfos, current.Name)
+	delete(a.subInfos, next.Name)
+	if next.IsEnabled() && !sourceChanged && !freshInfo.IsZero() {
 		a.subInfos[next.Name] = freshInfo
-	}
-	if current.Name != next.Name {
-		delete(a.subInfos, current.Name)
-	}
-	if !next.IsEnabled() {
-		delete(a.subInfos, next.Name)
 	}
 	a.mu.Unlock()
 
@@ -307,6 +277,15 @@ func (a *App) UpdateSubscription(ctx context.Context, currentName string, next c
 		return config.Subscription{}, a.rollbackSubscriptionLocked(
 			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, persistErr, true,
 		)
+	}
+	// 同名订阅改变 URL 或解析类型后，旧缓存无法证明属于新来源。正文缓存若无法
+	// 失效就回滚整个设置事务，防止下一轮健康检测把旧节点静默恢复到新订阅下。
+	if sourceChanged && current.Name == next.Name {
+		if err := subscribe.InvalidateCache(stateDir, current.Name); err != nil {
+			return config.Subscription{}, a.rollbackSubscriptionLocked(
+				oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, err, true,
+			)
+		}
 	}
 
 	// 快照只在运行态与配置文件都提交成功后更新。这样失败回滚不会让下一次刷新
@@ -465,6 +444,7 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 			break
 		}
 	}
+	stateDir := a.cfg.StateDir
 	a.mu.RUnlock()
 	if target == nil {
 		return fmt.Errorf("subscription %q not found", name)
@@ -473,7 +453,7 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 		return fmt.Errorf("订阅 %q 已禁用，请先启用后再刷新", name)
 	}
 
-	fresh, info, err := subscribe.FetchWithInfo(ctx, *target, a.cfg.StateDir)
+	fresh, info, err := subscribe.FetchWithInfoOptions(ctx, *target, stateDir, a.subscriptionFetchOptions())
 	if err != nil {
 		var w *subscribe.FetchWarning
 		if !errors.As(err, &w) {
@@ -657,18 +637,29 @@ func filterEnabledSubscriptionNodes(nodes []*node.Node, subscriptions []config.S
 
 // ManualNodeEntry 是手动节点列表的展示项（供 API 返回）。
 type ManualNodeEntry struct {
-	Index int    `json:"index"`
-	URL   string `json:"url"`
-	Name  string `json:"name"` // 解析出的节点名（fragment/兜底），解析失败为空
+	Index int            `json:"index"`
+	URL   string         `json:"url,omitempty"`   // 字符串条目（代理 URL/分享链接）
+	Type  string         `json:"type,omitempty"`  // 结构化条目的出站协议（tailscale/openvpn/...）
+	Name  string         `json:"name"`            // 解析出的节点名（fragment/name 字段/兜底），解析失败为空
+	Proxy map[string]any `json:"proxy,omitempty"` // 结构化 VPN 出站映射（凭据字段已打码）
 }
 
 // ManualNodes 返回配置中的手动节点列表（供 API 展示）。
+// 结构化条目的出站映射经 config.RedactMapping 打码，完整凭据不进入列表响应。
 func (a *App) ManualNodes() []ManualNodeEntry {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	out := make([]ManualNodeEntry, 0, len(a.cfg.ManualNodes))
-	for i, u := range a.cfg.ManualNodes {
-		out = append(out, ManualNodeEntry{Index: i, URL: u, Name: subscribe.ManualNodeName(u)})
+	for i, entry := range a.cfg.ManualNodes {
+		item := ManualNodeEntry{Index: i, Name: subscribe.ManualNodeName(entry)}
+		switch typed := entry.(type) {
+		case string:
+			item.URL = typed
+		case map[string]any:
+			item.Type, _ = typed["type"].(string)
+			item.Proxy = config.RedactMapping(typed)
+		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -699,6 +690,38 @@ func (a *App) AddManualNode(rawURL, name string) (ManualNodeEntry, error) {
 		return ManualNodeEntry{}, err
 	}
 	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, URL: rawURL, Name: subscribe.ManualNodeName(rawURL)}, nil
+}
+
+// AddManualProxy 添加结构化隧道类（VPN）手动节点并持久化。
+// name 非空时覆盖映射中的 name 字段；name 为空时要求映射自带 name。
+// 映射按隧道类型白名单与必填凭据校验（subscribe.ParseManualNode），其余字段透传。
+// 与既有手动节点同名（解析后的节点名冲突）会被拒绝。调用方负责随后触发 Refresh。
+func (a *App) AddManualProxy(mapping map[string]any, name string) (ManualNodeEntry, error) {
+	name = strings.TrimSpace(name)
+	candidate := make(map[string]any, len(mapping)+1)
+	for k, v := range mapping {
+		candidate[k] = v
+	}
+	if name != "" {
+		candidate["name"] = name
+	}
+	parsed, err := subscribe.ParseManualNode(candidate)
+	if err != nil {
+		return ManualNodeEntry{}, fmt.Errorf("结构化节点校验失败: %w", err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.cfg.ManualNodes {
+		if subscribe.ManualNodeName(e) == parsed.Name {
+			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", parsed.Name)
+		}
+	}
+	a.cfg.ManualNodes = append(a.cfg.ManualNodes, candidate)
+	if err := a.persistLocked(); err != nil {
+		return ManualNodeEntry{}, err
+	}
+	typ, _ := candidate["type"].(string)
+	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, Name: parsed.Name, Type: typ}, nil
 }
 
 // RemoveManualNode 按下标删除手动节点并持久化。调用方负责随后触发 Refresh。

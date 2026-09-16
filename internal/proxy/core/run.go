@@ -19,9 +19,14 @@ import (
 
 // Runner 以库方式内嵌运行 mihomo 核心，支持启动、热更新与关闭。
 type Runner struct {
-	mu       sync.Mutex
-	stateDir string
-	started  bool
+	mu                  sync.Mutex
+	stateDir            string
+	started             bool
+	shutdown            chan struct{}
+	shutdownOnce        sync.Once
+	tailscaleEnrollment tailscaleEnrollmentTracker
+	tailscaleTriggerMu  sync.Mutex
+	tailscaleTriggers   map[string]*tailscaleEnrollmentTrigger
 }
 
 // NewRunner 创建 Runner。stateDir 作为 mihomo 的 home 目录（存 cache.db / geo 文件），
@@ -35,7 +40,7 @@ func NewRunner(stateDir string) *Runner {
 			ensureStateDirWritable(stateDir)
 		}
 	}
-	return &Runner{stateDir: stateDir}
+	return &Runner{stateDir: stateDir, shutdown: make(chan struct{})}
 }
 
 // geoFileNames 是 mihomo 会在 home 目录读写的 geo 数据文件（见 mihomo constant/path.go）。
@@ -131,6 +136,40 @@ func (r *Runner) URLTest(ctx context.Context, name, url string, timeout time.Dur
 	return delay, nil
 }
 
+// triggerTailscaleURLTest 为注册触发器执行不占用 Runner 全程锁的 Tailscale URLTest。
+//
+// 参数说明：ctx 控制取消；name 是 Tailscale 出站名称；url 是仅用于触发懒启动的
+// 目标；timeout 是探测上限。
+//
+// 返回值说明：错误为核心未启动、代理不存在或 URLTest 失败；调用方不使用延迟值。
+//
+// 错误情况：方法只在读取全局代理表时持锁，取得适配器引用后立即释放。tsnet 在等待
+// 管理员审批时可能不会及时响应请求 context；若沿用 URLTest 的全程锁，终止接入的
+// Reload 会被阻塞到十五秒超时。mihomo 热更新会关闭旧适配器，因此这里允许 Reload
+// 与等待中的触发请求并发，由适配器关闭负责收敛旧请求。普通健康检查仍使用 URLTest
+// 的强串行语义，不受这一注册专用例外影响。
+func (r *Runner) triggerTailscaleURLTest(ctx context.Context, name, url string, timeout time.Duration) error {
+	r.mu.Lock()
+	if !r.started {
+		r.mu.Unlock()
+		return fmt.Errorf("mihomo core is not started")
+	}
+	proxy, exists := tunnel.Proxies()[name]
+	r.mu.Unlock()
+	if !exists {
+		return fmt.Errorf("mihomo proxy %q not found", name)
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	if _, err := proxy.URLTest(ctx, url, nil); err != nil {
+		return fmt.Errorf("proxy %q URLTest: %w", name, err)
+	}
+	return nil
+}
+
 // TUNEnabled 返回 mihomo 当前实际生效的 TUN listener 状态。
 //
 // 参数：无。
@@ -148,6 +187,8 @@ func (r *Runner) TUNEnabled() bool {
 
 // Shutdown 关闭 mihomo 核心（清理 listener 等）。
 func (r *Runner) Shutdown() {
+	r.shutdownOnce.Do(func() { close(r.shutdown) })
+	r.tailscaleEnrollment.Close()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	executor.Shutdown()

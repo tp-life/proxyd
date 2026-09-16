@@ -18,7 +18,7 @@ import (
 const maxConcurrentSubscriptionFetches = 4
 
 // Merge 合并多个订阅的节点：
-//   - 按 Node.Key() 去重，先出现的保留（订阅按名字排序后依次处理，保证结果稳定）；
+//   - 按 Node.DedupKey() 去重，先出现的保留（订阅按名字排序后依次处理，保证结果稳定）；
 //   - excludeRe 非 nil 时按节点名过滤掉匹配项；
 //   - 保证 Name 全局唯一：冲突时追加 " (订阅名)"，仍冲突再追加序号；
 //   - 同步设置 Mapping["name"] 和 Node.Subscription。
@@ -34,10 +34,10 @@ func Merge(subs map[string][]*node.Node, excludeRe *regexp.Regexp) []*node.Node 
 //   - excludeRe: *regexp.Regexp，非 nil 时剔除名称匹配的节点；exclude 优先级更高。
 //
 // 返回值：
-//   - []*node.Node：按来源名稳定排序、按节点 Key 去重并保证名称全局唯一的结果。
+//   - []*node.Node：按来源名稳定排序、按节点领域去重键去重并保证名称全局唯一的结果。
 //
-// 错误情况：无；nil/无 Mapping 的节点会被忽略。相同 Key 只评估稳定排序后首次出现的
-// 节点名称，保持历史去重语义，不因后续来源的别名改变过滤结果。
+// 错误情况：无；nil/无 Mapping 的节点会被忽略。相同 DedupKey 只评估稳定排序后
+// 首次出现的节点名称，保持普通节点的历史去重语义，不因后续来源的别名改变过滤结果。
 func MergeFiltered(subs map[string][]*node.Node, includeRe, excludeRe *regexp.Regexp) []*node.Node {
 	names := make([]string, 0, len(subs))
 	for name := range subs {
@@ -57,7 +57,10 @@ func MergeFiltered(subs map[string][]*node.Node, includeRe, excludeRe *regexp.Re
 			if n == nil || n.Mapping == nil {
 				continue
 			}
-			key := n.Key()
+			// Tailscale 出站名称同时决定独立的 tsnet 状态目录和设备身份，因此必须使用
+			// 领域去重键；若继续复用通用 Key，同一控制面下多个空 auth-key 的审批节点
+			// 会被错误合并，后续策略组与注册触发器都无法在 mihomo 中找到被丢节点。
+			key := n.DedupKey()
 			if retained := seenKey[key]; retained != nil {
 				// 去重节点仍可能被同一份订阅中的 dialer-proxy 以别名引用。记录别名
 				// 到实际保留节点的最终名称，避免依赖节点虽然等价却被误判为不存在。
@@ -193,6 +196,24 @@ func FetchAllWithInfo(ctx context.Context, subs []config.Subscription, stateDir 
 //
 // 错误情况：单源失败仅写入对应错误槽位；静态来源不会产生 UserInfo。
 func FetchAllWithInfoAndFilters(ctx context.Context, subs []config.Subscription, stateDir string, includeRe, excludeRe *regexp.Regexp, static ...map[string][]*node.Node) ([]*node.Node, map[string]UserInfo, []error) {
+	return FetchAllWithInfoAndFiltersOptions(ctx, subs, stateDir, includeRe, excludeRe, FetchOptions{}, static...)
+}
+
+// FetchAllWithInfoAndFiltersOptions 并发拉取订阅，并为每个网络来源应用相同的降级策略。
+//
+// 参数说明：
+//   - ctx: context.Context，用于取消全部 worker、HTTP 请求与重试退避。
+//   - subs: []config.Subscription，保持配置顺序的订阅列表。
+//   - stateDir: string，订阅正文和用量缓存目录。
+//   - includeRe/excludeRe: *regexp.Regexp，节点名称包含/排除过滤器。
+//   - options: FetchOptions，主链路失败时使用的本机主端口代理配置。
+//   - static: 手动节点等非 HTTP 来源，按来源名参与最终合并。
+//
+// 返回值说明：合并节点、有效用量映射和与 subs 一一对应的错误槽位。
+//
+// 错误情况：单个来源的所有网络路径失败时只写对应槽位；有缓存时返回
+// *FetchWarning 并继续合并缓存节点，不会取消其它并发来源。
+func FetchAllWithInfoAndFiltersOptions(ctx context.Context, subs []config.Subscription, stateDir string, includeRe, excludeRe *regexp.Regexp, options FetchOptions, static ...map[string][]*node.Node) ([]*node.Node, map[string]UserInfo, []error) {
 	nodesBySub := make(map[string][]*node.Node, len(subs)+len(static))
 	for _, m := range static {
 		for src, nodes := range m {
@@ -221,7 +242,7 @@ func FetchAllWithInfoAndFilters(ctx context.Context, subs []config.Subscription,
 			defer wg.Done()
 			for i := range jobs {
 				sub := subs[i]
-				nodes, info, err := FetchWithInfo(ctx, sub, stateDir)
+				nodes, info, err := FetchWithInfoOptions(ctx, sub, stateDir, options)
 				if err != nil {
 					var warning *FetchWarning
 					errs[i] = err

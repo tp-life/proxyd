@@ -116,7 +116,7 @@ func cmdStart(args []string) error {
 	fmt.Printf("主端口(规则模式): %s:%d，节点映射区间: %d-%d\n", cfg.Listen, cfg.MixedPort, cfg.PortRange[0], cfg.PortRange[1])
 	fmt.Printf("日志: %s\n", logPathFor(cfg))
 	if !ready {
-		fmt.Println("注意：就绪等待超时，服务可能仍在初始化（首次需拉取订阅/下载 geo 数据），可稍后 proxyd status 确认")
+		fmt.Println("注意：就绪等待超时，服务可能仍在初始化；订阅不会自动下载，请稍后查看 proxyd status 并手动执行 proxyd refresh")
 	}
 	return nil
 }

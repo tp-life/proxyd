@@ -18,7 +18,7 @@ import (
 func TestUpdateGroupCommitsAndPersists(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	cfg := &config.Config{
-		ManualNodes: []string{"socks5://127.0.0.1:1080#manual"},
+		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
 		Listen:      "127.0.0.1",
 		PortRange:   [2]int{42000, 42010},
 		Mode:        "rule",
@@ -67,7 +67,7 @@ func TestUpdateGroupCommitsAndPersists(t *testing.T) {
 // 错误情况：编辑未报错，或失败后内存中的端口、类型发生变化时测试失败。
 func TestUpdateGroupPersistenceFailureRollsBack(t *testing.T) {
 	cfg := &config.Config{
-		ManualNodes: []string{"socks5://127.0.0.1:1080#manual"},
+		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
 		Listen:      "127.0.0.1",
 		PortRange:   [2]int{42000, 42010},
 		Mode:        "rule",

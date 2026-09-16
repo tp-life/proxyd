@@ -424,7 +424,7 @@ func TestConfigCloneDoesNotShareMutableState(t *testing.T) {
 			Enabled:     &subscriptionEnabled,
 			PortMapping: &subscriptionMapping,
 		}},
-		ManualNodes:  []string{"node"},
+		ManualNodes:  []any{"node"},
 		PortMapping:  &portMapping,
 		Rules:        []string{"MATCH,PROXY"},
 		CustomRules:  []string{"DOMAIN,example.com,DIRECT"},
@@ -801,7 +801,7 @@ func TestCheckGroup(t *testing.T) {
 		"dup name":      {Name: "hk", Port: 43001},
 		"dup port":      {Name: "g2", Port: 43000},
 		"no members":    {Name: "g3", Port: 43003},
-		"bad type":      {Name: "g3", Port: 43003, Type: "select"},
+		"bad type":      {Name: "g3", Port: 43003, Type: "relay"},
 		"bad sub":       {Name: "g4", Port: 43004, Subscription: "missing"},
 	}
 	cfg.Subscriptions = []Subscription{{Name: "a", URL: "https://example.com/sub"}}
@@ -810,6 +810,10 @@ func TestCheckGroup(t *testing.T) {
 		if err := cfg.CheckGroup(g); err == nil {
 			t.Errorf("%s: expected error", name)
 		}
+	}
+	// select 类型自 VPN 出站接入起合法（ADR 0002），选中项由 proxyd 持久化到 state-dir。
+	if err := cfg.CheckGroup(NodeGroup{Name: "vpn", Port: 43005, Type: GroupTypeSelect, Nodes: []string{"n1"}}); err != nil {
+		t.Errorf("CheckGroup(select): %v", err)
 	}
 }
 
@@ -940,6 +944,36 @@ func TestIsLoopbackAPIListen(t *testing.T) {
 	for listen, expected := range cases {
 		if actual := IsLoopbackAPIListen(listen); actual != expected {
 			t.Errorf("IsLoopbackAPIListen(%q) = %v, want %v", listen, actual, expected)
+		}
+	}
+}
+
+// TestSensitiveConfigKeyVPNFields 验证 VPN 类出站的私钥字段被纳入打码清单，
+// 且泛用短词不误伤公开材料字段。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无。
+//
+// 错误情况：私钥字段未命中或公开字段被误判为敏感时测试失败。
+func TestSensitiveConfigKeyVPNFields(t *testing.T) {
+	sensitive := []string{
+		"ca", "cert", "key", // openvpn 证书与客户端私钥
+		"auth-key", "tls-auth", "auth-user-pass", // contains auth
+		"private-key", "private-key-passphrase",
+		"tls-crypt", "tls-crypt-v2", "pre-shared-key",
+		"Private-Key", // 大小写不敏感
+	}
+	for _, key := range sensitive {
+		if !sensitiveConfigKey(key) {
+			t.Errorf("sensitiveConfigKey(%q) 应为 true", key)
+		}
+	}
+	// key 只按完整字段名精确匹配，不得误伤公开材料与其它含 key 的字段。
+	for _, key := range []string{"public-key", "host-key", "host-key-algorithms", "api-key-header", "monkey", ""} {
+		if sensitiveConfigKey(key) {
+			t.Errorf("sensitiveConfigKey(%q) 应为 false", key)
 		}
 	}
 }

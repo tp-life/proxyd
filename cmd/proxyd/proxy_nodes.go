@@ -3,6 +3,8 @@ package main
 // 代理域子命令：节点列表与手动节点管理（nodes）。
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +14,14 @@ import (
 	"proxyd/internal/app"
 )
 
+// cmdNodes 执行节点列表与手动节点的添加、删除命令。
+//
+// 参数：args 为 `nodes` 后的 CLI 参数，可包含 `-c`、子命令、节点 URL/JSON 与名称。
+//
+// 返回值：error，参数、结构化 JSON、节点查找或管理 API 调用失败时返回；成功返回 nil。
+//
+// 错误情况：手动节点变更会在后台重建现有节点池，但该重建明确不下载订阅；
+// 隧道节点的结构化映射必须是 JSON object，否则在发出请求前返回错误。
 func cmdNodes(args []string) error {
 	cfgFile, rest, err := parseCFlag("nodes", args)
 	if err != nil {
@@ -37,7 +47,7 @@ func cmdNodes(args []string) error {
 			if n.Subscription != cur {
 				cur = n.Subscription
 				fmt.Fprintf(tw, "[%s]\n", cur)
-				fmt.Fprintln(tw, "PORT\tNAME\tTYPE\tDELAY\tSTATUS")
+				fmt.Fprintln(tw, "PORT\tNAME\tTYPE\tDELAY\tSTATUS\tTUNNEL")
 			}
 			status := "可用"
 			if !n.Alive {
@@ -51,7 +61,11 @@ func cmdNodes(args []string) error {
 			if n.Alive {
 				delay = fmt.Sprintf("%dms", n.Delay)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", port, n.Name, n.Type, delay, status)
+			tunnel := "-"
+			if n.Tunnel {
+				tunnel = "vpn"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", port, n.Name, n.Type, delay, status, tunnel)
 		}
 		_ = tw.Flush()
 		if len(ov.Nodes) == 0 {
@@ -59,18 +73,41 @@ func cmdNodes(args []string) error {
 		}
 		return nil
 	case "add":
-		if len(rest) < 2 || len(rest) > 3 {
-			return fmt.Errorf("用法: proxyd nodes add [-c 配置] <url> [名称]")
+		addFS := flag.NewFlagSet("nodes add", flag.ExitOnError)
+		proxyJSON := addFS.String("proxy", "", "隧道类（VPN）出站 JSON 映射，type 限 tailscale|openvpn|zerotier|wireguard|ssh")
+		_ = addFS.Parse(rest[1:])
+		items := addFS.Args()
+		if *proxyJSON != "" {
+			if len(items) > 1 {
+				return fmt.Errorf("用法: proxyd nodes add [-c 配置] --proxy '<出站JSON>' [名称]")
+			}
+			var proxy map[string]any
+			if err := json.Unmarshal([]byte(*proxyJSON), &proxy); err != nil || len(proxy) == 0 {
+				return fmt.Errorf("--proxy 不是合法的 JSON 对象: %q", *proxyJSON)
+			}
+			body := map[string]any{"proxy": proxy}
+			if len(items) == 1 {
+				body["name"] = items[0]
+			}
+			var entry app.ManualNodeEntry
+			if err := c.do(http.MethodPost, "/api/manual-nodes", body, &entry); err != nil {
+				return err
+			}
+			fmt.Printf("手动节点已添加: %s（类型 %s，下标 %d，后台重建现有节点中）\n", entry.Name, entry.Type, entry.Index)
+			return nil
 		}
-		body := map[string]string{"url": rest[1]}
-		if len(rest) == 3 {
-			body["name"] = rest[2]
+		if len(items) < 1 || len(items) > 2 {
+			return fmt.Errorf("用法: proxyd nodes add [-c 配置] <url> [名称]；隧道类节点用 --proxy '<出站JSON>' [名称]")
+		}
+		body := map[string]string{"url": items[0]}
+		if len(items) == 2 {
+			body["name"] = items[1]
 		}
 		var entry app.ManualNodeEntry
 		if err := c.do(http.MethodPost, "/api/manual-nodes", body, &entry); err != nil {
 			return err
 		}
-		fmt.Printf("手动节点已添加: %s（下标 %d，后台刷新中）\n", entry.Name, entry.Index)
+		fmt.Printf("手动节点已添加: %s（下标 %d，后台重建现有节点中）\n", entry.Name, entry.Index)
 		return nil
 	case "del":
 		if len(rest) != 2 {
@@ -87,10 +124,10 @@ func cmdNodes(args []string) error {
 		if err := c.do(http.MethodDelete, "/api/manual-nodes/"+strconv.Itoa(idx), nil, nil); err != nil {
 			return err
 		}
-		fmt.Printf("手动节点 %q 已删除（后台刷新中）\n", rest[1])
+		fmt.Printf("手动节点 %q 已删除（后台重建现有节点中）\n", rest[1])
 		return nil
 	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd nodes [list]|add <url> [名称]|del <名称|下标>", sub)
+		return fmt.Errorf("未知操作 %q，用法: proxyd nodes [list]|add <url> [名称]|add --proxy '<出站JSON>' [名称]|del <名称|下标>", sub)
 	}
 }
 

@@ -25,6 +25,8 @@ type Snapshot struct {
 }
 
 // Allocate 为可用节点分配 [lo, hi] 范围内的端口：
+//   - 隧道类（VPN 语义）节点不参与每节点端口映射，直接跳过；它们仍进节点快照、
+//     参与健康检测、可被分组/main-node 引用（见 ADR 0002）；
 //   - 内部按 Delay 升序排序（相同按 Name 稳定排序），超出容量的节点按延迟截断；
 //   - 上一轮快照中已占用端口的节点（按 Node.Key() 匹配）保留原端口；
 //   - 新节点按延迟顺序从小到大填入空闲端口；
@@ -32,8 +34,13 @@ type Snapshot struct {
 //
 // 返回的 Assignment 按端口升序排列。
 func Allocate(nodes []*node.Node, lo, hi int, prev *Snapshot) []Assignment {
-	sorted := make([]*node.Node, len(nodes))
-	copy(sorted, nodes)
+	sorted := make([]*node.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n == nil || n.IsTunnel() {
+			continue
+		}
+		sorted = append(sorted, n)
+	}
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].Delay != sorted[j].Delay {
 			return sorted[i].Delay < sorted[j].Delay

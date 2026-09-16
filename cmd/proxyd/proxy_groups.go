@@ -15,6 +15,12 @@ import (
 	"proxyd/internal/config"
 )
 
+// groupListEntry 是分组列表响应的单条记录：配置字段之外附带 select 选中项。
+type groupListEntry struct {
+	config.NodeGroup
+	Selected string `json:"selected,omitempty"`
+}
+
 func cmdGroups(args []string) error {
 	cfgFile, rest, err := parseCFlag("groups", args)
 	if err != nil {
@@ -30,12 +36,12 @@ func cmdGroups(args []string) error {
 	}
 	switch sub {
 	case "list":
-		var groups []config.NodeGroup
+		var groups []groupListEntry
 		if err := c.do(http.MethodGet, "/api/groups", nil, &groups); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tPORT\tTYPE\tSUBSCRIPTION\tNODES")
+		fmt.Fprintln(tw, "NAME\tPORT\tTYPE\tSUBSCRIPTION\tNODES\tSELECTED")
 		for _, g := range groups {
 			subscription := g.Subscription
 			if subscription == "" {
@@ -45,7 +51,11 @@ func cmdGroups(args []string) error {
 			if nodes == "" {
 				nodes = "-"
 			}
-			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n", g.Name, g.Port, g.Type, subscription, nodes)
+			selected := g.Selected
+			if selected == "" {
+				selected = "-"
+			}
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n", g.Name, g.Port, g.Type, subscription, nodes, selected)
 		}
 		_ = tw.Flush()
 		if len(groups) == 0 {
@@ -54,12 +64,12 @@ func cmdGroups(args []string) error {
 		return nil
 	case "add":
 		addFS := flag.NewFlagSet("groups add", flag.ExitOnError)
-		groupType := addFS.String("type", config.GroupTypeFallback, "分组类型（url-test|fallback|load-balance）")
+		groupType := addFS.String("type", config.GroupTypeFallback, "分组类型（url-test|fallback|load-balance|select）")
 		subscription := addFS.String("subscription", "", "按订阅名动态生成分组成员")
 		_ = addFS.Parse(rest[1:])
 		items := addFS.Args()
 		if len(items) < 2 || (*subscription == "" && len(items) < 3) {
-			return fmt.Errorf("用法: proxyd groups add [-c 配置] [--type fallback|url-test|load-balance] [--subscription 订阅名] <name> <port> [节点名...]")
+			return fmt.Errorf("用法: proxyd groups add [-c 配置] [--type fallback|url-test|load-balance|select] [--subscription 订阅名] <name> <port> [节点名...]")
 		}
 		port, err := strconv.Atoi(items[1])
 		if err != nil {
@@ -73,7 +83,7 @@ func cmdGroups(args []string) error {
 		return nil
 	case "set":
 		setFS := flag.NewFlagSet("groups set", flag.ExitOnError)
-		groupType := setFS.String("type", "", "分组类型（url-test|fallback|load-balance）")
+		groupType := setFS.String("type", "", "分组类型（url-test|fallback|load-balance|select）")
 		subscription := setFS.String("subscription", "", "按订阅名动态生成分组成员")
 		port := setFS.Int("port", 0, "分组端口")
 		_ = setFS.Parse(rest[1:])
@@ -81,11 +91,11 @@ func cmdGroups(args []string) error {
 		if len(items) < 1 {
 			return fmt.Errorf("用法: proxyd groups set [-c 配置] [--type 类型] [--subscription 订阅名] [--port 端口] <name> [节点名...]")
 		}
-		var groups []config.NodeGroup
+		var groups []groupListEntry
 		if err := c.do(http.MethodGet, "/api/groups", nil, &groups); err != nil {
 			return err
 		}
-		var cur *config.NodeGroup
+		var cur *groupListEntry
 		for i := range groups {
 			if groups[i].Name == items[0] {
 				cur = &groups[i]
@@ -123,7 +133,17 @@ func cmdGroups(args []string) error {
 		}
 		fmt.Printf("分组 %q 已删除\n", rest[1])
 		return nil
+	case "select":
+		if len(rest) != 3 {
+			return fmt.Errorf("用法: proxyd groups select [-c 配置] <组名> <节点名>（仅 select 类型分组）")
+		}
+		if err := c.do(http.MethodPost, "/api/groups/"+url.PathEscape(rest[1])+"/select",
+			map[string]string{"node": rest[2]}, nil); err != nil {
+			return err
+		}
+		fmt.Printf("分组 %q 已选中节点 %q\n", rest[1], rest[2])
+		return nil
 	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd groups list|add [--type 类型] [--subscription 订阅名] <name> <port> [节点...]|set [--type 类型] [--subscription 订阅名] [--port 端口] <name> [节点...]|del <name>", sub)
+		return fmt.Errorf("未知操作 %q，用法: proxyd groups list|add [--type 类型] [--subscription 订阅名] <name> <port> [节点...]|set [--type 类型] [--subscription 订阅名] [--port 端口] <name> [节点...]|select <组名> <节点名>|del <name>", sub)
 	}
 }

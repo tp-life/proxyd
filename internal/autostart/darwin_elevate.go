@@ -117,3 +117,33 @@ func renderElevatePlist(wrapperPath string) string {
 </plist>
 `
 }
+
+// PrivilegedCommand 是一次必须以管理员权限执行的固定外部命令
+// （gateway helper 安装链路等复用本提权通道）。
+type PrivilegedCommand struct {
+	Name        string
+	Args        []string
+	IgnoreError bool
+}
+
+// RunPrivilegedCommands 以管理员权限顺序执行固定命令链：当前进程为 root 时
+// 直接执行，普通用户经 osascript 管理员授权对话框执行（系统域进程回退到用户
+// 图形会话）。命令参数经单引号转义，不接受任意脚本文本。
+//
+// 参数说明：
+//   - commands: ...PrivilegedCommand，按顺序执行的固定命令与参数。
+//
+// 返回值说明：error，全部命令成功时为 nil。
+//
+// 错误情况：命令失败、管理员拒绝授权或会话无法弹窗时返回带上下文的错误。
+func RunPrivilegedCommands(commands ...PrivilegedCommand) error {
+	account, err := currentServiceAccount()
+	if err != nil {
+		return err
+	}
+	mapped := make([]privilegedCommand, 0, len(commands))
+	for _, command := range commands {
+		mapped = append(mapped, privilegedCommand(command))
+	}
+	return runPrivileged(account, mapped...)
+}

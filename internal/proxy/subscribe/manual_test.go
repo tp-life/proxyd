@@ -83,7 +83,7 @@ func TestParseManualNodeInvalid(t *testing.T) {
 }
 
 func TestParseManualNodesPartial(t *testing.T) {
-	nodes, errs := ParseManualNodes([]string{"http://h:8080", "bad", "socks5://h:1080"})
+	nodes, errs := ParseManualNodes([]any{"http://h:8080", "bad", "socks5://h:1080"})
 	if len(nodes) != 2 {
 		t.Fatalf("nodes = %d, want 2", len(nodes))
 	}

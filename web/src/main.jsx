@@ -52,12 +52,13 @@ import { EmptyState } from "@/components/EmptyState";
 import { useConnectionsFeed } from "@/hooks/useConnectionsFeed";
 import { useDesktopFeed } from "@/hooks/useDesktopFeed";
 import { useRemoteFeed } from "@/hooks/useRemoteFeed";
+import { useGatewayFeed } from "@/hooks/useGatewayFeed";
 import { useToast } from "@/hooks/useToast";
 import { useTrafficStream } from "@/hooks/useTrafficStream";
 import { ConnectionsPage } from "@/pages/ConnectionsPage";
 import { GroupsPage } from "@/pages/GroupsPage";
 import { LogsPage } from "@/pages/LogsPage";
-import { NodesPage } from "@/pages/NodesPage";
+import { NodesPage, OpenVPNPage, TailscalePage } from "@/pages/NodesPage";
 import { OverviewPage } from "@/pages/OverviewPage";
 import { ProxyOverviewPage } from "@/pages/ProxyOverviewPage";
 import { useDashboardFeed } from "@/hooks/useDashboardFeed";
@@ -119,6 +120,8 @@ function loadDesktopPage() {
 
 // Remote 与 Desktop 页面分别懒加载；Remote 内更大的 xterm 运行时继续保持第二级懒加载。
 const RemotePage = lazy(loadRemotePage);
+/** 网关页面按需加载；回调无参数，返回模块 Promise，加载错误由 React 页面边界接管。 */
+const GatewayPage = lazy(() => import("@/pages/GatewayPage").then((module) => ({ default: module.GatewayPage })));
 /** 系统任务页面按需加载；回调无参数，返回模块 Promise，加载错误由 React 页面边界接管。 */
 const ConfigHistoryPage = lazy(() => import("@/pages/ConfigHistoryPage").then((module) => ({ default: module.ConfigHistoryPage })));
 const DiagnosticsPage = lazy(() => import("@/pages/DiagnosticsPage").then((module) => ({ default: module.DiagnosticsPage })));
@@ -410,6 +413,8 @@ function App() {
    * 接口失败时由 hook 内部承接到错误条带；调用方无需额外捕获。
    */
   const remote = useRemoteFeed(activeView, requestConfirmation, showToast);
+  /** useGatewayFeed 接入网关页的状态/预检/设备表管理；参数为激活标记与全局提示回调；返回网关页所需状态与操作。 */
+  const gateway = useGatewayFeed(activeView === "gateway", requestConfirmation, showToast);
   /** retryModule 重试已启用模块；参数 module 为状态对象；返回 Promise<void>，失败由 postJSON 提示并刷新状态。 */
   async function retryModule(module) {
     if (moduleBusy) return;
@@ -901,6 +906,20 @@ function App() {
                 onTest={() => triggerOperation("/api/test", "测速")}
               />
             )}
+            {activeView === "proxy/tailscale" && (
+              <TailscalePage
+                overview={overview}
+                onDelete={deleteJSON}
+                onPost={postJSON}
+              />
+            )}
+            {activeView === "proxy/openvpn" && (
+              <OpenVPNPage
+                overview={overview}
+                onDelete={deleteJSON}
+                onPost={postJSON}
+              />
+            )}
             {activeView === "subscriptions" && (
               <SubscriptionsPage
                 overview={overview}
@@ -962,6 +981,11 @@ function App() {
                 <RemotePage view={activeView} {...remote} onOpenTerminal={openTerminal} />
               </Suspense>
             )}
+            {activeView === "gateway" && (
+              <Suspense fallback={<EmptyState title="正在加载网关页面" detail="首次进入时按需加载网关状态与设备管理入口。" />}>
+                <GatewayPage {...gateway} />
+              </Suspense>
+            )}
             {activeView === "desktop" && (
               <Suspense fallback={<EmptyState title="正在加载远程桌面页面" detail="首次进入时按需加载桌面服务与连接管理入口。" />}>
                 <DesktopPage {...desktop} onNavigateRemote={() => setActiveView("remote")} />
@@ -1002,27 +1026,40 @@ function App() {
   );
 
   /**
-   * triggerSubscriptionAction 执行单个订阅刷新或测速。
+   * triggerSubscriptionAction 执行单个订阅同步或测速。
    *
    * 参数说明：
    * - name: string，订阅名称。
    * - action: string，`refresh` 或 `test`。
    *
    * 返回值说明：
-   * 返回 Promise<void>。
+   * 返回 Promise<object|null>；成功返回后端 JSON，失败返回 null。
    *
    * 可能的异常/错误情况：
    * 订阅不存在、后端超时或网络失败时展示错误。
    */
   async function triggerSubscriptionAction(name, action) {
-    const label = action === "refresh" ? "刷新" : "测速";
+    const encodedName = encodeURIComponent(name);
+    const actions = {
+      refresh: { method: "POST", path: `/api/subscriptions/${encodedName}/refresh`, label: "同步" },
+      test: { method: "POST", path: `/api/subscriptions/${encodedName}/test`, label: "测速" },
+    };
+    const operation = actions[action];
+    if (!operation) {
+      showToast(`${name} 操作失败：未知订阅动作 ${action}`, "err");
+      return null;
+    }
     try {
-      setBusy(`${name} ${label}`);
-      await requestJSON(`/api/subscriptions/${encodeURIComponent(name)}/${action}`, { method: "POST" });
-      showToast(`${name} ${label}完成`);
+      setBusy(`${name} ${operation.label}`);
+      const result = await requestJSON(operation.path, { method: operation.method });
+      // 单订阅接口会等待下载、解析、测速和热更新全部完成，因此这里展示的是完成
+      // 通知而非仅“已开始”；同步过程中不增加确认对话框，保持一次点击即可执行。
+      showToast(`${name} ${operation.label}完成`);
       await load(true);
+      return result || {};
     } catch (error) {
-      showToast(`${name} ${label}失败：${error.message}`, "err");
+      showToast(`${name} ${operation.label}失败：${error.message}`, "err");
+      return null;
     } finally {
       setBusy("");
     }
@@ -1099,6 +1136,8 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
 function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
   const currentGroup = NAV_ITEMS.find((item) => item.id === activeView)?.group;
   const module = modules.find((item) => item.id === currentGroup);
+  const currentItems = navItems.filter((item) => item.group === currentGroup);
+  const sectionNames = [...new Set(currentItems.map((item) => item.section || ""))];
 
   /**
    * renderItem 渲染任务入口，桌面和移动端共用同一注册项。
@@ -1137,7 +1176,12 @@ function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, co
         </div>
         <nav className="nav-list" aria-label="当前大类子菜单">
           <div className="nav-section-title">{NAV_GROUPS.find((group) => group.id === currentGroup)?.label}</div>
-          {navItems.filter((item) => item.group === currentGroup).map(renderItem)}
+          {sectionNames.map((section) => (
+            <div className="nav-section" key={section || currentGroup}>
+              {section && <div className="nav-heading">{section}</div>}
+              {currentItems.filter((item) => (item.section || "") === section).map(renderItem)}
+            </div>
+          ))}
         </nav>
         {module && <div className="module-sidebar-control"><span>{module.name} · {module.enabled ? "已启用" : "已禁用"}</span><Button size="sm" variant="outline" disabled={Boolean(moduleBusy)} onClick={() => onToggleModule(module)}>{moduleBusy === module.id ? "应用中…" : module.enabled ? "禁用模块" : "启用模块"}</Button></div>}
         <div className={classNames("sidebar-status", !connected && "pending")}><i aria-hidden="true" /><span>本机服务</span><b>{connected ? "运行中" : "连接中"}</b></div>

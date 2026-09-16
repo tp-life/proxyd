@@ -24,9 +24,11 @@ type ModuleState struct {
 // 参数：无；返回 []ModuleState；无错误，配置读锁保证快照一致。
 func (a *App) Modules() []ModuleState {
 	a.mu.RLock()
-	proxyEnabled, remoteEnabled := !a.cfg.ProxyDisabled, !a.cfg.Remote.Disabled
+	proxyEnabled, remoteEnabled, gatewayEnabled := !a.cfg.ProxyDisabled, !a.cfg.Remote.Disabled, !a.cfg.Gateway.Disabled
 	a.mu.RUnlock()
-	proxyState, remoteState := a.proxyLifecycle.Snapshot(), a.remoteLifecycle.Snapshot()
+	proxyState := a.proxyLifecycle.Snapshot()
+	remoteState := a.remoteLifecycle.Snapshot()
+	gatewayState := a.gatewayLifecycle.Snapshot()
 	if !proxyEnabled {
 		proxyState.Phase = "disabled"
 		proxyState.Running = false
@@ -37,7 +39,16 @@ func (a *App) Modules() []ModuleState {
 		remoteState.Running = false
 		remoteState.NextRetryAt = nil
 	}
-	return []ModuleState{{State: proxyState, ID: "proxy", Name: "代理", Enabled: proxyEnabled}, {State: remoteState, ID: "remote", Name: "远程访问", Enabled: remoteEnabled}}
+	if !gatewayEnabled {
+		gatewayState.Phase = "disabled"
+		gatewayState.Running = false
+		gatewayState.NextRetryAt = nil
+	}
+	return []ModuleState{
+		{State: proxyState, ID: "proxy", Name: "代理", Enabled: proxyEnabled},
+		{State: remoteState, ID: "remote", Name: "远程访问", Enabled: remoteEnabled},
+		{State: gatewayState, ID: "gateway", Name: "网关", Enabled: gatewayEnabled},
+	}
 
 }
 
@@ -47,6 +58,16 @@ func (a *App) Modules() []ModuleState {
 func (a *App) SetModuleEnabled(id string, enabled bool) error {
 	switch id {
 	case "proxy":
+		if !enabled {
+			// ADR 0003 联动：禁用 proxy 前必须先停 gateway（网关数据面寄生于 mihomo）。
+			// 整个「停 gateway → 停 proxy」持有 gatewayMutationMu，保证
+			// SetGatewayEnabled 事务无法插进两者之间造成 proxy 停用而 gateway 残留。
+			a.gatewayMutationMu.Lock()
+			defer a.gatewayMutationMu.Unlock()
+			if err := a.stopGatewayForProxyDisableLocked(); err != nil {
+				return err
+			}
+		}
 		if err := a.setProxyModuleEnabled(enabled); err != nil {
 			return err
 		}
@@ -57,6 +78,8 @@ func (a *App) SetModuleEnabled(id string, enabled bool) error {
 			}
 		}
 		return nil
+	case "gateway":
+		return a.SetGatewayEnabled(enabled)
 	case "remote":
 		a.remoteMutationMu.Lock()
 		defer a.remoteMutationMu.Unlock()
@@ -172,6 +195,7 @@ func (a *App) applyRemoteRuntime(cfg config.RemoteConfig) error {
 
 // RetryModule 立即重试模块，已禁用模块不隐式启用。
 // 参数 ctx 为有界请求上下文，id 为模块标识；返回 error，网络失败保持真实运行状态。
+// 代理模块重试只检测缓存/手动节点，不等同于“同步订阅”，因此不会访问订阅 URL。
 func (a *App) RetryModule(ctx context.Context, id string) error {
 	cfg := a.Config()
 	switch id {
@@ -179,7 +203,7 @@ func (a *App) RetryModule(ctx context.Context, id string) error {
 		if cfg.ProxyDisabled {
 			return fmt.Errorf("代理模块已禁用")
 		}
-		return a.Refresh(ctx, true)
+		return a.Refresh(ctx, false)
 	case "remote":
 		a.remoteMutationMu.Lock()
 		defer a.remoteMutationMu.Unlock()
@@ -190,6 +214,16 @@ func (a *App) RetryModule(ctx context.Context, id string) error {
 			return fmt.Errorf("远程访问模块已禁用")
 		}
 		return a.applyRemoteRuntime(remoteCfg)
+	case "gateway":
+		a.gatewayMutationMu.Lock()
+		defer a.gatewayMutationMu.Unlock()
+		a.mu.RLock()
+		gatewayCfg := a.cfg.Gateway.Clone()
+		a.mu.RUnlock()
+		if gatewayCfg.Disabled {
+			return fmt.Errorf("网关模块已禁用")
+		}
+		return a.applyGatewayRuntime(gatewayCfg)
 	default:
 		return fmt.Errorf("未知模块 %q", id)
 	}

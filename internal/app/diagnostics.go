@@ -46,6 +46,9 @@ func (a *App) Diagnose(ctx context.Context, peer string) (diagnostics.Report, er
 	for _, check := range a.remote.DiagnoseNetwork(ctx) {
 		report.Steps = append(report.Steps, diagnostics.Step{ID: check.ID, Status: check.Status, Detail: check.Detail, DurationMS: check.DurationMS})
 	}
+	for _, check := range a.gateway.Diagnose(ctx) {
+		report.Steps = append(report.Steps, diagnostics.Step{ID: check.ID, Status: check.Status, Detail: check.Detail, DurationMS: check.DurationMS})
+	}
 	if token != "" {
 		for _, check := range a.remote.DiagnoseSSH(ctx, token) {
 			report.Steps = append(report.Steps, diagnostics.Step{ID: check.ID, Status: check.Status, Detail: check.Detail, DurationMS: check.DurationMS})

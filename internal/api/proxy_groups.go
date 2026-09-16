@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"proxyd/internal/config"
 )
@@ -15,10 +16,33 @@ func (s *Server) registerProxyGroupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/groups", s.handleAddGroup)
 	mux.HandleFunc("PUT /api/groups/{name}", s.handleUpdateGroup)
 	mux.HandleFunc("DELETE /api/groups/{name}", s.handleDelGroup)
+	mux.HandleFunc("POST /api/groups/{name}/select", s.handleSelectGroupNode)
+}
+
+// GroupEntry 是分组列表的展示项：配置值之外附带 select 分组的持久化选中项。
+// 内嵌 NodeGroup 使 JSON 字段与配置结构保持一致，只在响应中追加运行态字段。
+type GroupEntry struct {
+	config.NodeGroup
+	Selected string `json:"selected,omitempty"` // select 分组当前选中的节点名；非 select 组或未选择时为空
+}
+
+// groupEntries 合并分组配置与 select 选中状态；空 type 归一化为默认的 url-test，
+// 让列表响应始终暴露生效中的分组类型。
+func (s *Server) groupEntries() []GroupEntry {
+	groups := s.app.Groups()
+	selected := s.app.GroupSelected()
+	out := make([]GroupEntry, 0, len(groups))
+	for _, g := range groups {
+		if g.Type == "" {
+			g.Type = config.GroupTypeURLTest
+		}
+		out = append(out, GroupEntry{NodeGroup: g, Selected: selected[g.Name]})
+	}
+	return out
 }
 
 func (s *Server) handleListGroups(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, s.app.Groups())
+	writeJSON(w, s.groupEntries())
 }
 
 // handleAddGroup 新增节点分组（组内 url-test 自动选优），持久化 + 热更新。
@@ -64,4 +88,23 @@ func (s *Server) handleDelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSelectGroupNode 修改 select 分组的手动选中节点；选中项持久化到
+// state-dir/group-selected.json 并热更新，热更新失败时整体回滚（见 App.SetGroupSelected）。
+func (s *Server) handleSelectGroupNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Node string `json:"node"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Node) == "" {
+		http.Error(w, "bad request: node required", http.StatusBadRequest)
+		return
+	}
+	name := r.PathValue("name")
+	node := strings.TrimSpace(req.Node)
+	if err := s.app.SetGroupSelected(name, node); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"group": name, "selected": node})
 }

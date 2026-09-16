@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -39,7 +40,7 @@ type Assignment = pool.Assignment
 // main-auto/main-node 切换时主端口在 mixed-port 与 listener 之间转换，同属 inbound 热更新范畴，
 // 名称同样保持 L<port> 规范。
 func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]byte, error) {
-	return generate(cfg, assigns, nil, imported)
+	return generate(cfg, assigns, nil, imported, nil)
 }
 
 // GenerateWithNodes 生成 mihomo 配置，并把未分配本地端口但仍被链路或分组引用的
@@ -58,7 +59,21 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 // 错误情况：额外节点只注册出站，不占用本地端口，也不自动进入 PROXY/AUTO；这样
 // 端口容量限制不会截断链式代理依赖，同时保持用户可见端口集合的既有语义。
 func GenerateWithNodes(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string) ([]byte, error) {
-	return generate(cfg, assigns, nodes, imported)
+	return generate(cfg, assigns, nodes, imported, nil)
+}
+
+// GenerateWithState 在 GenerateWithNodes 基础上接受 select 分组的持久化选中项。
+//
+// 参数：
+//   - selected: map[string]string，分组名 -> 选中节点名（state-dir/group-selected.json）；
+//     nil 等价无持久化选中。
+//
+// 其余参数、返回值与错误语义同 GenerateWithNodes。选中值仅在仍是该组当前成员时写入
+// mihomo select 组的 default-selected 字段；失效值被静默忽略，mihomo 按其原生语义
+// 回退到组成员首位。选择 default-selected 而非 external-controller 恢复，是因为它在
+// 配置加载期生效，无需等 mihomo 启动后再发 API 请求，路径更短且无并发时序问题。
+func GenerateWithState(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) ([]byte, error) {
+	return generate(cfg, assigns, nodes, imported, selected)
 }
 
 // generate 实现 Generate 与 GenerateWithNodes 共用的配置翻译和 mihomo 自检流程。
@@ -68,12 +83,13 @@ func GenerateWithNodes(cfg *config.Config, assigns []Assignment, nodes []*node.N
 //   - assigns: []Assignment，需要生成固定端口入口的节点。
 //   - nodes: []*node.Node，可选完整健康节点集，用于链式依赖和策略组成员。
 //   - imported: []string，已经清洗、去重的远程规则。
+//   - selected: map[string]string，select 分组的持久化选中项（分组名 -> 节点名）。
 //
 // 返回值：生成后的 YAML 字节与错误。
 //
 // 错误情况：assignment 缺节点、YAML 序列化或 mihomo 自检失败时返回错误；GEO 数据
 // 不可用时沿用既有降级逻辑，移除 GEO 规则后再自检一次。
-func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string) ([]byte, error) {
+func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) ([]byte, error) {
 	m := map[string]any{
 		"mode":                cfg.Mode,
 		"log-level":           cfg.LogLevel,
@@ -89,7 +105,22 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	if cfg.ExternalUI != "" {
 		m["external-ui"] = cfg.ExternalUI
 	}
-	if dnsConfig := resolveDNSConfig(cfg); dnsConfig != nil {
+	dnsConfig := resolveDNSConfig(cfg)
+	if gatewayActive(cfg) {
+		// gateway 数据面入口（docs/adr/0003 勘误，不依赖 TUN）：
+		// redir-port 两平台都需要；tproxy-port 是 Linux 语义，macOS 上 mihomo
+		// 建 listener 只会报错刷屏，因此仅 Linux 且端口有效时写入。
+		m["redir-port"] = cfg.Gateway.EffectiveRedirPort()
+		if runtime.GOOS == "linux" {
+			if port := cfg.Gateway.EffectiveTProxyPort(); port > 0 {
+				m["tproxy-port"] = port
+			}
+		}
+		if cfg.Gateway.DNSRedirect {
+			dnsConfig = injectGatewayDNSListen(dnsConfig)
+		}
+	}
+	if dnsConfig != nil {
 		m["dns"] = dnsConfig
 	}
 	// Generate 也可能被测试或嵌入调用方直接传入未经过 config.Load 的 Config。
@@ -105,7 +136,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	proxies := make([]map[string]any, 0, len(proxyNodes))
 	proxyNodeSet := make(map[string]bool, len(proxyNodes))
 	for _, n := range proxyNodes {
-		proxies = append(proxies, n.Mapping)
+		proxies = append(proxies, prepareOutboundMapping(cfg, n))
 		proxyNodeSet[n.Name] = true
 	}
 	nodeNames := make([]string, 0, len(assigns))
@@ -132,7 +163,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 
 	// 主端口入口形态：main-auto（AUTO 组）优先于 main-node（固定节点），
 	// 两者都未生效时回退顶层 mixed-port 规则模式。
-	mainTarget := resolveMainInbound(cfg, assigns)
+	mainTarget := resolveMainInbound(cfg, assigns, nodes)
 	if cfg.MainAuto && cfg.MainNode != "" {
 		log.Printf("[core] main-auto 已开启，main-node 本轮被忽略（auto 优先）")
 	}
@@ -211,6 +242,13 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 			"interval":  300,
 			"tolerance": 50,
 		}
+		// select 组恢复持久化选中项：仅在选中值仍是当前成员时写入 mihomo 原生
+		// default-selected 字段；失效值忽略，mihomo 按原生语义回退组成员首位。
+		if groupType == config.GroupTypeSelect {
+			if sel := selected[g.Name]; sel != "" && slices.Contains(members, sel) {
+				group["default-selected"] = sel
+			}
+		}
 		groups = append(groups, group)
 		listeners = append(listeners, map[string]any{
 			"name":   fmt.Sprintf("L%d", g.Port),
@@ -222,9 +260,13 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	m["proxy-groups"] = groups
 
-	// 规则合并顺序：用户 custom-rules 最前 → rule-urls 导入规则 → 内置规则
-	//（追加在 GEOSITE/GEOIP/MATCH 之后永远不会命中，所以自定义/导入规则必须前置）。
-	rules := make([]string, 0, len(cfg.CustomRules)+len(imported)+len(cfg.Rules))
+	// 规则合并顺序：gateway 设备规则（SRC-IP-CIDR）最前 → 用户 custom-rules →
+	// rule-urls 导入规则 → 内置规则（追加在 GEOSITE/GEOIP/MATCH 之后永远不会命中，
+	// 所以设备/自定义/导入规则必须前置）。
+	rules := make([]string, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(cfg.Rules))
+	if gatewayActive(cfg) {
+		rules = append(rules, gatewayDeviceRules(cfg, groups)...)
+	}
 	rules = append(rules, cfg.CustomRules...)
 	rules = append(rules, imported...)
 	rules = append(rules, cfg.Rules...)
@@ -263,6 +305,80 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		}
 	}
 	return buf, nil
+}
+
+// gatewayActive 判断 gateway 数据面是否应参与本次生成：模块未停用、代理数据面
+// 未停用且设备表非空。ProxyDisabled 走 Runner.Suspend 路径本就不会调用 generate，
+// 这里的判断是防御直接构造 Config 的嵌入调用方；设备表为空的零值配置视为不生效，
+// 避免存量配置升级后凭空出现 redir 入口与转发规则（无任何设备可被分流）。
+func gatewayActive(cfg *config.Config) bool {
+	return !cfg.Gateway.Disabled && !cfg.ProxyDisabled && len(cfg.Gateway.Devices) > 0
+}
+
+// gatewayDeviceRules 返回可安全写入 mihomo 的设备分流规则：引用本轮被跳过分组
+// （与节点名冲突或成员交集为空）的设备规则按 ADR 0003 跳过并打日志，不阻塞生成；
+// DIRECT/PROXY 内置目标与实际生成的分组名均可引用。
+//
+// 参数：
+//   - cfg: *config.Config，运行配置。
+//   - groups: []map[string]any，本轮实际写入 mihomo 的策略组（含 PROXY/AUTO）。
+//
+// 返回值：[]string，过滤后的 SRC-IP-CIDR 规则行（可能为 nil）。
+//
+// 错误情况：无；失效引用仅降级为日志。
+func gatewayDeviceRules(cfg *config.Config, groups []map[string]any) []string {
+	deviceRules := cfg.Gateway.DeviceRules()
+	if len(deviceRules) == 0 {
+		return nil
+	}
+	valid := map[string]bool{"DIRECT": true, "PROXY": true}
+	for _, group := range groups {
+		if name, ok := group["name"].(string); ok {
+			valid[name] = true
+		}
+	}
+	out := make([]string, 0, len(deviceRules))
+	for _, rule := range deviceRules {
+		target := rule[strings.LastIndexByte(rule, ',')+1:]
+		if !valid[target] {
+			log.Printf("[core] gateway 设备规则 %q 引用的出口不可用，本轮跳过", rule)
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+// injectGatewayDNSListen 在 dns 段补网关 dns-redirect 所需的非特权监听地址。
+//
+// 参数：
+//   - dnsConfig: map[string]any，resolveDNSConfig 的结果（nil 表示无手写/预设 dns）。
+//
+// 返回值：
+//   - map[string]any：带 listen: 0.0.0.0:1053 的 dns 段；手写段已有 listen 时原样返回并打日志。
+//
+// 错误情况：无。返回的是新 map 或新建段，不原地修改 cfg.DNS 共享引用；
+// 无现存段时生成带默认 nameserver 的最小可用段（mihomo 要求 dns.enable 必须配 nameserver）。
+func injectGatewayDNSListen(dnsConfig map[string]any) map[string]any {
+	listenAddr := fmt.Sprintf("0.0.0.0:%d", config.DefaultGatewayDNSListenPort)
+	if dnsConfig == nil {
+		return map[string]any{
+			"enable":             true,
+			"listen":             listenAddr,
+			"default-nameserver": []string{"223.5.5.5", "1.1.1.1"},
+			"nameserver":         []string{"223.5.5.5", "1.1.1.1"},
+		}
+	}
+	if existing, ok := dnsConfig["listen"].(string); ok && existing != "" {
+		log.Printf("[core] gateway dns-redirect 已开启，但手写 dns 段已配置 listen %q，不覆盖；请确认其与 pf/nftables redirect 目标一致", existing)
+		return dnsConfig
+	}
+	out := make(map[string]any, len(dnsConfig)+1)
+	for key, value := range dnsConfig {
+		out[key] = value
+	}
+	out["listen"] = listenAddr
+	return out
 }
 
 // resolveDNSConfig 按“手写配置优先，其次预设”的规则生成 mihomo DNS 段。
@@ -332,6 +448,37 @@ func availableProxyNodes(assigns []Assignment, nodes []*node.Node) []*node.Node 
 	return out
 }
 
+// prepareOutboundMapping 返回写入 mihomo 配置的出站映射。
+//
+// 参数：
+//   - cfg: *config.Config，提供 proxyd state-dir 用于 tsnet 状态目录改写。
+//   - n: *node.Node，待注册节点。
+//
+// 返回值：map[string]any，tailscale 节点未显式设置 state-dir 时返回改写后的副本，
+// 其余情况原样返回节点 Mapping（不复制）。
+//
+// 错误情况：无；用户显式设置的 state-dir 被尊重并打警告日志（配置生成层没有
+// 校验告警通道，日志是唯一出口）。改写逻辑由 node.WithTunnelStateDir 实现，
+// 与健康检测路径（pool）保持同一份状态目录语义。
+func prepareOutboundMapping(cfg *config.Config, n *node.Node) map[string]any {
+	m := n.Mapping
+	if nodeTypeOf(m) != node.TunnelTypeTailscale {
+		return m
+	}
+	out, rewritten := node.WithTunnelStateDir(cfg.StateDir, n)
+	if !rewritten {
+		log.Printf("[core] 节点 %q 显式设置了 tsnet state-dir，proxyd 不再代为固定目录；重启后的节点身份由该目录内容决定", n.Name)
+		return m
+	}
+	return out
+}
+
+// nodeTypeOf 取出站映射的 type 字段；缺失或非字符串时返回空串。
+func nodeTypeOf(m map[string]any) string {
+	t, _ := m["type"].(string)
+	return t
+}
+
 // resolveGroupMembersFromNodes 计算节点分组的实际成员。
 //
 // 参数：
@@ -368,7 +515,11 @@ func resolveGroupMembersFromNodes(g config.NodeGroup, nodes []*node.Node, nodeSe
 // main-auto 开启且有可用节点时为 "AUTO"（auto 优先，main-node 被忽略）；
 // 否则 main-node 非空且该节点（按 Key 匹配）当前可用时为节点名；
 // 其余情况返回空串 = 主端口回退顶层 mixed-port 规则模式。
-func resolveMainInbound(cfg *config.Config, assigns []Assignment) string {
+//
+// 节点查找范围：先查获得本地端口的 assignment，再查完整节点集 nodes 中的 Alive 节点
+// ——隧道类节点不参与端口映射（不会出现在 assigns），但 ADR 0002 允许 main-node
+// 引用它们；节点失效时维持既有「回退规则模式」行为不变。
+func resolveMainInbound(cfg *config.Config, assigns []Assignment, nodes []*node.Node) string {
 	if cfg.MainAuto {
 		if len(assigns) > 0 {
 			return "AUTO"
@@ -381,14 +532,20 @@ func resolveMainInbound(cfg *config.Config, assigns []Assignment) string {
 				return a.Node.Name
 			}
 		}
+		for _, n := range nodes {
+			if n != nil && n.Alive && n.Key() == cfg.MainNode {
+				return n.Name
+			}
+		}
 	}
 	return ""
 }
 
 // MainInboundIsListener 报告给定配置与节点下主端口是否为固定 listener 形态
 // （供 App 判断 mixed-port ↔ listener 转换，决定是否需要先释放主端口再热更新）。
-func MainInboundIsListener(cfg *config.Config, assigns []Assignment) bool {
-	return resolveMainInbound(cfg, assigns) != ""
+// nodes 为当前完整节点集（含健康状态），用于识别 main-node 引用的隧道类节点。
+func MainInboundIsListener(cfg *config.Config, assigns []Assignment, nodes []*node.Node) bool {
+	return resolveMainInbound(cfg, assigns, nodes) != ""
 }
 
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。

@@ -118,6 +118,8 @@ func (s *Server) Start() error {
 	// 代理域路由，按关注点分散在各 proxy_*.go 的 register 方法中。
 	s.registerProxySubscriptionRoutes(mux)
 	s.registerProxyNodeRoutes(mux)
+	s.registerProxyTailscaleRoutes(mux)
+	s.registerProxyOpenVPNRoutes(mux)
 	s.registerProxyRuleRoutes(mux)
 	s.registerProxyGroupRoutes(mux)
 	s.registerProxyPortRoutes(mux)
@@ -132,6 +134,8 @@ func (s *Server) Start() error {
 	s.registerRemoteRoutes(mux)
 	// 「远程桌面」应用模块路由（/api/desktop*）。
 	s.registerDesktopRoutes(mux)
+	// 「LAN 网关」旁路由模块路由（/api/gateway*）。
+	s.registerGatewayRoutes(mux)
 	mux.HandleFunc("GET /", s.handleStatic)
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {

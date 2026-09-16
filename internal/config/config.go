@@ -116,7 +116,10 @@ func (c *Config) Clone() *Config {
 			out.Subscriptions[index].PortMapping = &enabled
 		}
 	}
-	out.ManualNodes = append([]string(nil), c.ManualNodes...)
+	out.ManualNodes = append([]any(nil), c.ManualNodes...)
+	for i, entry := range out.ManualNodes {
+		out.ManualNodes[i] = cloneConfigValue(entry)
+	}
 	if c.PortMapping != nil {
 		enabled := *c.PortMapping
 		out.PortMapping = &enabled
@@ -139,6 +142,7 @@ func (c *Config) Clone() *Config {
 	out.GeoXUrl = cloneConfigMap(c.GeoXUrl)
 	out.Remote = c.Remote.Clone()
 	out.Desktop = c.Desktop.Clone()
+	out.Gateway = c.Gateway.Clone()
 	return &out
 }
 
@@ -210,7 +214,7 @@ func (c *Config) RedactedCopy() *Config {
 		out.Subscriptions[i].URL = redactSourceURL(out.Subscriptions[i].URL)
 	}
 	for i := range out.ManualNodes {
-		out.ManualNodes[i] = redactURL(out.ManualNodes[i])
+		out.ManualNodes[i] = redactManualNode(out.ManualNodes[i])
 	}
 	for i := range out.RuleURLs {
 		out.RuleURLs[i].URL = redactSourceURL(out.RuleURLs[i].URL)
@@ -244,6 +248,73 @@ func (c *Config) RedactedCopy() *Config {
 }
 
 const redactValue = "***"
+
+// redactManualNode 对单个手动节点条目打码：字符串条目沿用 redactURL，
+// 结构化出站映射隐藏其中的凭据字段（auth-key、私钥、证书材料等）。
+//
+// 参数：
+//   - entry: any，ManualNodes 的单个元素（string 或 map[string]any）。
+//
+// 返回值：
+//   - any：打码后的条目；未知类型返回 `<masked>`，宁可不可读也不泄露凭据。
+//
+// 错误情况：无。
+func redactManualNode(entry any) any {
+	switch typed := entry.(type) {
+	case string:
+		return redactURL(typed)
+	case map[string]any:
+		return redactConfigMap(typed)
+	default:
+		return "<masked>"
+	}
+}
+
+// RedactMapping 返回隐藏凭据字段的透传映射深副本，供手动节点等列表接口
+// 展示结构化 VPN 出站（auth-key/private-key/tls-crypt 等替换为 `***`）。
+//
+// 参数：
+//   - source: map[string]any，mihomo 出站原始映射。
+//
+// 返回值：
+//   - map[string]any：可安全序列化到列表响应的副本；nil 输入返回 nil。
+//
+// 错误情况：无；未知标量按原值保留，嵌套容器递归打码。
+func RedactMapping(source map[string]any) map[string]any {
+	return redactConfigMap(source)
+}
+
+// ValidateManualNodeShape 校验手动节点条目的结构形态（不含协议语义，
+// 协议级校验在 subscribe.ParseManualNode）。字符串条目要求非空；映射条目
+// 要求带非空的 name 与 type 字段。
+//
+// 参数：
+//   - entry: any，ManualNodes 的单个元素。
+//
+// 返回值：error，形态非法时返回具体原因；合法返回 nil。
+//
+// 错误情况：未知类型（数字、布尔等）直接拒绝。
+func ValidateManualNodeShape(entry any) error {
+	switch typed := entry.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return fmt.Errorf("空条目")
+		}
+		return nil
+	case map[string]any:
+		name, _ := typed["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("结构化条目缺少 name 字段")
+		}
+		typ, _ := typed["type"].(string)
+		if strings.TrimSpace(typ) == "" {
+			return fmt.Errorf("结构化条目 %q 缺少 type 字段", name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("条目类型无效（应为 URL 字符串或出站映射）")
+	}
+}
 
 // redactURL 隐藏代理/订阅 URL 中的用户信息和常见敏感查询参数。
 //
@@ -319,17 +390,36 @@ func redactSourceURL(rawURL string) string {
 //   - key: string，查询参数名称。
 //
 // 返回值：
-//   - bool：名称包含 token、secret、password、passwd、auth 或 api_key 时返回 true。
+//   - bool：名称包含 token、secret、password、passwd、auth 或 api_key 时返回 true；
+//     名称精确等于 VPN 类出站的私钥字段（key/private-key/tls-crypt 等）时也返回 true。
 //
-// 错误情况：无；判断大小写不敏感，采用保守包含匹配以覆盖供应商自定义前后缀。
+// 错误情况：无；判断大小写不敏感。泛用短词（key）只按完整字段名精确匹配，
+// 避免误伤 public-key/host-key 等公开材料字段；其余采用保守包含匹配以覆盖供应商自定义前后缀。
 func sensitiveConfigKey(key string) bool {
 	key = strings.ToLower(key)
+	if sensitiveConfigKeyExact[key] {
+		return true
+	}
 	for _, marker := range []string{"token", "secret", "password", "passwd", "auth", "api_key", "apikey"} {
 		if strings.Contains(key, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// sensitiveConfigKeyExact 是仅按完整字段名（小写）匹配的敏感键：
+// mihomo VPN 类出站的私钥材料字段（见 adapter/outbound/openvpn.go 等），
+// 名称太短或太泛用，不能用包含匹配（会误伤 public-key/host-key 等公开字段）。
+var sensitiveConfigKeyExact = map[string]bool{
+	"ca":                     true, // openvpn CA 证书材料，可能暴露内部 PKI 信息
+	"cert":                   true, // openvpn 客户端证书材料
+	"key":                    true, // openvpn 客户端私钥
+	"private-key":            true, // wireguard/ssh 私钥
+	"private-key-passphrase": true, // ssh 私钥口令
+	"tls-crypt":              true, // openvpn tls-crypt 密钥
+	"tls-crypt-v2":           true, // openvpn tls-crypt-v2 密钥
+	"pre-shared-key":         true, // wireguard 预共享密钥
 }
 
 // redactConfigMap 深复制透传配置 map，并隐藏嵌套凭据键和 URL 查询参数。
@@ -413,9 +503,12 @@ type Config struct {
 	ProxyDisabled bool           `yaml:"proxy-disabled,omitempty"`
 	Subscriptions []Subscription `yaml:"subscriptions"`
 
-	// ManualNodes 手动添加的自有代理节点（http(s)/socks5 URL 或分享链接），
-	// 来源标记为 manual，与订阅节点一起参与去重/测速/端口分配。
-	ManualNodes []string `yaml:"manual-nodes,omitempty"`
+	// ManualNodes 手动添加的自有代理节点，来源标记为 manual，与订阅节点一起参与
+	// 去重/测速/端口分配。元素支持两种 YAML 形态，向后兼容既有纯字符串列表：
+	//   - string：http(s)/socks5 URL 或分享链接（ss/ssr/vmess/vless/trojan/hy2/tuic）
+	//   - map[string]any：结构化 mihomo 出站映射，限隧道类（VPN）类型
+	//     （tailscale/openvpn/zerotier/wireguard/ssh，见 docs/adr/0002）
+	ManualNodes []any `yaml:"manual-nodes,omitempty"`
 
 	Listen    string `yaml:"listen"`     // listen address for mapped ports, default 127.0.0.1
 	PortRange [2]int `yaml:"port-range"` // inclusive [start, end] for per-node ports
@@ -423,10 +516,12 @@ type Config struct {
 	// 使用指针区分旧配置中的“字段缺失”和用户显式关闭，保证升级后默认继续开启。
 	PortMapping *bool `yaml:"port-mapping,omitempty"`
 
-	RefreshInterval Duration `yaml:"refresh-interval"` // subscription refresh period, default 30m
-	HealthInterval  Duration `yaml:"health-interval"`  // health check period, default 5m
-	HealthURL       string   `yaml:"health-url"`       // default https://www.gstatic.com/generate_204
-	HealthTimeout   Duration `yaml:"health-timeout"`   // default 5s
+	// RefreshInterval 仅用于兼容既有配置文件。订阅已改为只允许用户手动同步，
+	// 调度器不会读取该值创建下载定时器；保留字段可避免升级时拒绝旧 YAML。
+	RefreshInterval Duration `yaml:"refresh-interval"`
+	HealthInterval  Duration `yaml:"health-interval"` // health check period, default 5m
+	HealthURL       string   `yaml:"health-url"`      // default https://www.gstatic.com/generate_204
+	HealthTimeout   Duration `yaml:"health-timeout"`  // default 5s
 
 	Include string `yaml:"include,omitempty"` // regexp allow-list on node names; empty means allow all
 	Exclude string `yaml:"exclude,omitempty"` // regexp deny-list on node names; applied after include
@@ -483,6 +578,11 @@ type Config struct {
 	// Desktop 「远程桌面」应用模块；保存服务端推荐端口与客户端连接档案，
 	// 底层 token 和端口开放仍由 Remote 作为唯一事实来源。
 	Desktop DesktopConfig `yaml:"desktop,omitempty" json:"desktop"`
+
+	// Gateway 「LAN 网关」旁路由模块：局域网设备把网关/DNS 指向本机即获得分流能力；
+	// 数据面寄生于 proxy 模块的 mihomo（redir/tproxy 入口 + SRC-IP-CIDR 设备规则），
+	// 特权操作平台分治（macOS root helper / Linux setcap，见 docs/adr/0003）；默认关闭。
+	Gateway GatewayConfig `yaml:"gateway,omitempty" json:"gateway"`
 
 	// migratedLegacy 记录 Parse 是否执行过兼容迁移（不参与序列化），
 	// 供启动路径把迁移结果一次性写回配置文件。
@@ -727,6 +827,7 @@ func (c *Config) applyDefaults() {
 	}
 	c.TUN.ApplyDefaults()
 	c.Desktop.ApplyDefaults()
+	c.Gateway.ApplyDefaults()
 	// geo 下载地址：默认镜像 + 用户按键覆盖
 	merged := make(map[string]any, len(DefaultGeoXUrl))
 	for k, v := range DefaultGeoXUrl {
@@ -822,8 +923,8 @@ func (c *Config) validate(allowMissingAPISecret bool) error {
 		return fmt.Errorf("at least one subscription or manual node is required")
 	}
 	for i, m := range c.ManualNodes {
-		if strings.TrimSpace(m) == "" {
-			return fmt.Errorf("manual-nodes[%d]: 空条目", i)
+		if err := ValidateManualNodeShape(m); err != nil {
+			return fmt.Errorf("manual-nodes[%d]: %w", i, err)
 		}
 	}
 	seen := map[string]bool{}
@@ -935,6 +1036,9 @@ func (c *Config) validate(allowMissingAPISecret bool) error {
 		return err
 	}
 	if err := c.Desktop.Validate(); err != nil {
+		return err
+	}
+	if err := c.checkGateway(); err != nil {
 		return err
 	}
 	return nil

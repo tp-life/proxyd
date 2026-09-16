@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/core"
+	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
 	"proxyd/internal/proxy/ruleurl"
@@ -52,7 +54,7 @@ func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 // 的配置释放端口，再应用目标配置。反向（listener → mixed-port）以及
 // listener 同名仅换 proxy 目标（main-auto ↔ main-node）由 mihomo 安全处理。
 func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
-	willListener := core.MainInboundIsListener(cfg, assigns)
+	willListener := core.MainInboundIsListener(cfg, assigns, a.Nodes())
 	a.mu.RLock()
 	wasListener := a.mainListenerOn
 	a.mu.RUnlock()
@@ -111,7 +113,13 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	if cfg.ProxyDisabled {
 		return a.runner.Suspend()
 	}
-	cfgYAML, err := core.GenerateWithNodes(cfg, assigns, a.Nodes(), imported)
+	// select 分组的持久化选中项随每次生成注入 mihomo default-selected；
+	// 状态文件损坏仅打日志丢弃，mihomo 回退到组成员首位。
+	selected, err := groupstate.Load(a.groupSelectedPath())
+	if err != nil {
+		log.Printf("[groupstate] %v (ignored)", err)
+	}
+	cfgYAML, err := core.GenerateWithState(cfg, assigns, a.Nodes(), imported, selected)
 	if err != nil {
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
@@ -127,15 +135,39 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	return nil
 }
 
-// Refresh 执行一轮完整流水线：fetch=true 时先拉取订阅与规则源，否则复用上次结果。
-// 步骤：拉取/合并 → 健康检测 → 端口分配（稳定映射）→ 生成配置 → 热更新核心。
+// Refresh 执行一轮代理节点流水线：fetch=true 时显式拉取订阅与规则源；fetch=false
+// 时只使用内存节点、已确认的本地订阅缓存和当前配置里的手动节点，绝不访问订阅 URL。
+// 步骤：按请求拉取或重建节点集合 → 健康检测 → 稳定端口分配 → 生成配置 → 热更新核心。
+//
+// 参数：
+//   - ctx: context.Context，控制订阅下载、规则源下载、健康检测和链路验证的取消。
+//   - fetch: bool，只有用户明确执行同步时才传 true；后台健康检查必须传 false。
+//
+// 返回值：error，节点来源为空、全部节点失效、下载失败且无缓存，或 mihomo 热更新失败时返回。
+//
+// 错误情况：fetch=false 即使没有内存节点也不会隐式下载订阅，这是“订阅只允许手动同步”
+// 的关键边界；新安装尚未同步时会返回无节点错误，由调用方保留当前 DIRECT 运行配置。
 func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
+	return a.refreshLocked(ctx, fetch)
+}
+
+// refreshLocked 执行完整节点刷新流水线，但不自行获取 refreshing 锁。
+//
+// 参数说明：
+//   - ctx: context.Context，控制订阅下载、规则源下载、健康检测与运行态应用。
+//   - fetch: bool，true 时显式下载订阅；false 时只使用现有内存与本地缓存。
+//
+// 返回值说明：error，节点来源为空、检测全部失败或 mihomo 热更新失败时返回。
+//
+// 错误情况：调用方必须已经持有 refreshing 锁。该拆分让 Tailscale 一体化接入能把
+// “修改配置 → 刷新节点池 → 持久化”纳入同一事务，避免在锁间隙被其它刷新覆盖。
+func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 	a.mu.RLock()
 	disabled := a.cfg.ProxyDisabled
 	a.mu.RUnlock()
-	// 周期刷新与健康探测也暂停，避免模块关闭后仍持续拉取订阅和访问外网。
+	// 模块关闭时暂停手动同步与周期健康探测，避免已停用代理继续访问外网。
 	if disabled {
 		return nil
 	}
@@ -158,19 +190,21 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		a.proxyLifecycle.Complete(generation, phase, running, message, 0)
 	}()
 	var nodes []*node.Node
-	if fetch || len(a.Nodes()) == 0 {
+	if fetch {
+		fetchOptions := a.subscriptionFetchOptions()
 		a.mu.RLock()
 		subs := make([]config.Subscription, len(a.cfg.Subscriptions))
 		copy(subs, a.cfg.Subscriptions)
 		ruleURLs := make([]config.RuleURL, len(a.cfg.RuleURLs))
 		copy(ruleURLs, a.cfg.RuleURLs)
-		manualEntries := make([]string, len(a.cfg.ManualNodes))
+		manualEntries := make([]any, len(a.cfg.ManualNodes))
 		copy(manualEntries, a.cfg.ManualNodes)
+		stateDir := a.cfg.StateDir
 		a.mu.RUnlock()
 
 		// 订阅与规则源并发拉取
 		ruleCh := make(chan []ruleurl.Result, 1)
-		go func() { ruleCh <- ruleurl.FetchAll(ctx, ruleURLs, a.cfg.StateDir) }()
+		go func() { ruleCh <- ruleurl.FetchAll(ctx, ruleURLs, stateDir) }()
 
 		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
 		for _, err := range manualErrs {
@@ -181,7 +215,7 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 
 		var errs []error
 		var infos map[string]subscribe.UserInfo
-		nodes, infos, errs = subscribe.FetchAllWithInfoAndFilters(ctx, subs, a.cfg.StateDir, a.includeRe, a.excludeRe,
+		nodes, infos, errs = subscribe.FetchAllWithInfoAndFiltersOptions(ctx, subs, stateDir, a.includeRe, a.excludeRe, fetchOptions,
 			map[string][]*node.Node{subscribe.ManualSubscription: manual})
 		for _, err := range errs {
 			if err != nil {
@@ -197,9 +231,57 @@ func (a *App) Refresh(ctx context.Context, fetch bool) (resultErr error) {
 		a.subInfos = infos
 		a.mu.Unlock()
 	} else {
-		// 仅测速刷新也必须重新应用当前订阅开关；否则刚从配置恢复的禁用订阅节点
-		// 可能因旧内存快照继续参与健康检测和监听生成。
-		nodes = filterEnabledSubscriptionNodes(a.Nodes(), a.Subscriptions())
+		// 非下载路径仍需重新解析手动节点，因为新增/删除手动节点后 API 会复用这条
+		// 流水线更新运行态。订阅节点只能来自已提交的内存快照，绝不能因为内存为空
+		// 而回退到网络；这样启动、定时健康检查和模块恢复均不会产生订阅请求。
+		a.mu.RLock()
+		manualEntries := append([]any(nil), a.cfg.ManualNodes...)
+		subscriptions := append([]config.Subscription(nil), a.cfg.Subscriptions...)
+		stateDir := a.cfg.StateDir
+		currentInfos := cloneSubscriptionInfos(a.subInfos)
+		a.mu.RUnlock()
+		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
+		for _, err := range manualErrs {
+			if err != nil {
+				log.Printf("[manual] %v", err)
+			}
+		}
+		bySource := map[string][]*node.Node{subscribe.ManualSubscription: manual}
+		for _, existing := range filterEnabledSubscriptionNodes(a.Nodes(), subscriptions) {
+			if existing.Subscription == subscribe.ManualSubscription {
+				continue
+			}
+			bySource[existing.Subscription] = append(bySource[existing.Subscription], existing)
+		}
+		infos := make(map[string]subscribe.UserInfo, len(subscriptions))
+		for _, subscription := range subscriptions {
+			if !subscription.IsEnabled() {
+				continue
+			}
+			if info, ok := currentInfos[subscription.Name]; ok {
+				infos[subscription.Name] = info
+			}
+			if len(bySource[subscription.Name]) > 0 {
+				continue
+			}
+			// 合并去重可能让某个订阅暂时没有内存节点；删除其它订阅或重新启用时，
+			// 只从该订阅最后一次已确认缓存恢复，绝不为了补齐来源访问网络。
+			cached, info, err := subscribe.LoadCachedWithInfo(subscription, stateDir)
+			if err != nil {
+				continue
+			}
+			bySource[subscription.Name] = cached
+			if !info.IsZero() {
+				infos[subscription.Name] = info
+			}
+		}
+		nodes = subscribe.MergeFiltered(bySource, a.includeRe, a.excludeRe)
+		if len(nodes) == 0 {
+			return fmt.Errorf("no cached or manual nodes available; sync a subscription manually first")
+		}
+		a.mu.Lock()
+		a.subInfos = infos
+		a.mu.Unlock()
 	}
 
 	a.checkNodes(ctx, nodes, a.dialerTargets()...)
@@ -231,10 +313,10 @@ func (a *App) Testing() bool {
 func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets ...string) {
 	a.testing.Store(true)
 	defer a.testing.Store(false)
-	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, dialerTargets...)
+	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.cfg.StateDir, dialerTargets...)
 }
 
-// applyNodes 执行健康检测后的流水线尾部，并完成链式代理的二阶段验证。
+// applyNodes 执行健康检测后的流水线尾部，并完成 mihomo 托管节点的二阶段验证。
 //
 // 参数：
 //   - ctx: context.Context，控制完整链路 URLTest 的取消与超时传播。
@@ -243,7 +325,8 @@ func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets 
 // 返回值：error，没有任何可用节点、端口分配后的配置无法加载，或完整链路全部失败时返回。
 //
 // 错误情况：调用方必须持有 a.refreshing 锁。普通节点已经由 pool.Check 直接测速；
-// dialer-proxy 节点先以依赖候选身份加载，随后通过 Runner.URLTest 验证真实完整链路。
+// dialer-proxy 节点先以依赖候选身份加载，Tailscale 则避免在核心外启动临时 tsnet；
+// 配置了 Exit Node 的 Tailscale 与普通链式节点随后通过 Runner.URLTest 验证真实链路。
 // 若候选失败，会重新分配端口并热加载一次，确保失败链路不会残留在最终监听入口。
 func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	// 先更新应用节点快照，让 GenerateWithNodes 能看到未分配端口的链路依赖。
@@ -261,8 +344,15 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if len(alive) == 0 {
 		return fmt.Errorf("all %d nodes failed health check", len(nodes))
 	}
-	if capacity := a.cfg.Capacity(); len(alive) > capacity {
-		log.Printf("[alloc] %d alive nodes exceed port capacity %d, keeping the fastest", len(alive), capacity)
+	// 隧道类节点不参与端口映射，容量提示只统计实际需要一对一端口的节点。
+	mappable := 0
+	for _, n := range alive {
+		if !n.IsTunnel() {
+			mappable++
+		}
+	}
+	if capacity := a.cfg.Capacity(); mappable > capacity {
+		log.Printf("[alloc] %d alive nodes exceed port capacity %d, keeping the fastest", mappable, capacity)
 	}
 
 	prev, err := pool.LoadSnapshot(a.snapshotPath())
@@ -274,10 +364,10 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 		return err
 	}
 
-	// pool.Check 无法在首次配置加载前解析 dialer-proxy 的运行时依赖。此处使用刚刚
-	// 生效的 mihomo 代理表执行真实 URLTest；只在可用性发生变化时重新生成配置，
-	// 延迟数值变化本身不触发第二次热更新，避免无意义地重建 listener。
-	if a.verifyDialerNodes(ctx, nodes) {
+	// pool.Check 无法在首次配置加载前解析 dialer-proxy 的运行时依赖，也不得为
+	// Tailscale 单独启动第二个 tsnet。此处使用刚生效的 mihomo 代理表执行真实
+	// URLTest；只在可用性变化时重生成，延迟变化不触发无意义的 listener 重建。
+	if a.verifyMihomoManagedNodes(ctx, nodes) {
 		alive = alive[:0]
 		for _, n := range nodes {
 			if n.Alive {
@@ -316,27 +406,66 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if err := node.SaveSnapshot(a.nodesSnapshotPath(), nodes); err != nil {
 		log.Printf("[snapshot] 保存节点快照失败: %v", err)
 	}
+	// 顺带调和网关执行层：mihomo 入口刚热更新完毕，失败的 gateway 应用到点重试，
+	// 被外部清除的规则（如 helper 看门狗）也在此收敛。
+	a.reconcileGatewayLocked()
+	a.ensureInteractiveTailscaleEnrollments(nodes)
 	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
 	return nil
 }
 
-// verifyDialerNodes 使用已加载的 mihomo 代理表验证所有链式节点的真实端到端可用性。
+// ensureInteractiveTailscaleEnrollments 为没有 auth-key 的 mihomo Tailscale 出站恢复
+// 管理员审批状态观察，并在进程重启后主动触发一次 tsnet 登录。
+//
+// 参数说明：nodes 是刚成功加载到 mihomo 代理表的完整节点集合。
+//
+// 返回值说明：无；触发在有界后台协程执行，不阻塞刷新事务。
+//
+// 错误情况：已经存在注册状态的节点不会重复触发；网络或审批等待错误由 Runner
+// 状态记录。这样待审批配置即使重启，也能重新在管理面获得同一身份的注册链接。
+func (a *App) ensureInteractiveTailscaleEnrollments(nodes []*node.Node) {
+	for _, candidate := range nodes {
+		if candidate == nil || !candidate.Alive || !candidate.IsTailscale() {
+			continue
+		}
+		authKey, _ := candidate.Mapping["auth-key"].(string)
+		if strings.TrimSpace(authKey) != "" {
+			continue
+		}
+		if _, exists := a.runner.TailscaleEnrollment(candidate.Name); exists {
+			continue
+		}
+		a.runner.BeginTailscaleEnrollment(candidate.Name, "approval")
+		go func(name string) {
+			triggerCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			a.runner.TriggerTailscaleEnrollment(triggerCtx, name)
+		}(candidate.Name)
+	}
+}
+
+// verifyMihomoManagedNodes 使用已加载的 mihomo 代理表验证需要运行态探测的节点。
 //
 // 参数：
 //   - ctx: context.Context，整轮刷新取消时终止后续测试。
-//   - nodes: []*node.Node，包含普通节点和 dialer-proxy 节点的本轮节点集合。
+//   - nodes: []*node.Node，包含普通、dialer-proxy 与 Tailscale 节点的本轮节点集合。
 //
-// 返回值：bool，只要任一链式节点从候选可用变为不可用就返回 true，提示调用方重生成配置。
+// 返回值：bool，只要任一候选从可用变为不可用就返回 true，提示调用方重生成配置。
 //
 // 错误情况：代理不存在、上游组不可用、网络失败与超时均写入 FailReason。检测串行执行，
 // 因为 Runner 为保护 mihomo 全局代理表会持锁；这样避免并发 URLTest 与热更新产生竞态。
-func (a *App) verifyDialerNodes(ctx context.Context, nodes []*node.Node) bool {
+// 未配置 Exit Node 的 Tailscale 只承载 Tailnet/子网路由，公网 health-url 对其没有意义，
+// 因此保持“mihomo 已加载”候选状态，实际连接仍由 mihomo 按首次流量懒启动。
+func (a *App) verifyMihomoManagedNodes(ctx context.Context, nodes []*node.Node) bool {
 	availabilityChanged := false
 	for _, n := range nodes {
-		if n == nil || n.DialerProxy() == "" || !n.Alive {
+		if !needsMihomoRuntimeProbe(n) {
 			continue
 		}
-		delay, err := a.runner.URLTest(ctx, n.Name, a.cfg.HealthURL, a.cfg.HealthTimeout.D())
+		// Tailscale 首次启动可能需要完成控制面登录与 DERP 协商；继续复用代理域的
+		// 隧道超时策略，避免迁移到正式 mihomo 运行态后退化为普通节点的短超时。
+		timeout := pool.ProbeTimeout(n, a.cfg.HealthTimeout.D())
+		delay, err := a.runner.URLTest(ctx, n.Name, a.cfg.HealthURL, timeout)
 		if err != nil {
 			n.Alive = false
 			n.Delay = 0
@@ -348,6 +477,26 @@ func (a *App) verifyDialerNodes(ctx context.Context, nodes []*node.Node) bool {
 		n.FailReason = ""
 	}
 	return availabilityChanged
+}
+
+// needsMihomoRuntimeProbe 判断候选节点是否需要在正式 mihomo 代理表中执行公网测速。
+//
+// 参数：
+//   - n: *node.Node，已经完成预检查的节点。
+//
+// 返回值：bool，普通 dialer-proxy 节点或配置了 Exit Node 的 Tailscale 返回 true。
+//
+// 错误情况：无；nil、预检查失败及仅访问 Tailnet/子网路由的 Tailscale 返回 false。
+// Tailscale 的判断优先于 dialer-proxy，避免“使用上游拨号但未配置 Exit Node”的节点
+// 被拿公网 health-url 误判为失效。
+func needsMihomoRuntimeProbe(n *node.Node) bool {
+	if n == nil || !n.Alive {
+		return false
+	}
+	if n.IsTailscale() {
+		return n.TailscaleExitNode() != ""
+	}
+	return n.DialerProxy() != ""
 }
 
 // firstErrorLine 把底层多行错误压缩为适合节点状态展示的一行文本。
@@ -382,27 +531,30 @@ func (a *App) dialerTargets() []string {
 	return targets
 }
 
-// restoreSnapshot 启动时加载 nodes.json 节点快照并立即生成 mihomo 配置提供服务，
-// 不必等首次订阅刷新完成。快照缺失/损坏仅打日志丢弃，不致命。
-// 之后 Run 里的首次 Refresh 成功会覆盖；失败则快照保持可用。
-func (a *App) restoreSnapshot() {
+// restoreSnapshot 启动时只加载 nodes.json 节点快照并生成 mihomo 配置，不访问任何
+// 订阅地址。快照缺失、损坏或没有健康节点时仍应用一份 DIRECT 配置，使控制台和主端口
+// 可以正常启动，用户随后可通过手动同步取得节点。
+//
+// 参数：无；快照路径来自当前配置的 state-dir。
+//
+// 返回值：error，仅在 mihomo 配置生成、热加载或 TUN 实际状态校验失败时返回。
+//
+// 错误情况：快照读取失败会记录日志并降级为空节点启动，不会触发订阅下载；应用失败
+// 必须返回给 Run，使要求 TUN 的配置仍能执行流量绕过保护。
+func (a *App) restoreSnapshot() error {
 	snap, err := node.LoadSnapshot(a.nodesSnapshotPath())
 	if err != nil {
 		log.Printf("[snapshot] %v", err)
-		return
 	}
-	if snap == nil || len(snap.Nodes) == 0 {
-		return
+	var nodes []*node.Node
+	if snap != nil {
+		nodes = filterEnabledSubscriptionNodes(snap.Nodes, a.Subscriptions())
 	}
 	var alive []*node.Node
-	for _, n := range snap.Nodes {
+	for _, n := range nodes {
 		if n.Alive {
 			alive = append(alive, n)
 		}
-	}
-	if len(alive) == 0 {
-		log.Printf("[snapshot] 快照 %d 个节点均标记失效，等待首次刷新", len(snap.Nodes))
-		return
 	}
 
 	a.refreshing.Lock()
@@ -414,13 +566,17 @@ func (a *App) restoreSnapshot() {
 	}
 	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
 	if err := a.regenerateLocked(assigns); err != nil {
-		log.Printf("[snapshot] 快照节点生成配置失败（等待首次刷新）: %v", err)
-		return
+		return fmt.Errorf("从节点快照生成启动配置失败: %w", err)
 	}
 	a.mu.Lock()
-	a.nodes = snap.Nodes
+	a.nodes = nodes
 	a.assigns = assigns
 	a.mu.Unlock()
+	if snap == nil || len(nodes) == 0 {
+		log.Printf("[snapshot] 没有可用节点快照，已按空节点启动；请在控制台手动同步订阅")
+		return nil
+	}
 	log.Printf("[snapshot] 已从快照恢复 %d 个节点（%d 个可用，%d 个端口，保存于 %s）",
-		len(snap.Nodes), len(alive), len(assigns), snap.SavedAt.Format("2006-01-02 15:04:05"))
+		len(nodes), len(alive), len(assigns), snap.SavedAt.Format("2006-01-02 15:04:05"))
+	return nil
 }

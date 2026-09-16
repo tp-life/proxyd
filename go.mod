@@ -11,6 +11,7 @@ require (
 	github.com/tailscale/gliderssh v0.3.4-0.20260716005906-1a0f895faf28
 	github.com/tailscale/tailcat v0.6.0
 	github.com/u-root/u-root v0.14.0
+	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 	golang.org/x/crypto v0.55.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/sys v0.47.0
@@ -173,6 +174,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gvisor.dev/gvisor v0.0.0-20260224225140-573d5e7127a8 // indirect
 )
-
-// make deps 下载原版并应用日志和入站认证并发补丁；生成源码不提交。
-replace github.com/metacubex/mihomo => ./third_party/mihomo

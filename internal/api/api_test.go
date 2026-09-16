@@ -413,7 +413,7 @@ func TestSubscriptionUpdateAPI(t *testing.T) {
 // 错误情况：接口未返回 200，或应用层分组仍保留旧端口/旧策略时测试失败。
 func TestGroupUpdateAPI(t *testing.T) {
 	a, err := app.New(&config.Config{
-		ManualNodes: []string{"socks5://127.0.0.1:1080#manual"},
+		ManualNodes: []any{"socks5://127.0.0.1:1080#manual"},
 		Listen:      "127.0.0.1",
 		PortRange:   [2]int{42000, 42010},
 		Mode:        "rule",
