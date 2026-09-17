@@ -29,7 +29,7 @@ cmd/proxyd/<module>.go        CLI 子命令
 web/src/pages/<Module>Page.jsx + web/src/hooks/use<Module>Feed.js   控制台页面与数据 hook
 ```
 
-现有模块：`proxy`（代理主功能，域服务在 `internal/proxy/{core,node,pool,subscribe,ruleurl,sysproxy,tunperm}`，
+现有模块：`proxy`（代理主功能，域服务在 `internal/proxy/{core,node,pool,subscribe,ruleurl,sysproxy,tunperm,tunhelper}`，
 编排文件以 `proxy_` 前缀命名）、`remote`（远程连接隧道）与 `gateway`（LAN 网关旁路由，域服务在
 `internal/gateway`，helper 换行 JSON 协议与白名单分发在 `helperproto.go`，macOS helper 服务端/安装在
 `helper_*_darwin.go`）。平台通用服务（`logbuf`/`autostart`/`updatecheck`）不属于任何模块。

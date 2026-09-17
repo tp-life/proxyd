@@ -193,7 +193,7 @@ geox-url:
 
 一条命令注册开机自启（推荐）：`proxyd autostart on`（`status`/`off` 查看与移除）。
 
-- **macOS**：经管理员授权写 `/Library/LaunchDaemons/com.proxyd.plist`，在 `system` 域以当前用户身份运行（RunAtLoad + KeepAlive，日志指向 state-dir/proxyd.log）；无需用户登录，冷启动、断电恢复或系统重启后都会自动拉起，并在迁移时清理旧 `LaunchAgents` 项
+- **macOS**：经管理员授权写 `/Library/LaunchDaemons/com.proxyd.plist`，在 `system` 域以当前用户身份运行（RunAtLoad + KeepAlive 仅崩溃拉起，日志指向 state-dir/proxyd.log）；无需用户登录，冷启动、断电恢复或系统重启后都会自动拉起，并在迁移时清理旧 `LaunchAgents` 项。`proxyd start/stop` 与开机自启相互独立：stop 系统实例后保持停止
 - **Linux**：写 `~/.config/systemd/user/proxyd.service` 并 `systemctl --user enable --now`（日志看 `journalctl --user -u proxyd`）
 - **Windows**：写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，登录时执行 `proxyd start`（派生后台进程，不弹控制台窗口）
 
