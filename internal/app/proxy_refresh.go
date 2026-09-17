@@ -111,7 +111,23 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	}()
 	// 所有配置热更新共用此门，停用期间修改规则或端口也不能意外恢复监听。
 	if cfg.ProxyDisabled {
+		// Suspend 会关闭 TUN listener，helper 注入的 fd 随 mihomo 一并关闭，
+		// 这里只清状态，恢复代理时重新申请。
+		a.releaseTUNFDLocked(false)
 		return a.runner.Suspend()
+	}
+	// darwin 普通用户模式下经 tun-helper 申请 utun fd 并注入生成配置；
+	// fd 不落盘（injectTUNFD 作用于运行时副本）。
+	fd, acquired, err := a.ensureTUNFDLocked(cfg)
+	if err != nil {
+		return err
+	}
+	cfg = injectTUNFD(cfg, fd)
+	releaseOnError := func() {
+		// fd 未随配置成功应用时所有权仍在本层，回滚必须关闭，避免泄漏 utun。
+		if acquired {
+			a.releaseTUNFDLocked(true)
+		}
 	}
 	// select 分组的持久化选中项随每次生成注入 mihomo default-selected；
 	// 状态文件损坏仅打日志丢弃，mihomo 回退到组成员首位。
@@ -121,16 +137,23 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	}
 	cfgYAML, err := core.GenerateWithState(cfg, assigns, a.Nodes(), imported, selected)
 	if err != nil {
+		releaseOnError()
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
 	if err := a.runner.Reload(cfgYAML); err != nil {
+		releaseOnError()
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
 	// mihomo 的 ReCreateTun 在创建虚拟网卡失败时只写日志，不把错误返回给 hub.Parse。
 	// 因此必须在 Reload 返回后读取 listener 实际状态，否则可能把 enable:true 持久化，
 	// 但运行时 TUN 已关闭。状态不一致作为应用失败返回，上层会恢复旧配置。
 	if active := a.runner.TUNEnabled(); active != cfg.TUN.Enable {
+		releaseOnError()
 		return fmt.Errorf("mihomo TUN 实际状态与请求不一致（期望 enable=%t，实际 active=%t）；请检查 TUN 日志、stack 与系统权限", cfg.TUN.Enable, active)
+	}
+	if !cfg.TUN.Enable {
+		// TUN 已随本次应用关闭，fd 由 mihomo 关闭（所有权已移交），只清持有状态。
+		a.releaseTUNFDLocked(false)
 	}
 	return nil
 }

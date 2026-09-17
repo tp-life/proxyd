@@ -169,6 +169,15 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
               <UISwitch checked={overview.system_proxy} label="接管系统代理" onCheckedChange={(enabled) => onPost("/api/system-proxy", { enabled }, enabled ? "系统代理已开启" : "系统代理已关闭")} />
               <UISwitch checked={Boolean(overview.tun?.enabled)} label="启用 TUN 模式" onCheckedChange={(enabled) => onPost("/api/tun", { enabled }, enabled ? "TUN 已开启" : "TUN 已关闭")} />
               {overview.tun && <p className={classNames("permission-note", overview.tun.allowed && (!overview.tun.enabled || overview.tun.active) ? "ok" : "warn")}>{overview.tun.enabled && !overview.tun.active ? "TUN 配置已开启但实际未生效，请检查日志" : overview.tun.allowed ? `${overview.tun.platform} 权限可用` : overview.tun.permission}</p>}
+              {overview.tun?.helper && (
+                <p className={classNames("permission-note", overview.tun.helper.installed && overview.tun.helper.reachable ? "ok" : "warn")}>
+                  {overview.tun.helper.installed
+                    ? overview.tun.helper.reachable
+                      ? "TUN 特权助手已安装并可达（开启 TUN 无需 sudo）"
+                      : `TUN 特权助手已安装但不可达${overview.tun.helper.detail ? `：${overview.tun.helper.detail}` : ""}`
+                    : "TUN 特权助手未安装：请在终端执行 proxyd tun helper install（一次性管理员授权）"}
+                </p>
+              )}
             </div>
           </section>
         </div>

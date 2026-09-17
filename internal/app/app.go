@@ -121,6 +121,11 @@ type App struct {
 	// 先释放主端口（mixed-port → 同端口 listener 直接热更新会 bind 冲突）。
 	mainListenerOn bool
 
+	// tunFD 是 tun-helper 创建并注入 mihomo 的 utun 文件描述符（纯运行时状态，
+	// 不落盘），0 表示未持有；仅在 refreshing 锁内访问。fd 随配置成功应用后归
+	// mihomo 所有（关闭 TUN/停用时由 mihomo 关闭），见 proxy_tunhelper.go。
+	tunFD int
+
 	updateChecker          ReleaseChecker
 	versionStatus          VersionCheckStatus
 	versionCheckGeneration uint64
@@ -218,6 +223,7 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 	a.initRemote()
 	a.initDesktop()
 	a.initGateway()
+	a.migrateRootAutostartDaemon()
 	// 兼容迁移（如旧默认 health-url）此前只在内存生效，这里一次性写回配置文件，
 	// 避免每次启动重复迁移并打印告警。写失败不阻断启动，仅降级为下次再试。
 	if cfgPath != "" && cfg.MigrationApplied() {
@@ -468,10 +474,11 @@ func (a *App) AutostartStatus() bool {
 
 // AutostartRuntime 查询系统自启运行态，不读取代理领域对象或修改配置。
 // 参数：无。返回：autostart.RuntimeStatus 快照。错误：系统查询失败保留在快照消息中。
+// start/stop 与开机自启相互独立后，系统服务与本进程身份不一致只是信息展示，不再引导交回托管。
 func (a *App) AutostartRuntime() autostart.RuntimeStatus {
 	s := autostart.Inspect()
 	if s.Loaded && (!s.Running || s.PID != os.Getpid()) {
-		s.Message += "；当前控制台由独立实例提供，可执行 proxyd restart 交回系统托管"
+		s.Message += "；当前控制台由独立实例提供"
 	}
 	return s
 }
@@ -498,6 +505,8 @@ func (a *App) autostartOptions() (autostart.Options, error) {
 	if err != nil {
 		return autostart.Options{}, err
 	}
+	// TUN 已由 tun-helper 代劳 root 操作（docs/privilege-model.md 方案 B），
+	// 守护进程不再需要 root：自启项始终按注册账户降权运行。
 	return autostart.Options{Exe: exe, ConfigPath: cfgPath, StateDir: a.cfg.StateDir}, nil
 }
 
