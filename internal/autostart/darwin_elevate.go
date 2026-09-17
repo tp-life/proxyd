@@ -4,6 +4,7 @@ package autostart
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,6 +71,7 @@ func runPrivilegedInGUISession(shellScript string, account serviceAccount) error
 	domain := "gui/" + account.UID
 	// 清掉可能残留的同名助手（上次异常退出），再注册本次任务。
 	_, _ = run("/bin/launchctl", "bootout", domain+"/"+elevateLabel)
+	log.Printf("[autostart] 已请求在用户图形会话弹出管理员授权窗口，请留意密码对话框；若未看到对话框，请在「终端」中重跑本命令改用 sudo 授权")
 	if _, err := run("/bin/launchctl", "bootstrap", domain, plistPath); err != nil {
 		return fmt.Errorf("当前用户未登录图形会话，无法弹出授权窗口；请在「终端」中直接执行 sudo 命令: %w", err)
 	}
@@ -85,7 +87,7 @@ func runPrivilegedInGUISession(shellScript string, account serviceAccount) error
 			return fmt.Errorf("管理员授权失败: %s", strings.TrimSpace(string(detail)))
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("等待管理员授权超时（%v），请重试", elevateTimeout)
+			return fmt.Errorf("等待管理员授权超时（%v）：未检测到密码输入，授权窗口可能未弹出或被忽略；请改在「终端」中直接执行本命令，将改用 sudo 在终端内输入密码", elevateTimeout)
 		}
 		time.Sleep(elevatePollInterval)
 	}

@@ -37,7 +37,7 @@ func TestSSHKeyAuthentication(t *testing.T) {
 		{"empty no key", true, nil, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler, err := configuredShellSSHHandler(t.TempDir(), tc.required, tc.keys)
+			handler, err := configuredShellSSHHandler(t.TempDir(), tc.required, tc.keys, "")
 			if err != nil {
 				t.Fatal(err)
 			}

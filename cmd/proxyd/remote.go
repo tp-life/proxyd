@@ -69,6 +69,8 @@ type remoteStatusJSON struct {
 	TempKey         string                      `json:"temp_key,omitempty"`
 	KeyFile         string                      `json:"key_file"`
 	BuiltinSSH      bool                        `json:"builtin_ssh"`
+	ShellUser       string                      `json:"shell_user,omitempty"`
+	SessionUser     string                      `json:"session_user"`
 	SSHAuthRequired bool                        `json:"ssh_auth_required"`
 	WebTerminal     bool                        `json:"web_terminal"`
 	APIListen       string                      `json:"api_listen"`
@@ -162,6 +164,8 @@ func cmdRemote(args []string) error {
 		return cmdRemoteSSHKeys(c, rest[1:])
 	case "builtin-ssh":
 		return cmdRemoteBuiltinSSH(c, rest[1:])
+	case "shell-user":
+		return cmdRemoteShellUser(c, rest[1:])
 	case "web-terminal":
 		return cmdRemoteWebTerminal(c, rest[1:])
 	case "remotes":
@@ -169,7 +173,7 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -228,6 +232,9 @@ func remotePrintStatus(c *apiClient) error {
 		} else {
 			fmt.Println("内嵌 SSH：已开启，隧道免密模式（proxyd remote ssh-keys on 可额外要求公钥认证）")
 		}
+	}
+	if st.BuiltinSSH || st.WebTerminal || st.ShellUser != "" {
+		fmt.Printf("远程会话用户：%s（内嵌 SSH/SCP/Web 终端的运行身份；proxyd remote shell-user 修改）\n", st.SessionUser)
 	}
 	if st.WebTerminal {
 		fmt.Printf("Web 终端：已开启（管理 API %s；proxyd remote web-terminal off 可立即关闭）\n", st.APIListen)
@@ -793,6 +800,43 @@ func cmdRemoteKeyFile(c *apiClient, args []string) error {
 		fmt.Printf("已恢复内置托管密钥：%s（token 已随身份切换更新）\n", st.KeyFile)
 	} else {
 		fmt.Printf("密钥文件已更新：%s（token 已随身份切换更新）\n", st.KeyFile)
+	}
+	return nil
+}
+
+// cmdRemoteShellUser 查看或修改远程会话降权账户（内嵌 SSH/SCP/Web 终端的运行身份）。
+// 参数说明：c 为 *apiClient；args 为 []string，无参数查询，<name> 设置，off 清除配置。
+// 返回值说明：error，API 操作成功时为 nil。
+// 错误情况：参数非法、账户不存在/为 root 或 API 失败时返回错误。
+// root 运行的服务端在设置普通账户前会拒绝开启内嵌 SSH 与 Web 终端。
+func cmdRemoteShellUser(c *apiClient, args []string) error {
+	if len(args) == 0 {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return err
+		}
+		if st.ShellUser == "" {
+			fmt.Printf("远程会话用户：%s（进程用户；未配置 shell-user）\n", st.SessionUser)
+		} else {
+			fmt.Printf("远程会话用户：%s（shell-user 配置）\n", st.SessionUser)
+		}
+		return nil
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("用法: proxyd remote shell-user [<账户名>|off]")
+	}
+	name := strings.TrimSpace(args[0])
+	if name == "off" {
+		name = ""
+	}
+	var st remoteStatusJSON
+	if err := c.do(http.MethodPost, "/api/remote/shell-user", map[string]string{"shell_user": name}, &st); err != nil {
+		return err
+	}
+	if name == "" {
+		fmt.Printf("已清除 shell-user：远程会话恢复以进程用户 %s 运行\n", st.SessionUser)
+	} else {
+		fmt.Printf("远程会话用户已设置为 %s：内嵌 SSH/SCP/Web 终端将以该账户降权运行\n", st.SessionUser)
 	}
 	return nil
 }

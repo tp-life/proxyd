@@ -2,22 +2,33 @@
 
 package tunperm
 
-import "os"
+import (
+	"os"
 
-// currentStatus 检测 macOS 当前进程是否以 root 身份运行。
+	"proxyd/internal/proxy/tunhelper"
+)
+
+// helperReachable 检测 tun-helper 是否可接管 TUN 设备创建；声明为变量以便测试替换。
+var helperReachable = func() bool {
+	return tunhelper.Precheck() == nil
+}
+
+// currentStatus 检测 macOS 当前进程的 TUN 权限：root 直接允许（mihomo 自行创建
+// utun）；普通用户依赖 tun-helper（LaunchDaemon 常驻的 root 助手，经 SCM_RIGHTS
+// 回传设备 fd，见 docs/privilege-model.md 方案 B），helper 可达即允许。
 //
 // 参数：无。
 //
 // 返回值：
-//   - Status：有效 UID 为 0 时允许，否则给出通过 sudo 启动 proxyd 的指引。
+//   - Status：root 或 helper 可达时允许，否则给出一次性安装 helper 的指引。
 //
-// 错误情况：os.Geteuid 不返回错误；非 root 统一按权限不足处理。
+// 错误情况：os.Geteuid 不返回错误；helper 探测失败按权限不足处理。
 func currentStatus() Status {
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 || helperReachable() {
 		return Status{Allowed: true, Platform: "macOS"}
 	}
 	return Status{
 		Platform: "macOS",
-		Hint:     "请停止当前实例，并使用 sudo proxyd serve -c <配置文件> 启动；后台模式可使用 sudo proxyd start -c <配置文件>",
+		Hint:     "请执行 proxyd tun helper install 安装 TUN 特权助手（一次性管理员授权，之后无需 sudo）；或使用 sudo proxyd serve 以 root 运行",
 	}
 }

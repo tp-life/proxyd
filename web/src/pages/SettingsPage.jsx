@@ -37,7 +37,7 @@ const SETTINGS_HELP = {
   autostart: {
     heading: "开机自启与模块开关",
     paragraphs: ["按平台注册 proxyd 系统启动项，macOS 使用 LaunchDaemon，可在用户登录前启动。", "启动后各模块继续遵循各自开关；注册自启不会擅自启用代理或远程服务。"],
-    note: "自启不会自动提升 TUN 权限，需要使用 TUN 时请在代理设置中检查权限。",
+    note: "自启不会自动安装 TUN 特权助手，需要使用 TUN 时请在代理设置中检查助手状态。",
   },
 };
 

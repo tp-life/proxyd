@@ -23,7 +23,7 @@ func TestSSHAccessHotUpdate(t *testing.T) {
 	audit := newAuditLog(50)
 	policy := newSSHAccess(audit)
 	policy.update(true, []config.RemoteSSHKey{key})
-	handler, err := managedShellSSHHandler(t.TempDir(), policy)
+	handler, err := managedShellSSHHandler(t.TempDir(), policy, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestSSHKeyProbeDoesNotCountAsLogin(t *testing.T) {
 	entries := []config.RemoteSSHKey{{PublicKey: public}}
 	policy := newSSHAccess(newAuditLog(20))
 	policy.update(true, entries)
-	handler, err := managedShellSSHHandler(t.TempDir(), policy)
+	handler, err := managedShellSSHHandler(t.TempDir(), policy, "")
 	if err != nil {
 		t.Fatal(err)
 	}

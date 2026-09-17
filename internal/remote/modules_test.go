@@ -18,7 +18,7 @@ func TestRemoteModuleClosesTerminalAndForwards(t *testing.T) {
 	if err := m.Apply(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
+	if _, err := localShellSSHHandler(t.TempDir(), ""); err != nil {
 		t.Skip("当前平台不支持 shell")
 	}
 	session, err := m.OpenWebTerminal(t.Context(), TerminalSize{})
@@ -98,7 +98,7 @@ func TestRemoteModuleCancelsInbound(t *testing.T) {
 func TestWebTerminalSwitchClosesSession(t *testing.T) {
 	m := NewManager(t.TempDir(), nil)
 	defer m.Close()
-	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
+	if _, err := localShellSSHHandler(t.TempDir(), ""); err != nil {
 		t.Skip("平台不支持 shell")
 	}
 	if err := m.Apply(config.RemoteConfig{WebTerminal: true}); err != nil {

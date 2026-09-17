@@ -60,9 +60,9 @@ func loadConfigFile(name string, args []string) (*config.Config, string, error) 
 	return cfg, *cfgFile, nil
 }
 
-// cmdStart 后台启动，已由系统托管时等待系统实例，否则派生 serve。
+// cmdStart 后台启动：没有活实例时派生 serve 后台进程，与开机自启是否开启无关。
 // 参数：args 为 []string，配置及订阅参数。返回：error，启动成功时为 nil。
-// 错误：配置、权限、系统查询或就绪等待失败；系统托管分支绝不回退到独立派生。
+// 错误：配置、权限、派生或就绪等待失败；系统自启服务损坏时打印修复提示但不阻塞启动。
 func cmdStart(args []string) error {
 	cfg, cfgPath, err := loadConfigOrRepair(args, true)
 	if err != nil {
@@ -72,9 +72,11 @@ func cmdStart(args []string) error {
 	if err := offerStateDirRepair(cfg); err != nil {
 		return err
 	}
-	if handled, err := managedStart(cfg, cfgPath, false); handled {
-		return err
+	if os.Geteuid() == 0 {
+		fmt.Println("提示：sudo 启动将得到 root 实例，状态文件属主会随之变化，一般无需 sudo；")
+		fmt.Println("      TUN 无需 root 实例：proxyd tun helper install 安装特权助手后即可 proxyd tun on。")
 	}
+	warnBrokenSystemService()
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {
 		return fmt.Errorf("proxyd 已在运行 (pid %d)", pid)
 	}
@@ -141,6 +143,10 @@ func cmdStop(args []string) error {
 		_ = os.Remove(path)
 		return fmt.Errorf("proxyd 未在运行（已清理过期 pid 文件）")
 	}
+	wasManaged := false
+	if s := inspectService(); s.Running && s.PID == pid {
+		wasManaged = true
+	}
 	if err := terminate(pid); err != nil {
 		return fmt.Errorf("发送退出信号失败: %w", err)
 	}
@@ -149,6 +155,11 @@ func cmdStop(args []string) error {
 		if !pidAlive(pid) {
 			_ = os.Remove(path) // serve 退出时也会删，幂等
 			fmt.Println("proxyd 已停止")
+			if wasManaged {
+				// 旧版 KeepAlive=true 下 launchd 会立刻拉起替代实例，稍等再观察。
+				time.Sleep(1500 * time.Millisecond)
+				warnIfSystemServiceRespawned(pid, true)
+			}
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -156,20 +167,56 @@ func cmdStop(args []string) error {
 	return fmt.Errorf("等待进程 %d 退出超时（仍在运行）", pid)
 }
 
-// cmdRestart 重启当前配置的实例，系统托管时由 KeepAlive 创建替代进程。
-// 参数：args 为 []string，配置参数。返回：error。错误：配置、停止或启动失败。
+// cmdRestart 重启当前配置的实例：系统托管实例走 API 触发其自我重启（进程以非零码
+// 退出、launchd 拉起替代实例，托管身份不变）；独立实例先停后启。
+// 参数：args 为 []string，配置参数。返回：error。错误：配置、重启请求、停止或启动失败。
 func cmdRestart(args []string) error {
-	cfg, path, err := loadConfigFile("restart", args)
+	cfg, cfgPath, err := loadConfigFile("restart", args)
 	if err != nil {
 		return err
 	}
-	if handled, err := managedStart(cfg, path, true); handled {
-		return err
+	if pid, alive := readPIDFile(pidPath(cfg)); alive {
+		if s := inspectService(); s.Running && s.PID == pid {
+			return restartManagedInstance(cfg, cfgPath, pid)
+		}
 	}
 	if err := cmdStop(args); err != nil && !strings.Contains(err.Error(), "未在运行") {
 		return err
 	}
 	return cmdStart(args)
+}
+
+// restartManagedInstance 通过管理 API 请求系统托管实例自我重启，并等待 launchd 拉起
+// 替代实例就绪。
+//
+// 参数说明：
+//   - cfg: *config.Config，提供 pid 文件路径、API 地址与口令。
+//   - cfgPath: string，配置文件路径，用于构造 API 客户端。
+//   - oldPID: int，重启前的系统托管 PID。
+//
+// 返回值说明：error，新实例就绪（pid 变化且健康检查通过）时为 nil。
+//
+// 错误情况：API 请求失败直接返回；等待上限 30 秒，超时保留服务继续由 launchd 监管。
+func restartManagedInstance(cfg *config.Config, cfgPath string, oldPID int) error {
+	client, err := newAPIClient(cfgPath)
+	if err != nil {
+		return err
+	}
+	fmt.Println("请求系统托管实例重启（launchd 将自动拉起新实例）…")
+	if err := client.do("POST", "/api/restart", nil, nil); err != nil {
+		return fmt.Errorf("请求重启失败: %w", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid, alive := readPIDFile(pidPath(cfg)); alive && pid != oldPID {
+			if healthEndpointResponds(daemonHealthClient, "http://"+cfg.APIListen, cfg.APISecret) {
+				fmt.Printf("系统托管的 proxyd 已重启 (pid %d)\nweb 控制台: http://%s/\n", pid, cfg.APIListen)
+				return nil
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("等待系统托管实例重启超时；日志: %s", logPathFor(cfg))
 }
 
 // cmdStatus 显示后台实例状态：pid、监听端口、web 地址。
@@ -184,6 +231,11 @@ func cmdStatus(args []string) error {
 		return nil
 	}
 	fmt.Printf("proxyd 运行中 (pid %d)\n", pid)
+	if s := inspectService(); s.Running && s.PID == pid {
+		fmt.Println("运行方式：系统服务（开机自启，崩溃自动拉起）")
+	} else {
+		fmt.Println("运行方式：独立进程")
+	}
 	fmt.Printf("主端口(规则模式): %s:%d，节点映射区间: %d-%d\n", cfg.Listen, cfg.MixedPort, cfg.PortRange[0], cfg.PortRange[1])
 	if cfg.AutoPort > 0 {
 		fmt.Printf("自动选优端口: %d\n", cfg.AutoPort)

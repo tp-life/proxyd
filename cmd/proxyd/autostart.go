@@ -52,6 +52,7 @@ func cmdAutostart(args []string) error {
 			return err
 		}
 		fmt.Println("开机自启已开启")
+		reportAutostartServiceState(cfg)
 	case "off":
 		if err := autostart.Off(); err != nil {
 			return err

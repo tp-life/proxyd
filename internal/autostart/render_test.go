@@ -15,7 +15,7 @@ import (
 //
 // 错误情况：字段缺失或 XML 无法解析时测试失败。
 func TestRenderPlist(t *testing.T) {
-	p := RenderPlist("/usr/local/bin/proxyd", "/Users/x/.config/proxyd/config.yaml", "/Users/x/.local/state/proxyd/proxyd.log", "x", "/Users/x")
+	p := RenderPlist("/usr/local/bin/proxyd", "/Users/x/.config/proxyd/config.yaml", "/Users/x/.local/state/proxyd/proxyd.log", "x", "/Users/x", false)
 	for _, want := range []string{
 		"<string>com.proxyd</string>",
 		"<string>/usr/local/bin/proxyd</string>",
@@ -23,7 +23,7 @@ func TestRenderPlist(t *testing.T) {
 		"<string>-c</string>",
 		"<string>/Users/x/.config/proxyd/config.yaml</string>",
 		"<key>RunAtLoad</key>\n\t<true/>",
-		"<key>KeepAlive</key>\n\t<true/>",
+		"<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>",
 		"<key>ProcessType</key>\n\t<string>Standard</string>",
 		"<key>UserName</key>\n\t<string>x</string>",
 		"<key>HOME</key>\n\t\t<string>/Users/x</string>",
@@ -41,6 +41,36 @@ func TestRenderPlist(t *testing.T) {
 	}
 }
 
+// TestRenderPlistRootDaemon 验证 TUN 场景省略 UserName：服务以 root 运行。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；plist 不含 UserName 且其余字段完整、XML 合法时测试通过。
+//
+// 错误情况：UserName 残留或 XML 无法解析时测试失败。
+func TestRenderPlistRootDaemon(t *testing.T) {
+	p := RenderPlist("/usr/local/bin/proxyd", "/Users/x/.config/proxyd/config.yaml", "/Users/x/.local/state/proxyd/proxyd.log", "x", "/Users/x", true)
+	if strings.Contains(p, "<key>UserName</key>") {
+		t.Errorf("rootDaemon 模式不应包含 UserName:\n%s", p)
+	}
+	for _, want := range []string{
+		"<string>com.proxyd</string>",
+		"<key>HOME</key>\n\t\t<string>/Users/x</string>",
+		"<key>SuccessfulExit</key>\n\t\t<false/>",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("plist 缺少 %q:\n%s", want, p)
+		}
+	}
+	var document struct {
+		XMLName xml.Name `xml:"plist"`
+	}
+	if err := xml.Unmarshal([]byte(p), &document); err != nil {
+		t.Fatalf("rootDaemon plist 不是合法 XML: %v", err)
+	}
+}
+
 // TestRenderPlistEscapesXML 验证所有外部文本都经过 XML 转义。
 //
 // 参数说明：
@@ -50,7 +80,7 @@ func TestRenderPlist(t *testing.T) {
 //
 // 错误情况：原始保留字符泄露或转义结果缺失时测试失败。
 func TestRenderPlistEscapesXML(t *testing.T) {
-	p := RenderPlist("/opt/a&b/proxyd", "/cfg<c>.yaml", "/log>d.log", "a&b", "/Users/<x>")
+	p := RenderPlist("/opt/a&b/proxyd", "/cfg<c>.yaml", "/log>d.log", "a&b", "/Users/<x>", false)
 	if strings.Contains(p, "a&b") || strings.Contains(p, "<c>") || strings.Contains(p, "d>d") {
 		t.Errorf("XML 特殊字符未转义:\n%s", p)
 	}

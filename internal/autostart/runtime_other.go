@@ -14,7 +14,3 @@ func inspect() RuntimeStatus {
 	}
 	return s
 }
-
-// managed 保持其他平台现有的后台派生语义。参数：string 配置路径，当前未使用。
-// 返回：false、nil。错误：无；本次协调只适用于 macOS LaunchDaemon。
-func managed(string) (bool, error) { return false, nil }

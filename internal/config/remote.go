@@ -129,6 +129,7 @@ type RemoteConfig struct {
 	TempKey         string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`         // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
 	KeyFile         string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`         // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
 	BuiltinSSH      bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"`   // 内嵌 SSH：隧道 22 由进程内处理，无需系统 sshd；默认隧道免密，可叠加公钥认证
+	ShellUser       string          `yaml:"shell-user,omitempty" json:"shell_user,omitempty"`     // 远程会话（内嵌 SSH/SCP/Web 终端/诊断）降权运行的本机账户；root 运行时必须显式配置
 	SSHAuthRequired bool            `yaml:"ssh-auth-required,omitempty" json:"ssh_auth_required"` // 开启后在隧道认证之上要求 SSH 公钥；空授权列表保持拒绝全部
 	SSHKeys         []RemoteSSHKey  `yaml:"ssh-keys,omitempty" json:"ssh_keys"`                   // SSH 登录授权公钥，与 WireGuard nodekey 白名单独立
 	WebTerminal     bool            `yaml:"web-terminal,omitempty" json:"web_terminal,omitempty"` // 浏览器终端总开关；默认关闭，且非回环 api-listen 开启时必须显式确认暴露风险
@@ -249,6 +250,21 @@ func ValidateRemoteAllow(entries []RemoteAllowEntry) error {
 	return nil
 }
 
+// ValidateRemoteShellUser 校验远程会话用户名的结构合法性；账户是否存在、是否允许
+// 降权由 remote 适配层按系统账户数据库校验。
+// 参数说明：name 为 string，配置中的 shell-user 原值（调用方已确认非空）。
+// 返回值说明：error，结构合法时为 nil。
+// 错误情况：含空白/控制字符/路径分隔符、以 "-" 开头、超过 64 字符或为 root 时返回错误。
+func ValidateRemoteShellUser(name string) error {
+	if name == "root" {
+		return fmt.Errorf("shell-user 不允许使用 root（降权目标必须是普通用户）")
+	}
+	if len(name) > 64 || strings.HasPrefix(name, "-") || strings.ContainsAny(name, "\r\n\t\x00 :/") {
+		return fmt.Errorf("shell-user %q 非法（含空白、控制字符或路径分隔符）", name)
+	}
+	return nil
+}
+
 // checkRemote 校验 remote 配置段整体：端口范围、名称唯一性与转发字段。
 // 参数说明：无，接收者包含待校验的完整配置。
 // 返回值说明：error，全部结构约束满足时为 nil。
@@ -266,6 +282,11 @@ func (c *Config) checkRemote() error {
 	}
 	if t := strings.TrimSpace(r.TempKey); t != "" && !strings.HasPrefix(t, "nodekey:") {
 		return fmt.Errorf("remote: temp-key 须为 nodekey: 形式的客户端公钥，got %q", t)
+	}
+	if t := strings.TrimSpace(r.ShellUser); t != "" {
+		if err := ValidateRemoteShellUser(t); err != nil {
+			return fmt.Errorf("remote: %w", err)
+		}
 	}
 	seenPeer := map[string]bool{}
 	for i, p := range r.Remotes {

@@ -48,6 +48,7 @@ import { classNames, formatBytes, maskRemoteSecret } from "@/lib/format";
  * - probeRemote/toggleRemoteDetails: Function，手动探测与切换远端详情行。
  * - refreshAudit: Function，单独刷新连接审计列表。
  * - setBuiltinSSH: Function，热切换内嵌 SSH 服务（隧道 22 端口进程内处理）。
+ * - saveShellUser: Function，设置远程会话降权账户（空串恢复进程用户）。
  * - setWebTerminal: Function，热切换高权限 Web Terminal；非回环 API 会先请求二次确认。
  * - resetTempKey/copyTempKey: Function，临时身份（应急 nodekey）的重置与私钥复制。
  * - addRemote/removeRemote/copySSHCommand: Function，远程设备操作。
@@ -92,6 +93,7 @@ export function RemotePage({
   refreshAudit,
   toggleRemoteDetails,
   setBuiltinSSH,
+  saveShellUser,
   setWebTerminal,
   resetTempKey,
   copyTempKey,
@@ -114,6 +116,7 @@ export function RemotePage({
   const [allowTTL, setAllowTTL] = useState("permanent");
   const [allowPortsInput, setAllowPortsInput] = useState("");
   const [keyFileInput, setKeyFileInput] = useState("");
+  const [shellUserInput, setShellUserInput] = useState("");
   const [remoteForm, setRemoteForm] = useState({ name: "", token: "" });
   const [forwardForm, setForwardForm] = useState({ name: "", listen: "", remoteSource: "", remoteToken: "", remotePort: "" });
   const [connectTarget, setConnectTarget] = useState(null);
@@ -417,6 +420,31 @@ export function RemotePage({
   }
 
   /**
+   * submitShellUser 提交远程会话降权账户；空输入恢复进程用户语义。
+   *
+   * 参数说明：event 为表单提交事件。
+   * 返回值说明：返回 Promise<void>。
+   * 可能的异常/错误情况：账户非法或不存在由后端 400 经 saveShellUser toast。
+   */
+  async function submitShellUser(event) {
+    event.preventDefault();
+    if (await saveShellUser(shellUserInput.trim())) {
+      setShellUserInput("");
+    }
+  }
+
+  /**
+   * clearShellUser 一键清除 shell-user 配置，远程会话恢复进程用户身份。
+   *
+   * 参数说明：无。
+   * 返回值说明：返回 Promise<void>。
+   * 可能的异常/错误情况：后端校验失败由 saveShellUser toast。
+   */
+  async function clearShellUser() {
+    await saveShellUser("");
+  }
+
+  /**
    * openSSHPort 一键把 SSH 服务端口并入暴露列表。
    *
    * 参数说明：无；SSH 使用系统约定的 TCP 22 端口。
@@ -496,7 +524,7 @@ export function RemotePage({
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
 <>
-{view === "remote/services" && <RemoteServicesPanel copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} removeServePort={removeServePort} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setServeInput={setServeInput} setWebTerminal={setWebTerminal} status={status} submitServePort={submitServePort} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
+{view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} removeServePort={removeServePort} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setServeInput={setServeInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitServePort={submitServePort} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
 {view === "remote/access" && <RemoteAccessPanel activity={activity} allow={allow} allowInput={allowInput} allowNameInput={allowNameInput} allowPortsInput={allowPortsInput} allowTTL={allowTTL} copyTempKey={copyTempKey} copyText={copyText} importKeyFile={importKeyFile} keyFileInput={keyFileInput} manageSSHKeys={manageSSHKeys} peers={peers} removeAllowKey={removeAllowKey} resetTempKey={resetTempKey} saveKeyFile={saveKeyFile} setAllowInput={setAllowInput} setAllowNameInput={setAllowNameInput} setAllowPortsInput={setAllowPortsInput} setAllowTTL={setAllowTTL} setKeyFileInput={setKeyFileInput} status={status} submitAllowKey={submitAllowKey} submitKeyFile={submitKeyFile} tempPeer={tempPeer} />}
 {view === "remote/audit" && <RemoteAuditPanel auditColumns={auditColumns} auditEntries={auditEntries} refreshAudit={refreshAudit} />}
 {view === "remote/devices" && <RemoteDevicesPanel expandedRemote={expandedRemote} probeRemote={probeRemote} remoteColumns={remoteColumns} remoteForm={remoteForm} remoteProbes={remoteProbes} remotes={remotes} setRemoteForm={setRemoteForm} setSshSetEnvTerm={setSshSetEnvTerm} sshSetEnvTerm={sshSetEnvTerm} submitRemote={submitRemote} />}

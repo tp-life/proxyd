@@ -36,3 +36,6 @@ func status() (bool, error) {
 	}
 	return true, nil
 }
+
+// RootDaemonPlistInstalled 在 Windows 上恒为 false（无 root LaunchDaemon 概念）。
+func RootDaemonPlistInstalled() bool { return false }

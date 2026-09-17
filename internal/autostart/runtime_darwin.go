@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,26 +28,15 @@ var queryLaunchd = func(args ...string) (string, error) {
 func parseLaunchd(output string) RuntimeStatus {
 	s := RuntimeStatus{Loaded: true, State: "unknown"}
 	depth := 0
-	arguments := false
-	var args []string
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "}" {
 			depth--
-			if depth == 1 {
-				arguments = false
-			}
 			continue
 		}
 		if strings.HasSuffix(line, "= {") {
-			if depth == 1 && line == "arguments = {" {
-				arguments = true
-			}
 			depth++
 			continue
-		}
-		if arguments && depth == 2 {
-			args = append(args, line)
 		}
 		if depth != 1 {
 			continue
@@ -61,21 +49,37 @@ func parseLaunchd(output string) RuntimeStatus {
 		case "state":
 			s.State = value
 		case "pid":
-			s.PID, _ = strconv.Atoi(value)
+			s.PID, _ = strconv.Atoi(launchdLeadingInt(value))
 		case "last exit code":
-			if code, err := strconv.Atoi(value); err == nil {
+			if code, err := strconv.Atoi(launchdLeadingInt(value)); err == nil {
 				s.LastExitCode = &code
 			}
-		}
-	}
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-c" {
-			s.ConfigPath = args[i+1]
-			break
+		case "runs":
+			if runs, err := strconv.Atoi(launchdLeadingInt(value)); err == nil {
+				s.Runs = &runs
+			}
 		}
 	}
 	s.Running = s.State == "running" && s.PID > 0
 	return s
+}
+
+// launchdLeadingInt 取数值字段的十进制前缀：新版 macOS 会在退出码后附符号名
+// （如 "78: EX_CONFIG"），直接 Atoi 会整体失败。
+//
+// 参数说明：
+//   - value: string，launchctl print 输出的字段值。
+//
+// 返回值说明：string，前导数字部分；无数字前缀时返回空串。
+//
+// 错误情况：无；空前缀由调用方的 Atoi 失败兜底。
+func launchdLeadingInt(value string) string {
+	value = strings.TrimSpace(value)
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
+	}
+	return value[:end]
 }
 
 // inspect 汇总文件注册状态和真实进程。参数：无。返回：RuntimeStatus。
@@ -104,30 +108,10 @@ func inspect() RuntimeStatus {
 		s.Message = fmt.Sprintf("系统托管进程运行中（PID %d）", s.PID)
 	}
 	if !s.Running && s.LastExitCode != nil && *s.LastExitCode != 0 {
-		s.Message += fmt.Sprintf("，最近退出码 %d；请检查启动日志", *s.LastExitCode)
+		s.Message += fmt.Sprintf("，最近退出码 %d；请检查启动日志；反复启动失败时可执行 proxyd autostart off && proxyd autostart on 重新注册修复", *s.LastExitCode)
 	}
 	if !enabled {
 		s.Message += "；自启已关闭，已加载服务保留至本次关机"
 	}
 	return s
-}
-
-// managed 判断配置的启动所有权。参数：configPath 为 string 绝对路径。
-// 返回：相同配置的服务仍在 launchd 中时为 true，即使用户刚关闭下次开机自启。
-// 错误：启动项存在但未加载、查询失败或缺少配置参数时返回错误，阻止双实例回退。
-func managed(configPath string) (bool, error) {
-	s := inspect()
-	if s.State == "unknown" {
-		return false, fmt.Errorf("%s", s.Message)
-	}
-	if !s.Loaded {
-		if s.Enabled {
-			return false, fmt.Errorf("自启项已安装但系统服务未加载，请执行 proxyd autostart on 重新注册")
-		}
-		return false, nil
-	}
-	if s.ConfigPath == "" {
-		return false, fmt.Errorf("系统服务缺少配置路径，请重新注册自启项")
-	}
-	return filepath.Clean(s.ConfigPath) == filepath.Clean(configPath), nil
 }

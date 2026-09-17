@@ -16,7 +16,7 @@ import (
 // TestSSHDiagnosticsAuthenticationFailure 验证认证失败定位且不继续执行 shell；参数 t 为测试对象；无返回，阶段错误时失败。
 func TestSSHDiagnosticsAuthenticationFailure(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
-	handler, err := configuredShellSSHHandler(t.TempDir(), true, nil)
+	handler, err := configuredShellSSHHandler(t.TempDir(), true, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

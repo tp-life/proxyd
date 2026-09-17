@@ -18,7 +18,7 @@ import { StatusBadge } from "@/components/StatusBadge";
  * 参数：解构字段为状态对象、表单值或事件回调，沿用 RemotePage 的接口约定。
  * 返回：React 元素；网络错误由用例回调处理，本组件不直接写配置。
  */
-export function RemoteServicesPanel({ copyText, copyToken, onOpenTerminal, openSSHPort, removeServePort, serve, serveInput, setBuiltinSSH, setServeInput, setWebTerminal, status, submitServePort, terminalAvailable, toggleEnabled }) {
+export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpenTerminal, openSSHPort, removeServePort, serve, serveInput, setBuiltinSSH, setServeInput, setShellUserInput, setWebTerminal, shellUserInput, status, submitServePort, submitShellUser, terminalAvailable, toggleEnabled }) {
  return (<>            <section className="panel">
               <PanelTitle
                 title="服务状态"
@@ -30,7 +30,7 @@ export function RemoteServicesPanel({ copyText, copyToken, onOpenTerminal, openS
                     "本机 token：复制后发给对方，对方添加为「远程设备」即可连接本机",
                     "客户端公钥：本机连接别人时的身份；对端用 tailcat serve --allow=<此公钥> 可配置白名单，只放行本机",
                     "密钥文件：决定 token 的服务端私钥；默认内置托管。若对端客户端是 tailcat 命令行，可填 tailcat genkey --key=default 生成的密钥文件路径（macOS 通常在 ~/Library/Application Support/tailcat/keys/default.private.json），两边用同一把密钥，token 即一致",
-                    "内嵌 SSH：开启后隧道 22 端口由 proxyd 进程内 SSH 服务直接处理，无需系统 sshd（macOS 远程登录）。默认通过隧道认证后即可登录 proxyd 运行用户的 shell；可在「访问授权」额外启用 SSH 公钥认证，并配合「允许的客户端」白名单限制来源",
+                    "内嵌 SSH：开启后隧道 22 端口由 proxyd 进程内 SSH 服务直接处理，无需系统 sshd（macOS 远程登录）。默认通过隧道认证后即可登录远程会话用户的 shell；可在「访问授权」额外启用 SSH 公钥认证，并配合「允许的客户端」白名单限制来源",
                     "允许的客户端：添加对端的客户端公钥后，只有列表内的机器能连入本机（token+私钥双重校验）；清空则恢复放行所有。可给每个公钥起别名方便管理（CLI：proxyd remote allow add <公钥> [别名]，del 按别名或公钥删除）",
                     "临时身份：给「客户端」使用的应急 nodekey（本机是服务端，它不是本机 token，不要填进远程设备）。公钥自动叠加进白名单；私钥复制后存密码管理器，没带电脑时在别的机器用 PROXYD_CLIENT_KEY=<私钥> 连入本机；重置只换这一对，不影响手动添加的白名单",
                   ],
@@ -64,8 +64,28 @@ export function RemoteServicesPanel({ copyText, copyToken, onOpenTerminal, openS
                     <span>打开终端</span>
                   </Button>
                 )}
-                <span className="text-xs text-muted-foreground">默认关闭；会话以 proxyd 进程用户权限运行，独立于远程连接服务端</span>
+                <span className="text-xs text-muted-foreground">默认关闭；会话以「{status?.session_user || "进程用户"}」身份运行，独立于远程连接服务端</span>
               </div>
+              <form className="form-grid mt-2" onSubmit={submitShellUser}>
+                <Field label="远程会话用户（shell-user）">
+                  <input
+                    aria-label="远程会话用户"
+                    type="text"
+                    value={shellUserInput}
+                    onChange={(event) => setShellUserInput(event.target.value)}
+                    placeholder={status?.shell_user || status?.session_user || "本机账户名"}
+                  />
+                </Field>
+                <Button className="form-submit" type="submit"><span>保存</span></Button>
+                {status?.shell_user && (
+                  <Button className="form-submit" type="button" variant="outline" onClick={clearShellUser}>
+                    <span>恢复进程用户</span>
+                  </Button>
+                )}
+              </form>
+              <p className="mt-1 text-xs text-muted-foreground">
+                内嵌 SSH/SCP/Web 终端以该账户降权运行（当前：{status?.session_user || "未知"}）；proxyd 以 root 运行时必须设置为普通账户，否则内嵌 SSH 与 Web 终端拒绝开启（TUN 已改由 tun-helper 代劳，通常不再需要 root 运行 proxyd）。
+              </p>
               {status?.web_terminal && status?.api_loopback === false && (
                 <p className="permission-note warn">
                   高风险：API 当前监听 {status?.api_listen || "非回环地址"}，能访问控制台的客户端可能获得本机 shell。建议仅绑定 127.0.0.1 或置于可信鉴权边界后。

@@ -20,7 +20,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -44,38 +43,41 @@ var shellHostKeyMu sync.Mutex
 //
 // 参数说明：
 //   - stateDir: string，proxyd 状态目录，host key 保存在其 remote 子目录。
+//   - shellUser: string，remote.shell-user 配置原值；root 运行时为空会被拒绝。
 //
 // 返回值说明：func(net.Conn) 和 error，处理器接管单条已认证的隧道或回环连接。
 //
 // 错误情况：状态目录创建、host key 读写或解析失败时返回错误，
 // 不会返回半成品处理器。
-func localShellSSHHandler(stateDir string) (func(net.Conn), error) {
+func localShellSSHHandler(stateDir, shellUser string) (func(net.Conn), error) {
 	// Web 终端依赖管理 API 与一次性回环令牌认证，不受远程 SSH 公钥开关影响。
-	return configuredShellSSHHandler(stateDir, false, nil)
+	return configuredShellSSHHandler(stateDir, false, nil, shellUser)
 }
 
 // configuredShellSSHHandler 创建保留本项目 PTY、环境与断连清理逻辑的 SSH 服务。
 // 参数说明：stateDir 为 string，host key 状态目录；required 为 bool，是否要求公钥；
-// entries 为 []config.RemoteSSHKey，已授权的客户端公钥，绝不包含客户端私钥。
+// entries 为 []config.RemoteSSHKey，已授权的客户端公钥，绝不包含客户端私钥；
+// shellUser 为 string，会话降权运行的本机账户（空=进程用户，root 下拒绝）。
 // 返回值说明：func(net.Conn) 和 error，处理器接管已由隧道认证的单条连接。
 // 错误情况：公钥无效或 host key 不可用时拒绝构造；required=true 且列表为空时
 // 保持拒绝全部，绝不因删除最后一把公钥而降级为免认证。
-func configuredShellSSHHandler(stateDir string, required bool, entries []config.RemoteSSHKey) (func(net.Conn), error) {
+func configuredShellSSHHandler(stateDir string, required bool, entries []config.RemoteSSHKey, shellUser string) (func(net.Conn), error) {
 	keys, err := NormalizeSSHKeys(entries)
 	if err != nil {
 		return nil, err
 	}
 	policy := newSSHAccess(newAuditLog(remoteAuditCapacity))
 	policy.update(required, keys)
-	return managedShellSSHHandler(stateDir, policy)
+	return managedShellSSHHandler(stateDir, policy, shellUser)
 }
 
 // managedShellSSHHandler 构造共享动态授权策略的 SSH 入口。
-// 参数说明：stateDir 为 string，host key 保存目录；policy 为 *sshAccess，管理器共享策略。
+// 参数说明：stateDir 为 string，host key 保存目录；policy 为 *sshAccess，管理器共享策略；
+// shellUser 为 string，remote.shell-user 配置原值，逐会话解析为降权身份。
 // 返回值说明：func(net.Conn) 与 error；每条连接持有独立 SSH 协议状态。
 // 错误情况：host key 加载失败返回错误；握手超过 30 秒会关闭连接。
 // 公钥探测与签名完成分别检查策略，防止探测缓存跨越禁用或到期边界。
-func managedShellSSHHandler(stateDir string, policy *sshAccess) (func(net.Conn), error) {
+func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string) (func(net.Conn), error) {
 	signer, err := loadOrCreateShellHostKey(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("加载内嵌 SSH host key 失败: %w", err)
@@ -85,11 +87,11 @@ func managedShellSSHHandler(stateDir string, policy *sshAccess) (func(net.Conn),
 		// callbacks 与 HandleConn 在同一握手协程执行；会话索引的并发读写由 policy 锁保护。
 		defer func() { policy.finished(conn, attempted) }()
 		srv := &ssh.Server{
-			Handler:           shellSessionHandler,
+			Handler:           func(sess ssh.Session) { shellSessionHandler(sess, shellUser) },
 			HandshakeTimeout:  30 * time.Second,
 			ChannelHandlers:   map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
 			RequestHandlers:   map[string]ssh.RequestHandler{},
-			SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": shellDiagnosticHandler},
+			SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser) }},
 		}
 		srv.PublicKeyHandler = func(_ ssh.Context, public ssh.PublicKey) error {
 			attempted = gossh.FingerprintSHA256(public)
@@ -184,28 +186,29 @@ func loadOrCreateShellHostKey(stateDir string) (gossh.Signer, error) {
 //
 // 参数说明：
 //   - sess: ssh.Session，已完成免认证握手的会话。
+//   - shellUser: string，remote.shell-user 配置原值；会话用户只由它或进程用户决定。
 //
 // 返回值说明：无；shell 退出码经 sess.Exit 回传给客户端。
 //
-// 错误情况：无法解析当前用户时向会话写错误并以退出码 1 结束。
-func shellSessionHandler(sess ssh.Session) {
-	u, err := user.Current()
+// 错误情况：无法解析会话用户（含 root 未配置 shell-user）时向会话写错误并以退出码 1 结束。
+func shellSessionHandler(sess ssh.Session, shellUser string) {
+	su, err := resolveSessionUser(shellUser)
 	if err != nil {
-		fmt.Fprintf(sess.Stderr(), "获取当前用户失败: %v\r\n", err)
+		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
 		sess.Exit(1)
 		return
 	}
-	runShellSession(sess, u)
+	runShellSession(sess, su)
 }
 
-// runShellSession 为已解析的本机用户启动 SSH 会话，统一内嵌 SSH 与 Web 终端的执行路径。
+// runShellSession 为已解析的会话用户启动 SSH 会话，统一内嵌 SSH 与 Web 终端的执行路径。
 //
-// 参数说明：sess 为 ssh.Session，承载命令、环境和终端请求；u 为 *user.User，
-// 必须是调用方已确认的进程用户，不能直接使用客户端声明的 SSH 用户名。
+// 参数说明：sess 为 ssh.Session，承载命令、环境和终端请求；su 为 *sessionUser，
+// 必须是调用方已确认的降权身份，不能直接使用客户端声明的 SSH 用户名。
 // 返回值说明：无，退出状态通过 sess.Exit 回传。
 // 错误情况：命令或终端启动失败时由对应执行器写入错误并结束会话。
-func runShellSession(sess ssh.Session, u *user.User) {
-	cmd := newShellSessionCommand(u, sess.RawCommand())
+func runShellSession(sess ssh.Session, su *sessionUser) {
+	cmd := newShellSessionCommand(su, sess.RawCommand())
 	runShellSessionCommand(sess, cmd)
 }
 

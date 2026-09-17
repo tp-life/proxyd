@@ -166,7 +166,7 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 	// shell，会残留 PTY、子进程和处理协程。host key 持久化在 state-dir/remote。
 	var sshHandler func(net.Conn)
 	if cfg.BuiltinSSH {
-		sshHandler, err = managedShellSSHHandler(m.stateDir, m.sshAccess)
+		sshHandler, err = managedShellSSHHandler(m.stateDir, m.sshAccess, cfg.ShellUser)
 		if err != nil {
 			return err
 		}
