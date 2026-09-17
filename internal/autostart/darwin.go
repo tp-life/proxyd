@@ -3,6 +3,7 @@
 package autostart
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,11 +11,15 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // macOS 使用系统级 LaunchDaemon：plist 固定安装到 /Library/LaunchDaemons，
-// 因而无需用户登录即可在冷启动、断电恢复或系统重启后拉起 proxyd。服务本身通过
-// UserName 降权为注册时的普通用户，避免改变配置文件和状态目录的所有权。
+// 因而无需用户登录即可在冷启动、断电恢复或系统重启后拉起 proxyd。始终通过
+// UserName 降权为注册时的普通用户（TUN 由 tun-helper 代劳，不再需要 root 实例），
+// 避免改变配置文件和状态目录的所有权。KeepAlive 仅崩溃拉起（SuccessfulExit=false），
+// 干净退出（proxyd stop）保持停止。
 
 const daemonPlistPath = "/Library/LaunchDaemons/" + plistLabel + ".plist"
 
@@ -51,10 +56,44 @@ func currentServiceAccount() (serviceAccount, error) {
 	if err != nil {
 		return serviceAccount{}, fmt.Errorf("解析 LaunchDaemon 运行账户失败: %w", err)
 	}
+	return validateServiceAccount(current)
+}
+
+// namedServiceAccount 解析显式指定的 LaunchDaemon 降权账户（旧 root 自启项迁移用）。
+//
+// 参数说明：
+//   - name: string，本机账户名。
+//
+// 返回值说明：serviceAccount 和 error；语义同 currentServiceAccount。
+//
+// 错误情况：账户不存在或信息不完整时返回错误。
+func namedServiceAccount(name string) (serviceAccount, error) {
+	current, err := user.Lookup(name)
+	if err != nil {
+		return serviceAccount{}, fmt.Errorf("解析 LaunchDaemon 运行账户 %q 失败: %w", name, err)
+	}
+	return validateServiceAccount(current)
+}
+
+// validateServiceAccount 校验账户信息完整性并构造 serviceAccount。
+func validateServiceAccount(current *user.User) (serviceAccount, error) {
 	if strings.TrimSpace(current.Username) == "" || strings.TrimSpace(current.HomeDir) == "" || strings.TrimSpace(current.Uid) == "" {
 		return serviceAccount{}, fmt.Errorf("LaunchDaemon 运行账户信息不完整")
 	}
 	return serviceAccount{UserName: current.Username, HomeDir: current.HomeDir, UID: current.Uid}, nil
+}
+
+// RootDaemonPlistInstalled 报告系统自启项是否仍是旧的 root 模式（plist 无 UserName，
+// tun-helper 落地前 TUN 需要 root 时的产物），供启动期迁移为降权运行。
+//
+// 参数说明：无。
+//
+// 返回值说明：bool，plist 存在且不含 UserName 键时为 true。
+//
+// 错误情况：无；读取失败按非 root 模式处理，不做迁移。
+func RootDaemonPlistInstalled() bool {
+	data, err := os.ReadFile(daemonPlistPath)
+	return err == nil && !strings.Contains(string(data), "<key>UserName</key>")
 }
 
 // legacyPlistPath 返回旧版登录级 LaunchAgent 的路径。
@@ -67,18 +106,6 @@ func currentServiceAccount() (serviceAccount, error) {
 // 错误情况：无；账户主目录已由 currentServiceAccount 校验。
 func legacyPlistPath(account serviceAccount) string {
 	return filepath.Join(account.HomeDir, "Library", "LaunchAgents", plistLabel+".plist")
-}
-
-// daemonLoaded 报告 system 域中是否已注册本服务的 LaunchDaemon。
-//
-// 参数说明：无。
-//
-// 返回值说明：bool，launchctl print 能查询到服务定义时为 true。
-//
-// 错误情况：无；查询失败按未注册处理，让调用方走完整 bootstrap 流程。
-func daemonLoaded() bool {
-	_, err := run("/bin/launchctl", "print", "system/"+plistLabel)
-	return err == nil
 }
 
 // runDeferred 经 /bin/sh 延迟约 1 秒执行固定命令并立即返回。
@@ -115,10 +142,13 @@ var runDeferred = func(name string, args ...string) {
 // 返回值说明：error，plist 安装、system 域注册与旧 LaunchAgent 清理全部成功时为 nil。
 //
 // 错误情况：目录/临时文件创建、管理员授权、launchctl bootstrap 或旧项清理失败时
-// 返回错误。管理员取消授权不会绕过系统权限模型。服务已注册时只刷新 plist 文件，
-// 不重复 bootout/bootstrap，避免终止可能正在处理本次请求的当前进程。
+// 返回错误。管理员取消授权不会绕过系统权限模型。注册命令链的取舍见
+// daemonRegisterCommands：健康服务只刷新文件，崩溃循环服务强制重注册。
 func on(opt Options) error {
 	account, err := currentServiceAccount()
+	if opt.RunAsUser != "" {
+		account, err = namedServiceAccount(opt.RunAsUser)
+	}
 	if err != nil {
 		return err
 	}
@@ -132,7 +162,7 @@ func on(opt Options) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	content := RenderPlist(opt.Exe, opt.ConfigPath, logPath, account.UserName, account.HomeDir)
+	content := RenderPlist(opt.Exe, opt.ConfigPath, logPath, account.UserName, account.HomeDir, opt.RootDaemon)
 	if _, err := temporary.WriteString(content); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("写入 LaunchDaemon 临时文件失败: %w", err)
@@ -141,19 +171,7 @@ func on(opt Options) error {
 		return fmt.Errorf("关闭 LaunchDaemon 临时文件失败: %w", err)
 	}
 
-	// 已注册的服务只做 plist 文件刷新：launchd 内存中的定义与当前进程参数同源，
-	// 重启或下次开机自然加载新文件。未注册时 bootstrap 会立即启动 RunAtLoad 服务；
-	// enable 清除用户曾通过 launchctl 设置的禁用标记。
-	commands := []privilegedCommand{
-		{Name: "/usr/bin/install", Args: []string{"-o", "root", "-g", "wheel", "-m", "0644", temporaryPath, daemonPlistPath}},
-	}
-	if !daemonLoaded() {
-		commands = append(commands,
-			privilegedCommand{Name: "/bin/launchctl", Args: []string{"enable", "system/" + plistLabel}},
-			privilegedCommand{Name: "/bin/launchctl", Args: []string{"bootstrap", "system", daemonPlistPath}},
-		)
-	}
-	if err := runPrivileged(account, commands...); err != nil {
+	if err := runPrivileged(account, daemonRegisterCommands(temporaryPath, inspect())...); err != nil {
 		return fmt.Errorf("注册系统 LaunchDaemon 失败: %w", err)
 	}
 	// 旧 LaunchAgent 需要连实例一起停掉，否则与新 bootstrap 的 LaunchDaemon 双实例运行；
@@ -162,6 +180,43 @@ func on(opt Options) error {
 		return fmt.Errorf("系统 LaunchDaemon 已启用，但旧 LaunchAgent 清理失败: %w", err)
 	}
 	return nil
+}
+
+// daemonRegisterCommands 根据服务当前状态构造注册命令链。
+//
+// 参数说明：
+//   - temporaryPath: string，待安装 plist 的临时文件路径。
+//   - s: RuntimeStatus，inspect() 的当前快照。
+//
+// 返回值说明：[]privilegedCommand，按顺序执行的安装与注册命令。
+// 未注册时直接 bootstrap（立即启动 RunAtLoad 服务）；已注册且健康运行只刷新
+// plist 文件（不打扰可能正在处理本次请求的当前进程）；已注册但未运行一律
+// bootout 后重新 bootstrap：崩溃循环要丢弃旧 LWCR 约束，干净停止（KeepAlive
+// 仅崩溃拉起）也只有重新 bootstrap 才会启动；bootout 加 IgnoreError 兼容
+// 「刚 off 过、定义已不在内存」。
+//
+// 错误情况：无；命令执行错误由 runPrivileged 返回。
+func daemonRegisterCommands(temporaryPath string, s RuntimeStatus) []privilegedCommand {
+	commands := []privilegedCommand{
+		{Name: "/usr/bin/install", Args: []string{"-o", "root", "-g", "wheel", "-m", "0644", temporaryPath, daemonPlistPath}},
+	}
+	switch {
+	case !s.Loaded:
+		commands = append(commands,
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"enable", "system/" + plistLabel}},
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"bootstrap", "system", daemonPlistPath}},
+		)
+	case !s.Running:
+		// 已注册但未运行都要重注册：崩溃循环（如 LWCR 签名失效）需要 bootout 让
+		// launchd 丢弃旧约束；干净停止（proxyd stop）则因为 KeepAlive 仅崩溃拉起，
+		// 不重新 bootstrap 服务永远不会启动。bootout 加 IgnoreError 兼容定义已卸载。
+		commands = append(commands,
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"bootout", "system/" + plistLabel}, IgnoreError: true},
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"enable", "system/" + plistLabel}},
+			privilegedCommand{Name: "/bin/launchctl", Args: []string{"bootstrap", "system", daemonPlistPath}},
+		)
+	}
+	return commands
 }
 
 // off 卸载系统级开机自启项，同时清理旧版登录自启项。
@@ -236,8 +291,10 @@ func removeLegacyLaunchAgent(account serviceAccount, stopRunning bool) error {
 	return nil
 }
 
-// runPrivileged 执行一组系统级服务命令；root 直接执行，普通用户通过 macOS
-// 管理员授权对话框一次性执行，兼容 CLI 与 Web 设置页触发场景。
+// runPrivileged 执行一组系统级服务命令；root 直接执行，普通用户按「终端优先」：
+// stdin 是交互终端时经 sudo 在终端完成密码输入（CLI 场景体验一致、可审计）；
+// 非终端（Web 控制台触发）经 osascript 管理员授权对话框执行，系统域进程
+// （LaunchDaemon 托管）弹不出窗时回退到用户图形会话。
 //
 // 参数说明：
 //   - account: serviceAccount，授权回退路径需要的运行账户及其图形会话 domain。
@@ -257,6 +314,14 @@ func runPrivileged(account serviceAccount, commands ...privilegedCommand) error 
 		}
 		return nil
 	}
+	if stdioIsTerminal() {
+		if err := runViaSudo(commands...); err == nil {
+			return nil
+		} else if !errors.Is(err, errSudoUnavailable) {
+			// sudo 可用但执行失败（含用户取消授权）：不再叠加 GUI 弹窗二次打扰。
+			return err
+		}
+	}
 	parts := make([]string, 0, len(commands))
 	for _, command := range commands {
 		part := renderShellCommand(command)
@@ -267,11 +332,58 @@ func runPrivileged(account serviceAccount, commands ...privilegedCommand) error 
 	}
 	shellScript := strings.Join(parts, " && ")
 	appleScript := `do shell script "` + escapeAppleScript(shellScript) + `" with administrator privileges`
+	log.Printf("[autostart] 即将弹出管理员授权对话框，请输入密码完成授权；若未看到对话框，请在「终端」中重跑本命令改用 sudo 授权")
 	if _, err := run("/usr/bin/osascript", "-e", appleScript); err != nil {
 		if interactionNotAllowed(err) {
 			return runPrivilegedInGUISession(shellScript, account)
 		}
 		return fmt.Errorf("需要管理员授权: %w", err)
+	}
+	return nil
+}
+
+// errSudoUnavailable 表示系统没有 sudo 可执行文件，调用方应回退到 osascript 通道。
+var errSudoUnavailable = errors.New("sudo 不可用")
+
+// stdioIsTerminal 探测 stdin 是否为可交互终端；声明为变量以便测试替换。
+// 必须用 ioctl 级判定（term.IsTerminal）：ModeCharDevice 会把 /dev/null 误判为
+// 终端——LaunchDaemon 等托管进程的 stdin 正是 /dev/null，误判会让 sudo 在无终端
+// 环境下直接以「a password is required」失败，而不是回退到 GUI 授权。
+var stdioIsTerminal = func() bool { return fdIsTerminal(os.Stdin.Fd()) }
+
+// fdIsTerminal 判定文件描述符是否为终端。参数：fd 为 uintptr 文件描述符。
+// 返回：bool。错误：无；非终端（含 /dev/null、管道、正则文件）一律为 false。
+func fdIsTerminal(fd uintptr) bool { return term.IsTerminal(int(fd)) }
+
+// sudoLookPath 与 runTerminalCommand 是终端 sudo 通道的可注入点，测试替换。
+var sudoLookPath = func() (string, error) { return exec.LookPath("sudo") }
+var runTerminalCommand = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// runViaSudo 经终端 sudo 逐条执行特权命令（密码提示由 sudo 在终端完成，
+// 标准流直接挂到终端）。sudo 二进制缺失时返回 errSudoUnavailable。
+//
+// 参数说明：
+//   - commands: ...privilegedCommand，按顺序执行的固定命令与参数。
+//
+// 返回值说明：error，全部命令成功时为 nil。
+//
+// 错误情况：命令失败（含用户在 sudo 提示下取消）返回带命令名的错误；
+// IgnoreError 命令的失败被忽略，与 runPrivileged 的语义一致。
+func runViaSudo(commands ...privilegedCommand) error {
+	sudo, err := sudoLookPath()
+	if err != nil {
+		return errSudoUnavailable
+	}
+	for _, command := range commands {
+		if err := runTerminalCommand(sudo, append([]string{command.Name}, command.Args...)...); err != nil && !command.IgnoreError {
+			return fmt.Errorf("sudo %s 失败（已取消或鉴权失败）: %w", command.Name, err)
+		}
 	}
 	return nil
 }

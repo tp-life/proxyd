@@ -62,3 +62,6 @@ func status() (bool, error) {
 	_, err = os.Stat(path)
 	return err == nil, nil
 }
+
+// RootDaemonPlistInstalled 在 Linux 上恒为 false（无 root LaunchDaemon 概念）。
+func RootDaemonPlistInstalled() bool { return false }

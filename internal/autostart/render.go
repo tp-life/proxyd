@@ -32,14 +32,21 @@ func plistEscape(s string) string {
 //   - logPath: string，launchd 标准输出与错误日志路径。
 //   - userName: string，LaunchDaemon 降权运行时使用的本机账户名。
 //   - homeDir: string，该账户的 HOME，用于保持默认配置与状态目录语义。
+//   - rootDaemon: bool，为 true 时省略 UserName，服务以 root 运行（TUN 模式需要）。
 //
 // 返回值说明：string，可写入 /Library/LaunchDaemons/com.proxyd.plist 的 XML。
+// KeepAlive 仅 SuccessfulExit=false：崩溃（非零退出/信号）时由 launchd 拉起，
+// 干净退出（proxyd stop 的 SIGTERM 优雅退出）不再复活，保证 stop 语义生效。
 //
 // 错误情况：无；所有外部文本都会执行 XML 转义，文件写入与 launchctl 错误由调用方处理。
-func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
+func RenderPlist(exe, cfgPath, logPath, userName, homeDir string, rootDaemon bool) string {
 	esc := plistEscape
 	// 代理直接影响用户网络可用性，使用普通服务资源级别，避免 Background 对 CPU/I/O
 	// 的额外限制拖慢开机初始化；不使用依赖 XPC 活动的 Adaptive 分类。
+	userNameSection := ""
+	if !rootDaemon {
+		userNameSection = fmt.Sprintf("\t<key>UserName</key>\n\t<string>%s</string>\n", esc(userName))
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -56,10 +63,11 @@ func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
-	<key>UserName</key>
-	<string>%s</string>
-	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+%s	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
 		<string>%s</string>
@@ -74,7 +82,7 @@ func RenderPlist(exe, cfgPath, logPath, userName, homeDir string) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, plistLabel, esc(exe), esc(cfgPath), esc(userName), esc(homeDir), esc(logPath), esc(logPath))
+`, plistLabel, esc(exe), esc(cfgPath), userNameSection, esc(homeDir), esc(logPath), esc(logPath))
 }
 
 // RenderUnit 生成 Linux systemd user unit 内容。

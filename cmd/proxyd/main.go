@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,12 +16,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"proxyd/internal/api"
 	"proxyd/internal/app"
+	"proxyd/internal/autostart"
 	"proxyd/internal/config"
 	"proxyd/internal/logbuf"
 	"proxyd/internal/proxy/node"
@@ -31,6 +36,13 @@ import (
 )
 
 var version = "dev"
+
+// errSupervisedRestart 表示系统托管实例主动请求重启：cmdServe 完成全部清理 defer 后
+// 返回该哨兵，main 以固定非零码退出，launchd 按 KeepAlive（仅崩溃拉起）拉起替代实例。
+var errSupervisedRestart = errors.New("supervised restart requested")
+
+// supervisedRestartRequested 标记本次退出是 API 触发的托管重启而非真实故障。
+var supervisedRestartRequested atomic.Bool
 
 // main 是 proxyd 命令行入口，负责把首个位置参数分派到对应的 CLI 用例。
 //
@@ -70,6 +82,9 @@ func main() {
 		case "gateway-helper":
 			// 内部子命令：macOS 特权 helper 服务端，由 launchd 以 root 托管。
 			err = cmdGatewayHelperServe(os.Args[2:])
+		case "tun-helper":
+			// 内部子命令：macOS TUN 特权助手服务端，由 launchd 以 root 托管。
+			err = cmdTunHelperServe(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -141,6 +156,10 @@ func main() {
 		}
 	}
 	if err != nil {
+		if errors.Is(err, errSupervisedRestart) {
+			// 托管重启：清理 defer 已全部执行，固定非零码让 launchd 识别为失败退出并拉起替代实例。
+			os.Exit(3)
+		}
 		log.Fatalf("error: %v", err)
 	}
 }
@@ -171,7 +190,7 @@ usage:
   proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
   proxyd gateway helper install|uninstall|status   （macOS）特权 helper 本地安装管理（需管理员授权）
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
-  proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式（需系统权限）
+  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 管理 macOS 特权助手
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
@@ -217,6 +236,7 @@ usage:
   proxyd remote ssh-keys list|add|import|del|export|on|off|enable|disable|expire|disconnect     管理 SSH 登录公钥与附加认证
   proxyd ssh <远端> --diagnose [-i 私钥]    分阶段检查隧道、SSH 认证与交互登录环境
   proxyd remote builtin-ssh [on|off]    查看/开关进程内 SSH（可叠加公钥认证）
+  proxyd remote shell-user [<账户名>|off]   查看/设置远程会话降权账户（root 运行时必需）
   proxyd remote web-terminal [on|off] [--yes]   查看/开关浏览器终端（默认关闭；非回环开启需确认）
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
@@ -336,6 +356,35 @@ func firstRunGuide(configPath string) error {
 	)
 }
 
+// stdoutIsTerminal 判定标准输出是否为交互终端；声明为变量以便测试替换。
+// 注意不能用环境变量 XPC_SERVICE_NAME 区分 launchd 身份：它会随子进程继承，
+// CLI/桌面应用派生的 serve 也会带上，判定时不可靠。
+var stdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
+
+// ensureSingleInstance 防止重复启动 serve。
+//
+// 参数说明：
+//   - cfg: *config.Config，提供 pid 文件路径。
+//
+// 返回值说明：
+//   - bool：true 表示可以继续启动；false 表示已有活实例，本实例应退出。
+//   - error：前台终端场景下重复启动返回引导错误；后台/托管场景（stdout 非终端，
+//     如 launchd 重定向到日志文件）打印日志后返回 (false, nil)，调用方以退出码 0
+//     干净退出——plist 的 KeepAlive 仅崩溃拉起，不会因此重试，也不会产生双实例。
+//
+// 错误情况：仅前台重复启动返回错误；pid 文件损坏由 readPIDFile 按未运行处理。
+func ensureSingleInstance(cfg *config.Config) (bool, error) {
+	pid, alive := readPIDFile(pidPath(cfg))
+	if !alive {
+		return true, nil
+	}
+	if stdoutIsTerminal() {
+		return false, fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
+	}
+	log.Printf("[proxyd] 已有实例在运行 (pid %d)，本实例退出以避免双实例", pid)
+	return false, nil
+}
+
 // cmdServe 加载配置、启动本地 API 与 mihomo 调度器，并管理系统集成生命周期。
 //
 // 参数：
@@ -357,8 +406,12 @@ func cmdServe(args []string) error {
 		return err
 	}
 	log.Printf("[startup] pid=%d 状态目录检查完成，累计耗时=%s", os.Getpid(), time.Since(started))
-	if pid, alive := readPIDFile(pidPath(cfg)); alive {
-		return fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
+	proceed, err := ensureSingleInstance(cfg)
+	if err != nil {
+		return err
+	}
+	if !proceed {
+		return nil
 	}
 	a, err := app.New(cfg, cfgPath)
 	if err != nil {
@@ -367,8 +420,18 @@ func cmdServe(args []string) error {
 	a.ConfigureUpdateCheck(version, updatecheck.New())
 	log.Printf("[startup] pid=%d 应用初始化完成，累计耗时=%s", os.Getpid(), time.Since(started))
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	apiSrv := api.New(cfg.APIListen, a)
 	apiSrv.SetRestarter(func() error {
+		if s := autostart.Inspect(); s.Running && s.PID == os.Getpid() {
+			// 系统托管实例（launchd 正在监管本进程）：正常清理后以非零码退出，
+			// KeepAlive（仅崩溃拉起）随即拉起新实例，重启后保持系统托管身份。
+			supervisedRestartRequested.Store(true)
+			stop()
+			return nil
+		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
@@ -398,8 +461,6 @@ func cmdServe(args []string) error {
 	log.Printf("[proxyd] 主端口(规则模式): %s:%d，节点映射区间: %d-%d",
 		cfg.Listen, cfg.MixedPort, cfg.PortRange[0], cfg.PortRange[1])
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	// API 优雅关闭最多等待 3 秒；届时若 /api/traffic 等长连接仍未结束则强制断开。
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -425,7 +486,11 @@ func cmdServe(args []string) error {
 			log.Printf("[sysproxy] 关闭系统代理失败（可手动 proxyd sysproxy off）: %v", err)
 		}
 	}()
-	return a.Run(ctx)
+	err = a.Run(ctx)
+	if supervisedRestartRequested.Load() {
+		return errSupervisedRestart
+	}
+	return err
 }
 
 // cmdSysproxy 开关/查看系统代理（指向配置的主端口）。
