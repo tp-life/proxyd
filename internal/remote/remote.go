@@ -9,6 +9,8 @@ package remote
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +39,8 @@ type Status struct {
 	KeyFile         string                    `json:"key_file"`                  // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
 	CustomKeyFile   string                    `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
 	BuiltinSSH      bool                      `json:"builtin_ssh"`               // 内嵌 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
+	ShellUser       string                    `json:"shell_user,omitempty"`      // 配置的远程会话降权账户（remote.shell-user 原值）
+	SessionUser     string                    `json:"session_user"`              // 实际远程会话用户：shell-user 优先，否则为进程用户
 	SSHAuthRequired bool                      `json:"ssh_auth_required"`         // 是否在隧道身份之外额外要求 SSH 公钥
 	SSHKeys         []SSHKeyInfo              `json:"ssh_keys"`                  // 公钥与指纹可以公开展示，永不存储客户端私钥
 	WebTerminal     bool                      `json:"web_terminal"`              // 浏览器终端总开关；默认关闭，API 层关闭时直接返回 404
@@ -134,6 +138,13 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 		return err
 	}
 	cfg.SSHKeys = keys
+	// root 运行且未配置 shell-user 时 fail-closed：拒绝开启任何会创建本机 shell 的
+	// 入口，绝不默认提供 root shell。非 root 运行保持进程用户语义，无需配置。
+	if sessionShellActive(cfg) {
+		if err := checkSessionUserAllowed(os.Geteuid(), cfg.ShellUser); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -168,6 +179,21 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 	m.cfg = cfg.Clone()
 	m.sshAccess.update(cfg.SSHAuthRequired, cfg.SSHKeys)
 	return serveErr
+}
+
+// effectiveSessionUser 返回展示用的实际远程会话用户：配置 shell-user 优先，
+// 否则为 proxyd 进程用户；账户查询失败时回退到配置原值或空串。
+// 参数说明：shellUser 为 string，remote.shell-user 配置原值。
+// 返回值说明：string，用于控制台展示，避免误判会话权限。
+// 错误情况：无；os/user 不可用时静默降级。
+func effectiveSessionUser(shellUser string) string {
+	if name := strings.TrimSpace(shellUser); name != "" {
+		return name
+	}
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
 }
 
 // serverConfigEqual 判断运行中的服务端是否与新配置等价（等价则无需重建隧道）。
@@ -227,6 +253,8 @@ func (m *Manager) Status() Status {
 		KeyFile:         m.serverKeyPath(m.cfg),
 		CustomKeyFile:   strings.TrimSpace(m.cfg.KeyFile),
 		BuiltinSSH:      m.cfg.BuiltinSSH,
+		ShellUser:       strings.TrimSpace(m.cfg.ShellUser),
+		SessionUser:     effectiveSessionUser(m.cfg.ShellUser),
 		SSHAuthRequired: m.cfg.SSHAuthRequired,
 		SSHKeys:         m.sshAccess.infos(m.cfg.SSHKeys),
 		WebTerminal:     m.cfg.WebTerminal && !m.cfg.Disabled,

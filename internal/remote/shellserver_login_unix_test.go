@@ -39,8 +39,8 @@ func newLoginTestSession(t *testing.T) (*gossh.Session, *user.User) {
 	}
 	// 仅替换账户目录，仍使用生产会话执行器，覆盖环境过滤、shell 选择和真实 PTY。
 	server := &ssh.Server{
-		Handler:           func(sess ssh.Session) { runShellSession(sess, &u) },
-		SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { runShellDiagnostic(sess, &u) }},
+		Handler:           func(sess ssh.Session) { runShellSession(sess, &sessionUser{user: &u}) },
+		SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { runShellDiagnostic(sess, &sessionUser{user: &u}) }},
 		ChannelHandlers:   map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
 	}
 	server.AddHostKey(signer)
@@ -235,7 +235,7 @@ func TestSSHDiagnosticWithOpenSSH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &ssh.Server{SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { runShellDiagnostic(sess, &u) }}}
+	server := &ssh.Server{SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { runShellDiagnostic(sess, &sessionUser{user: &u}) }}}
 	server.AddHostKey(host)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

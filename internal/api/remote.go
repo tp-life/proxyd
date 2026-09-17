@@ -38,6 +38,7 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/remote/keyfile/export", s.handleExportRemoteKeyFile)
 	mux.HandleFunc("POST /api/remote/keyfile/import", s.handleImportRemoteKeyFile)
 	mux.HandleFunc("POST /api/remote/builtin-ssh", s.handleSetRemoteBuiltinSSH)
+	mux.HandleFunc("POST /api/remote/shell-user", s.handleSetRemoteShellUser)
 	mux.HandleFunc("POST /api/remote/web-terminal", s.handleSetRemoteWebTerminal)
 	mux.HandleFunc("GET /api/remote/terminal", s.handleRemoteTerminal)
 	mux.HandleFunc("GET /api/remote/tempkey", s.handleGetRemoteTempKey)
@@ -262,6 +263,23 @@ func (s *Server) handleSetRemoteBuiltinSSH(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.app.SetRemoteBuiltinSSH(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleSetRemoteShellUser 修改远程会话降权账户（空字符串恢复进程用户语义）。
+// root 运行时开启内嵌 SSH/Web 终端前必须先设置普通账户，拒绝默认提供 root shell。
+func (s *Server) handleSetRemoteShellUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ShellUser string `json:"shell_user"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteShellUser(req.ShellUser); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

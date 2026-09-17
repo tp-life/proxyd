@@ -123,7 +123,7 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 		return nil, ErrWebTerminalDisabled
 	}
 
-	handler, err := localShellSSHHandler(m.stateDir)
+	handler, err := localShellSSHHandler(m.stateDir, cfg.ShellUser)
 	if err != nil {
 		return nil, err
 	}

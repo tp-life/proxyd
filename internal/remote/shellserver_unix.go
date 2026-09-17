@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"strconv"
 	"syscall"
 
 	"github.com/creack/pty"
@@ -25,13 +26,15 @@ import (
 // rawCmd 为空时进入交互登录 shell，否则用 shell -c 执行。
 //
 // 参数说明：
-//   - u: *user.User，shell 归属的本机用户（proxyd 进程用户）。
+//   - su: *sessionUser，会话归属的降权身份（含可选子进程凭据）。
 //   - rawCmd: string，客户端携带的可选远端命令。
 //
 // 返回值说明：*exec.Cmd，已设置 Args、Dir 与基础环境，调用方可追加客户端环境。
 //
-// 错误情况：无。
-func newShellSessionCommand(u *user.User, rawCmd string) *exec.Cmd {
+// 错误情况：无；目标用户与进程 euid 不同时，凭据已写入 SysProcAttr，
+// 后续 PTY/进程组属性必须合并而不是覆盖（见 ensureShellSysProcAttr）。
+func newShellSessionCommand(su *sessionUser, rawCmd string) *exec.Cmd {
+	u := su.user
 	shell := loginShell(u)
 	var args []string
 	if rawCmd == "" {
@@ -48,17 +51,36 @@ func newShellSessionCommand(u *user.User, rawCmd string) *exec.Cmd {
 		"HOME=" + u.HomeDir,
 		"PATH=" + defaultShellPath(u),
 	}
+	if su.cred != nil {
+		ensureShellSysProcAttr(cmd).Credential = su.cred
+	}
 	return cmd
 }
 
+// ensureShellSysProcAttr 返回命令的 SysProcAttr（不存在时创建），供各执行路径
+// 合并写入进程组/控制终端/降权凭据，避免后写者覆盖先写的 Credential。
+//
+// 参数说明：
+//   - cmd: *exec.Cmd，尚未启动的 shell 命令。
+//
+// 返回值说明：*syscall.SysProcAttr，调用方可直接修改字段。
+//
+// 错误情况：无。
+func ensureShellSysProcAttr(cmd *exec.Cmd) *syscall.SysProcAttr {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	return cmd.SysProcAttr
+}
+
 // newShellDiagnosticCommand 创建显式交互登录的诊断命令，加载用户配置后直接执行固定脚本。
-// 参数说明：u 为 *user.User，服务端确认的用户；script 为 string，服务端固定只读脚本。
+// 参数说明：su 为 *sessionUser，服务端确认的降权身份；script 为 string，服务端固定只读脚本。
 // 返回值说明：*exec.Cmd，继承普通会话的用户目录和最小环境，尚未启动。
 // 错误情况：不支持这些参数的 shell 会在启动时返回错误；用户配置阻塞仍由会话超时收尾。
 // -i 与 -l 必须同时保留以加载交互和登录配置；-c 将脚本交给 shell 执行，避免 fish
 // 在提示符初始化查询终端能力时消费提前写入 stdin 的命令。不会关闭正常终端的能力查询。
-func newShellDiagnosticCommand(u *user.User, script string) *exec.Cmd {
-	cmd := newShellSessionCommand(u, script)
+func newShellDiagnosticCommand(su *sessionUser, script string) *exec.Cmd {
+	cmd := newShellSessionCommand(su, script)
 	cmd.Args = []string{cmd.Path, "-l", "-i", "-c", script}
 	return cmd
 }
@@ -122,7 +144,18 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 	// 必须传递真实从端路径：用户启动脚本据此判断 SSH 登录，工具也会通过它
 	// 访问控制终端。客户端不允许覆盖此变量，且无 PTY 会话不能伪造 SSH_TTY。
 	cmd.Env = append(cmd.Env, "SSH_TTY="+tty.Name())
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setctty: true, Setsid: true}
+	attr := ensureShellSysProcAttr(cmd)
+	attr.Setctty = true
+	attr.Setsid = true
+	// 降权会话的 PTY 从端属主默认是打开它的 root 父进程；子进程 fd 虽已继承可读写，
+	// 但 tty 属主不符会让 job control 与部分终端工具报错，按 sshd 惯例 chown 给会话用户。
+	if attr.Credential != nil {
+		if rc, err := tty.SyscallConn(); err == nil {
+			_ = rc.Control(func(fd uintptr) {
+				_ = unix.Fchown(int(fd), int(attr.Credential.Uid), int(attr.Credential.Gid))
+			})
+		}
+	}
 	cmd.Stdin = tty
 	cmd.Stdout = tty
 	cmd.Stderr = tty
@@ -172,11 +205,11 @@ func runShellWithPTY(sess ssh.Session, cmd *exec.Cmd, ptyReq ssh.Pty, winCh <-ch
 // 参数说明：
 //   - cmd: *exec.Cmd，尚未启动的 shell 命令。
 //
-// 返回值说明：无；直接填充 SysProcAttr。
+// 返回值说明：无；合并写入 SysProcAttr，保留可能已存在的降权凭据。
 //
 // 错误情况：进程组创建失败会由后续 cmd.Start 返回，本函数不单独产生错误。
 func prepareShellProcess(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	ensureShellSysProcAttr(cmd).Setpgid = true
 }
 
 // terminateShellProcess 强制终止 shell 所在的 Unix 进程组。
@@ -202,15 +235,18 @@ func terminateShellProcess(cmd *exec.Cmd) {
 // 参数说明：
 //   - u: *user.User，目标本机用户。
 //
-// 返回值说明：string，优先系统账户记录，其次 SHELL 环境变量，兜底 /bin/sh。
+// 返回值说明：string，优先系统账户记录，兜底 /bin/sh。
 //
-// 错误情况：无；所有查询失败都回退到默认值。
+// 错误情况：无；账户数据库查询失败都回退到默认值。SHELL 环境变量只在目标用户
+// 就是进程用户时作为回退，避免降权会话错误继承 root 的 shell。
 func loginShell(u *user.User) string {
 	if shell := lookupLoginShell(u); shell != "" {
 		return shell
 	}
-	if e := os.Getenv("SHELL"); e != "" {
-		return e
+	if u.Uid == strconv.Itoa(os.Geteuid()) {
+		if e := os.Getenv("SHELL"); e != "" {
+			return e
+		}
 	}
 	return "/bin/sh"
 }

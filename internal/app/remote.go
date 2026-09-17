@@ -395,6 +395,29 @@ func (a *App) SetRemoteBuiltinSSH(enabled bool) error {
 	})
 }
 
+// SetRemoteShellUser 修改远程会话降权账户（内嵌 SSH/SCP/Web 终端/诊断的运行身份）
+// 并持久化；空字符串恢复进程用户语义。root 运行时开启 shell 入口前必须设置，
+// 目标账户必须存在且不能是 root。
+//
+// 参数说明：
+//   - name: string，目标本机账户名；空字符串表示清除配置。
+//
+// 返回值说明：error，账户校验、运行态调和与磁盘全部提交成功时为 nil。
+//
+// 错误情况：账户非法/不存在/为 root、运行态调和或持久化失败时返回错误并回滚。
+func (a *App) SetRemoteShellUser(name string) error {
+	name = strings.TrimSpace(name)
+	if name != "" {
+		if err := remote.ValidateShellUser(name); err != nil {
+			return err
+		}
+	}
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.ShellUser = name
+		return nil
+	})
+}
+
 // SetRemoteWebTerminal 热切换浏览器终端总开关，并对非回环管理地址执行强制确认门。
 //
 // 参数说明：

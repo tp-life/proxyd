@@ -996,7 +996,7 @@ function App() {
           </div>
         )}
       </main>
-      {terminalSession && <Suspense fallback={null}><TerminalDialog open command={terminalSession.command || ""} target={terminalSession.target || ""} minimized={terminalMinimized} onMinimizedChange={setTerminalMinimized} onOpenChange={(open) => { if (!open) setTerminalSession(null); }} /></Suspense>}
+      {terminalSession && <Suspense fallback={null}><TerminalDialog open command={terminalSession.command || ""} target={terminalSession.target || ""} sessionUser={remote.status?.session_user || ""} minimized={terminalMinimized} onMinimizedChange={setTerminalMinimized} onOpenChange={(open) => { if (!open) setTerminalSession(null); }} /></Suspense>}
       {paletteOpen && (
         <CommandPalette
           commands={filteredCommands}

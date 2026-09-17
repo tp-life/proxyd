@@ -45,7 +45,7 @@ func TestOpenWebTerminalGates(t *testing.T) {
 	if _, err := manager.OpenWebTerminal(t.Context(), TerminalSize{}); !errors.Is(err, ErrWebTerminalDisabled) {
 		t.Fatalf("默认关闭应返回 ErrWebTerminalDisabled，got %v", err)
 	}
-	if _, err := localShellSSHHandler(t.TempDir()); err != nil {
+	if _, err := localShellSSHHandler(t.TempDir(), ""); err != nil {
 		t.Skip("当前平台不支持进程内 shell 服务")
 	}
 	manager.cfg.WebTerminal = true

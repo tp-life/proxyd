@@ -450,6 +450,36 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * saveShellUser 修改远程会话降权账户（内嵌 SSH/SCP/Web 终端的运行身份）。
+   *
+   * 参数说明：
+   * - name: string，目标本机账户名；空字符串恢复进程用户语义。
+   *
+   * 返回值说明：
+   * 返回 Promise<boolean>；成功为 `true`。
+   *
+   * 可能的异常/错误情况：
+   * 账户不存在/为 root、root 运行未配置或网络失败时 toast 错误并返回 false。
+   */
+  const saveShellUser = useCallback(
+    async (name) => {
+      try {
+        const payload = await requestJSON("/api/remote/shell-user", {
+          method: "POST",
+          body: JSON.stringify({ shell_user: name }),
+        });
+        if (payload) setStatus(payload);
+        showToast(name ? `远程会话用户已设置为 ${name}` : "已清除 shell-user，远程会话恢复进程用户身份");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
    * setWebTerminal 热切换高权限浏览器终端，并在非回环 api-listen 上执行二次确认。
    *
    * 参数说明：
@@ -891,6 +921,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     saveAllow,
     saveKeyFile,
     saveServe,
+    saveShellUser,
     setBuiltinSSH,
     setWebTerminal,
     setSshSetEnvTerm,

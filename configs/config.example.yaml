@@ -107,6 +107,9 @@ rules:
 #                              # 空=内置托管密钥 state-dir/remote/server.private.json
 #   builtin-ssh: false         # true=内嵌免密 SSH：隧道 22 端口由进程内 SSH 服务直接处理
 #                              #（隧道即认证，无需系统 sshd/账号密码，同 tailcat no-auth-ssh）；
+#   shell-user: ""             # 远程会话（内嵌 SSH/SCP/Web 终端/诊断）降权运行的本机账户；
+#                              # proxyd 以 root 运行时（如 TUN 模式）必须配置普通账户，
+#                              # 否则内嵌 SSH 与 Web 终端拒绝开启（不默认提供 root shell）
 #   web-terminal: false        # 高权限浏览器终端，默认关闭；依赖 enabled + builtin-ssh
 #                              # 非回环 api-listen 上开启必须在 Web 二次确认，CLI 需交互确认或 --yes；
 #                              # 能访问控制台即可能获得 proxyd 进程用户 shell，强烈建议只监听 127.0.0.1

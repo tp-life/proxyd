@@ -62,11 +62,12 @@ function parseTerminalControl(message) {
  * - onOpenChange: (open: boolean) => void，Radix 关闭事件回调。
  * - command: string，可选；连接建立后自动发送到 shell 执行的首条命令（如 proxyd ssh）。
  * - target: string，可选；会话目标说明（如远程设备名称），仅用于标题展示。
+ * - sessionUser: string，可选；实际远程会话用户（remote.shell-user 或进程用户），仅用于展示。
  *
  * 返回值说明：返回 React 元素；关闭时仍保留 Dialog 根节点以正确归还焦点。
  * 可能的异常/错误情况：终端依赖、WebSocket 或 PTY 任一环节失败时进入 error/disconnected 状态。
  */
-export default function TerminalDialog({ open, onOpenChange, minimized = false, onMinimizedChange, command = "", target = "" }) {
+export default function TerminalDialog({ open, onOpenChange, minimized = false, onMinimizedChange, command = "", target = "", sessionUser = "" }) {
   const containerRef = useRef(null);
   const terminalRef = useRef(null);
   const minimizedRef = useRef(minimized);
@@ -347,8 +348,8 @@ export default function TerminalDialog({ open, onOpenChange, minimized = false, 
             </DialogTitle>
             <DialogDescription id="web-terminal-description" className="sr-only">
               {target
-                ? `当前 proxyd 进程用户的本机交互式 shell，已自动执行连接 ${target} 的命令，关闭弹层即结束会话。`
-                : "当前 proxyd 进程用户的本机交互式 shell，关闭弹层即结束会话。"}
+                ? `${sessionUser || "proxyd 进程用户"} 的本机交互式 shell，已自动执行连接 ${target} 的命令，关闭弹层即结束会话。`
+                : `${sessionUser || "proxyd 进程用户"} 的本机交互式 shell，关闭弹层即结束会话。`}
             </DialogDescription>
           </DialogHeader>
           <div className="ml-auto flex items-center gap-2">
@@ -376,7 +377,7 @@ export default function TerminalDialog({ open, onOpenChange, minimized = false, 
         </div>
 
         <footer className="terminal-dialog-footer">
-          <span>高权限会话 · 当前进程用户 · 最小化保持连接 · 关闭立即断开</span>
+          <span>高权限会话 · {sessionUser || "当前进程用户"} · 最小化保持连接 · 关闭立即断开</span>
           <span className="font-mono">TERM=xterm-256color</span>
         </footer>
       </DialogContent>
