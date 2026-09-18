@@ -121,13 +121,13 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd serve -range A-B <url>` | 指定映射端口区间 |
 | `proxyd <url>` | `serve <url>` 的快捷形式 |
 | `proxyd start [-c 配置]` | 后台守护模式：派生 detached 子进程执行 serve，日志落 `state-dir/proxyd.log`，pid 写 `state-dir/proxyd.pid`；启动后做就绪等待（轮询 API，最长 10s）并打印 Web 地址；已运行则报错 |
-| `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s，清理 pid 文件；stale pid 自动清理 |
+| `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s；实例存活以 pid 文件上的文件锁为准（免疫 stale pid 与 PID 复用），pid 文件永久保留不再删除 |
 | `proxyd restart` | 重启当前实例；macOS 同配置由系统托管时，请求旧实例退出并等待系统拉起替代进程 |
 | `proxyd status` | 运行中显示 pid、端口、Web 地址、API 健康状态，并追加实例汇总（模式/节点存活/端口映射/主端口策略/系统代理/TUN/DNS/自启/新版本提醒） |
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
 | `proxyd tun [-c 配置] on\|off\|status` | 开关/查看 TUN 模式及当前进程权限（操作运行中实例） |
-| `proxyd tun helper install\|uninstall\|status` | macOS TUN 特权助手的本地安装管理（install 需一次性管理员授权） |
+| `proxyd helper install\|uninstall\|status` | macOS 统一特权助手（TUN 与 LAN 网关共用）的本地安装管理（install 需一次性管理员授权）；旧的 `proxyd tun helper ...` / `proxyd gateway helper ...` 写法仍兼容 |
 | `proxyd autostart [-c 配置] on\|off\|status` | 开关/查看开机自启（macOS 为系统级 LaunchDaemon，flag 需放在操作前） |
 
 ### 本地管理命令（CLI ↔ Web 对齐）
@@ -158,7 +158,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd main-auto [on\|off]` | 开关「主端口使用最优节点」（跳过规则）；无参查看 |
 | `proxyd main-node [节点名\|key\|off]` | 设置主端口固定节点（跳过规则、直达该节点）；可直接给节点名（重名时按提示改用 key）；无参查看，`off` 清除 |
 | `proxyd main-port <端口>` | 修改主端口（热更新；系统代理开启时自动重绑）；无参查看 |
-| `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令（macOS 为 `proxyd tun helper install`） |
+| `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令（macOS 为 `proxyd helper install`） |
 | `proxyd dns-preset [off\|fake-ip\|redir-host]` | 查看/切换 DNS 预设；配置文件存在手写 `dns` 段时会提示预设不生效 |
 | `proxyd update-check [on\|off]` | 查看/开关启动版本检查；无参显示当前/最新版本与检查状态 |
 | `proxyd conn list` / `proxyd conn close <id\|all>` | 查看活动连接（出站、规则、目标、上下行、存活时长与内存占用）/ 关闭单条或全部连接 |
@@ -185,13 +185,13 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 `proxyd autostart on` 注册当前二进制（`os.Executable` 绝对路径）+ 当前配置文件为开机自启项，并立即启动一次：
 
-- **macOS**：经管理员授权安装 `/Library/LaunchDaemons/com.proxyd.plist`，注册到 `system` 域；LaunchDaemon 始终通过 `UserName` 以注册用户降权运行 `serve -c <配置绝对路径>`（TUN 不再要求主进程 root，改由 tun-helper 代劳，见「TUN 模式」；旧版 root 模式 plist 会在新进程启动时自动迁移为降权运行），StandardOut/Err 指向 `state-dir/proxyd.log`。它不依赖用户登录，冷启动、断电恢复或系统重启后均会启动；KeepAlive 为「仅崩溃拉起」（`SuccessfulExit=false`）：崩溃后自动重启，`proxyd stop` 的干净退出则保持停止。启用或关闭时也会清理旧版 `~/Library/LaunchAgents/com.proxyd.plist`。授权通道「终端优先」：CLI 场景（stdin 为终端）经 sudo 在终端输入密码；Web 控制台触发时经 macOS 管理员授权弹窗
+- **macOS**：经管理员授权安装 `/Library/LaunchDaemons/com.proxyd.plist`，注册到 `system` 域；LaunchDaemon 始终通过 `UserName` 以注册用户降权运行 `serve -c <配置绝对路径>`（TUN 不再要求主进程 root，改由统一特权助手代劳，见「TUN 模式」；旧版 root 模式 plist 会在新进程启动时自动迁移为降权运行），StandardOut/Err 指向 `state-dir/proxyd.log`。它不依赖用户登录，冷启动、断电恢复或系统重启后均会启动；KeepAlive 为「仅崩溃拉起」（`SuccessfulExit=false`）：崩溃后自动重启，`proxyd stop` 的干净退出则保持停止。启用或关闭时也会清理旧版 `~/Library/LaunchAgents/com.proxyd.plist`。授权通道「终端优先」：CLI 场景（stdin 为终端）经 sudo 在终端输入密码；Web 控制台触发时经 macOS 管理员授权弹窗
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
 `off` 移除对应项，但**不影响正在运行的实例**：macOS 只删除 plist（launchd 内存中的定义保留到本次开机结束，进程继续运行，重启后不再拉起）；Linux 只 `disable` 不停止服务；Windows 同样不影响已运行实例。`status` 分别显示自启项注册状态和服务状态；macOS 会查询系统托管 PID、运行状态及最近退出码，其他平台明确提示尚未查询进程状态。不支持的平台返回明确错误。
 
-`proxyd start` / `stop` / `restart` 与开机自启相互独立：start 在没有活实例时派生独立后台进程（系统自启服务即使注册了但起不来也只打印修复提示，不阻塞启动）；stop 终止当前实例并保持停止；restart 对系统托管实例改为 POST /api/restart——旧实例优雅清理后以非零码退出、由 launchd 立即拉起替代进程（重启后仍是系统托管身份），对独立实例维持先停后启。由系统服务拉起的实例崩溃后由 launchd 自动重启，CLI 拉起的独立进程不受监管（与 Linux/Windows 语义一致）。`autostart on` 对已注册但未运行的服务（无论是崩溃循环还是干净停止）会强制 bootout + bootstrap 重注册并立即拉起；若此时独立实例正在运行，系统服务实例按单实例守卫让位，命令会提示「下次开机自动接管，或 proxyd stop && proxyd autostart on 立即交回」。macOS 上若 stop 后被旧版 plist（KeepAlive=true）立即拉回，stop 会打印提示：执行 `proxyd autostart off && proxyd autostart on` 重注册（这也是修复「更新二进制后系统服务签名失效（退出码 78）」的路径），之后再 stop 即可保持停止。单实例守卫按 stdout 是否为终端区分：交互式 serve 发现已有活实例时报错退出；launchd/后台拉起的实例则干净退出让位，不会双实例。
+`proxyd start` / `stop` / `restart` 与开机自启相互独立：start 在没有活实例时派生独立后台进程（系统自启服务即使注册了但起不来也只打印修复提示，不阻塞启动）；stop 终止当前实例并保持停止；restart 对系统托管实例改为 POST /api/restart——旧实例优雅清理后以非零码退出、由 launchd 立即拉起替代进程（重启后仍是系统托管身份），对独立实例维持先停后启。由系统服务拉起的实例崩溃后由 launchd 自动重启，CLI 拉起的独立进程不受监管（与 Linux/Windows 语义一致）。`autostart on` 对已注册但未运行的服务（无论是崩溃循环还是干净停止）会强制 bootout + bootstrap 重注册并立即拉起；若此时独立实例正在运行，系统服务实例按单实例守卫让位，命令会提示「下次开机自动接管，或 proxyd stop && proxyd autostart on 立即交回」。macOS 上若 stop 后被旧版 plist（KeepAlive=true）立即拉回，stop 会打印提示：执行 `proxyd autostart off && proxyd autostart on` 重注册（这也是修复「更新二进制后系统服务签名失效（退出码 78）」的路径），之后再 stop 即可保持停止。单实例守卫按 stdout 是否为终端区分：交互式 serve 发现已有活实例时报错退出；launchd/后台拉起的实例则干净退出让位，不会双实例。让位是一次性的：独立实例停止后系统服务不会自动接管（保持停止直到下次开机或再次 `autostart on`）；因此 `proxyd status` 在实例未运行时会附加开机自启状态与下一步指引，`proxyd stop` 停止独立实例且自启仍开启时同样提示如何立即交回系统服务。
 
 Web 通用设置页的开关表示自启注册状态，下方单独显示系统服务运行信息；`/api/overview` 的 `autostart_runtime` 包含该快照。启动日志通过 `[startup]` 记录 PID 和配置加载、目录检查、应用初始化、API 监听的累计耗时。生成的 LaunchDaemon 使用 `ProcessType=Standard`；旧安装可执行 `proxyd autostart on` 更新磁盘 plist，已加载的服务定义会在下次开机时读取新版。
 
@@ -275,7 +275,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/main-node` `{"node":"<节点key>"}` | 设置主端口固定节点（跳过规则、直达该节点；空串清除；持久化 + 热更新） |
 | `POST /api/main-port` `{"port":42999}` | 修改主端口（校验 1-65535 且不与 api 端口/节点区间/分组/auto-port 冲突；持久化 + 热更新；系统代理开启时自动重绑） |
 | `POST /api/system-proxy` `{"enabled":true}` | 开关系统代理（指向主端口，持久化） |
-| `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限、修复指引，以及 macOS 的 tun-helper 安装/可达状态（`helper` 字段） |
+| `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限、修复指引，以及 macOS 的统一特权助手安装/可达状态（`helper` 字段） |
 | `POST /api/tun` `{"enabled":true}` | 权限检查后热开关 TUN；失败恢复旧配置，成功后持久化 |
 | `POST /api/dns-preset` `{"preset":"fake-ip"}` | 切换 `off/fake-ip/redir-host` 预设并热更新；手写 `dns:` 存在时仍优先生效 |
 | `POST /api/update-check` `{"enabled":false}` | 开关启动版本检查并持久化；重新开启时立即异步检查一次 |
@@ -337,7 +337,7 @@ tun:
 
 使用 Web「代理 → 代理设置」或 `proxyd tun [-c 配置] on|off|status` 热切换。开启流程先检查权限，再让 mihomo 热更新，并读取实际 listener 状态二次确认；生成、应用或实际启用失败会恢复旧 TUN 配置。配置文件启动时已经是 `enable: true` 但权限不足，proxyd 会在启动 API 和修改路由之前退出并打印修复指引。
 
-- **macOS**：由 tun-helper（`com.proxyd.tun-helper`，LaunchDaemon 常驻的 root 特权助手）代劳 utun 创建、地址配置与路由写入，**proxyd 主进程保持普通用户运行**。首次使用执行一次 `proxyd tun helper install`（终端输入登录密码；经 `proxyd tun on` 开启且 helper 缺失时会就地提示安装）。之后开关 TUN 不再需要 sudo：主进程经 unix socket（0600 + 对端 UID 校验）向 helper 申请设备，helper 仅接受 `ping`/`tun.create` 白名单指令，设备 fd 经 SCM_RIGHTS 回传注入 mihomo 的 `tun.file-descriptor`；fd 不落盘，主进程退出时内核自动销毁设备与路由。管理命令：`proxyd tun helper status|uninstall`；日志 `/var/log/com.proxyd.tun-helper.log`；握手版本不兼容时重新 install 升级。仍保留旧路径：`sudo proxyd serve` 以 root 运行时由 mihomo 自行创建设备（此时内嵌 SSH/Web 终端需配置 `remote.shell-user`，见「十、远程连接」）。
+- **macOS**：由统一特权助手（`com.proxyd.helper`，LaunchDaemon 常驻的 root 助手，TUN 与 LAN 网关共用，ADR 0004）代劳 utun 创建、地址配置与路由写入，**proxyd 主进程保持普通用户运行**。首次使用执行一次 `proxyd helper install`（终端输入登录密码；经 `proxyd tun on` 开启且 helper 缺失时会就地提示安装）。之后开关 TUN 不再需要 sudo：主进程经 unix socket（0600 + 对端 UID 校验）向 helper 申请设备，helper 仅接受 `ping`/`tun.create` 白名单指令，设备 fd 经 SCM_RIGHTS 回传注入 mihomo 的 `tun.file-descriptor`；fd 不落盘，主进程退出时内核自动销毁设备与路由。管理命令：`proxyd helper status|uninstall`（旧的 `proxyd tun helper ...` 与 `proxyd gateway helper ...` 写法仍兼容，操作同一个助手）；日志 `/var/log/com.proxyd.helper.log`；握手版本不兼容时重新 install 升级。旧版独立的 `com.proxyd.tun-helper`/`com.proxyd.gateway-helper` 在安装或卸载统一助手时自动迁移清理。仍保留旧路径：`sudo proxyd serve` 以 root 运行时由 mihomo 自行创建设备（此时内嵌 SSH/Web 终端需配置 `remote.shell-user`，见「十、远程连接」）。
 - **Linux**：可直接以 root 运行，或对当前二进制执行 `sudo setcap cap_net_admin=+ep /path/to/proxyd` 后重启。替换/升级二进制会丢失 capability，需要重新执行 `setcap`。
 - **Windows**：必须从“以管理员身份运行”的 PowerShell/终端启动 proxyd；普通登录启动项不会自动提升权限。
 
@@ -520,7 +520,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `tsnet/<节点>-<哈希>/` | tailscale 出站按节点隔离的 tsnet 状态目录（配置历史不备份这些文件） |
 | `cache/<订阅名>.cache` | 各订阅的原始响应缓存（拉取失败时降级用） |
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
-| `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
+| `proxyd.pid` | 运行中实例的 pid 与单实例锁文件（serve 启动时持锁并写入 pid；锁随进程退出自动释放，文件永久保留；stop/status/防重复启动以锁为准，不受过期内容影响） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
 | `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token。配置 `remote.key-file` 时改用指定路径，此文件不再使用 |
 | `remote/ssh_host_ed25519_key` | Web Terminal 与 builtin-ssh 共用的 SSH host key（0600）；首次使用时原子生成，重启后保持稳定 |
@@ -645,7 +645,7 @@ proxyd remote serve 22,5900   # macOS 屏幕共享或其它 VNC 服务
 
 **内嵌 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理，**无需系统 sshd（如 macOS 远程登录）**。默认保持隧道免密模式，通过隧道认证即可获得本机 shell（以远程会话用户身份，见下段）；也可按下文额外启用 SSH 公钥认证，并配合 `remote allow` 白名单收窄来源。
 
-**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SCP、诊断命令和 Web Terminal 创建子进程时的运行身份：配置后子进程切换到该账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析；客户端 `user@` 始终不能选择本机账号。proxyd 以 root 运行时**必须**显式配置普通账户（`proxyd remote shell-user <账户名>` 或 Web 控制台设置），否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell；非 root 运行时无需配置，会话保持进程用户（TUN 自 tun-helper 落地后不再要求 root 运行，见「TUN 模式」）。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
+**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SCP、诊断命令和 Web Terminal 创建子进程时的运行身份：配置后子进程切换到该账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析；客户端 `user@` 始终不能选择本机账号。proxyd 以 root 运行时**必须**显式配置普通账户（`proxyd remote shell-user <账户名>` 或 Web 控制台设置），否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell；非 root 运行时无需配置，会话保持进程用户（TUN 自特权助手落地后不再要求 root 运行，见「TUN 模式」）。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
 
 **Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
@@ -821,7 +821,7 @@ Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文�
 ### 启用步骤
 
 1. 启用前检查：`proxyd gateway precheck`（或 Web「网关」页预检卡）。
-   - macOS 未就绪时安装 helper：`sudo proxyd gateway helper install`（launchd 系统域常驻；`proxyd gateway helper status|uninstall` 查看/卸载）。helper 只接受 pf 应用/清除与转发开关的白名单指令，不读业务配置、不连网。
+   - macOS 未就绪时安装 helper：`sudo proxyd helper install`（launchd 系统域常驻，与 TUN 共用的统一特权助手；`proxyd helper status|uninstall` 查看/卸载）。helper 只接受 pf 应用/清除与转发开关的白名单指令，不读业务配置、不连网。
    - Linux 未就绪时按指引执行：`sudo setcap 'cap_net_admin,cap_net_raw,cap_net_bind_service=+ep' <proxyd 二进制路径>` 后重启 proxyd（每次替换二进制需重设，与 TUN 同一条指引）。
 2. 启用模块：Web「网关」页开关，或 `proxyd modules gateway on`。
 3. 登记设备：Web 页「登记设备」，或 `proxyd gateway devices add <名> <ip> [direct|proxy|group:<分组名>]`（策略缺省为 proxy）。设备表为空时网关不生效（零值配置不触碰系统）。
@@ -842,7 +842,7 @@ Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文�
 
 - Web「网关」页状态卡/预检卡，或 `proxyd gateway status` / `proxyd gateway precheck`。
 - 诊断中心（`proxyd diagnose`）含 gateway 步骤：平台支持性、helper 握手与协议版本、转发开关实际值、规则应用、redir 入口监听。
-- macOS helper 日志：`/var/log/com.proxyd.gateway-helper.log`；握手报版本不兼容时重新 `sudo proxyd gateway helper install`。
+- macOS helper 日志：`/var/log/com.proxyd.helper.log`；握手报版本不兼容时重新 `sudo proxyd helper install`。
 - Linux 报权限不足：确认 setcap 能力位是否在最近一次替换二进制后重设。
 - Linux UDP 不通：在网关状态中确认 `policy_routing=present`；诊断项 `gateway_policy_route` 会同时检查 fwmark 规则与 lo 本地路由，避免只装好其中一半时误报可用。
 
@@ -856,7 +856,7 @@ Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文�
 - **节点数多于端口数**：按延迟保留最快的一批，其余节点仍在主端口的 PROXY 选择组里可用。
 - **端口被占**：换 `port-range` / `mixed-port` / `auto-port` / `api-listen` / `external-controller`（分组端口同理）。
 - **异常退出后系统代理没恢复**：`proxyd sysproxy off` 手动关闭（正常退出会自动恢复）。
-- **proxyd stop 提示未在运行但进程还在**：异常退出可能留下过期 pid 文件，stop 会自动清理；确认进程残留时手动 kill。
+- **proxyd stop 提示未在运行但进程还在**：实例存活以 pid 文件上的文件锁判定，旧版本（无文件锁）运行的进程不受锁约束；确认进程残留时手动 kill，之后 stop/status 即恢复正常。
 - **重启后节点还在吗**：在。配置里有订阅/手动节点；`state-dir/nodes.json` 快照让启动即刻可用，`mapping.json` 保证端口不漂。
 
 

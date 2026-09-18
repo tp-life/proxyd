@@ -197,7 +197,8 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 
 	a.proxyLifecycle.Begin()
 	defer func() {
-		generation := a.proxyLifecycle.Begin()
+		// 收尾覆盖最终状态：期间 applyConfigLocked 可能已 Begin/Complete 过，
+		// 这里以当前世代直接提交最终结果，不再新增一次尝试计数。
 		phase, message := "running", ""
 		running := a.runner.Running()
 		if !running {
@@ -210,7 +211,7 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 				phase = "degraded"
 			}
 		}
-		a.proxyLifecycle.Complete(generation, phase, running, message, 0)
+		a.proxyLifecycle.CompleteCurrent(phase, running, message, 0)
 	}()
 	var nodes []*node.Node
 	if fetch {
@@ -336,7 +337,12 @@ func (a *App) Testing() bool {
 func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets ...string) {
 	a.testing.Store(true)
 	defer a.testing.Store(false)
-	pool.Check(ctx, nodes, a.cfg.HealthURL, a.cfg.HealthTimeout.D(), 32, a.cfg.StateDir, dialerTargets...)
+	a.mu.RLock()
+	healthURL := a.cfg.HealthURL
+	healthTimeout := a.cfg.HealthTimeout.D()
+	stateDir := a.cfg.StateDir
+	a.mu.RUnlock()
+	pool.Check(ctx, nodes, healthURL, healthTimeout, 32, stateDir, dialerTargets...)
 }
 
 // applyNodes 执行健康检测后的流水线尾部，并完成 mihomo 托管节点的二阶段验证。
@@ -374,7 +380,11 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 			mappable++
 		}
 	}
-	if capacity := a.cfg.Capacity(); mappable > capacity {
+	a.mu.RLock()
+	capacity := a.cfg.Capacity()
+	portLo, portHi := a.cfg.PortRange[0], a.cfg.PortRange[1]
+	a.mu.RUnlock()
+	if mappable > capacity {
 		log.Printf("[alloc] %d alive nodes exceed port capacity %d, keeping the fastest", mappable, capacity)
 	}
 
@@ -382,7 +392,7 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if err != nil {
 		log.Printf("[alloc] load snapshot: %v (ignored)", err)
 	}
-	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
+	assigns := pool.Allocate(alive, portLo, portHi, prev)
 	if err := a.regenerateLocked(assigns); err != nil {
 		return err
 	}
@@ -409,7 +419,7 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 			a.mu.Unlock()
 			return fmt.Errorf("all %d dialer-proxy candidates failed end-to-end health check", len(nodes))
 		}
-		assigns = pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
+		assigns = pool.Allocate(alive, portLo, portHi, prev)
 		if err := a.regenerateLocked(assigns); err != nil {
 			return err
 		}
@@ -481,14 +491,18 @@ func (a *App) ensureInteractiveTailscaleEnrollments(nodes []*node.Node) {
 // 因此保持“mihomo 已加载”候选状态，实际连接仍由 mihomo 按首次流量懒启动。
 func (a *App) verifyMihomoManagedNodes(ctx context.Context, nodes []*node.Node) bool {
 	availabilityChanged := false
+	a.mu.RLock()
+	healthURL := a.cfg.HealthURL
+	healthTimeout := a.cfg.HealthTimeout.D()
+	a.mu.RUnlock()
 	for _, n := range nodes {
 		if !needsMihomoRuntimeProbe(n) {
 			continue
 		}
 		// Tailscale 首次启动可能需要完成控制面登录与 DERP 协商；继续复用代理域的
 		// 隧道超时策略，避免迁移到正式 mihomo 运行态后退化为普通节点的短超时。
-		timeout := pool.ProbeTimeout(n, a.cfg.HealthTimeout.D())
-		delay, err := a.runner.URLTest(ctx, n.Name, a.cfg.HealthURL, timeout)
+		timeout := pool.ProbeTimeout(n, healthTimeout)
+		delay, err := a.runner.URLTest(ctx, n.Name, healthURL, timeout)
 		if err != nil {
 			n.Alive = false
 			n.Delay = 0

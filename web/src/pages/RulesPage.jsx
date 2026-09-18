@@ -86,13 +86,14 @@ export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, on
             if (await onPost("/api/rules", { rule: forms.rule.trim() }, "规则已添加")) onForm("rule", "");
           }}
         >
-          <Field label="规则内容" hint="格式由规则类型、匹配值和目标策略组成">
+          <Field label="规则内容">
             <input aria-label="自定义规则内容" className="mono-input" value={forms.rule} onChange={(event) => onForm("rule", event.target.value)} placeholder="DOMAIN-SUFFIX,example.com,DIRECT" />
           </Field>
           <Button className="form-submit" type="submit"><Plus size={16} aria-hidden="true" /><span>添加规则</span></Button>
+          <small className="rule-form-hint">格式由规则类型、匹配值和目标策略组成</small>
         </form>
         <div className="toolbar rule-toolbar">
-          <Field compact label="搜索自定义规则"><div className="input-with-icon"><Search size={15} aria-hidden="true" /><Input value={query} placeholder="类型、域名或策略" onChange={(event) => setQuery(event.target.value)} /></div></Field>
+          <Field compact label="搜索自定义规则"><div className="input-with-icon"><Search size={15} aria-hidden="true" /><Input className="h-9" value={query} placeholder="类型、域名或策略" onChange={(event) => setQuery(event.target.value)} /></div></Field>
           <Badge variant="outline">{visibleRules.length}/{(overview.custom_rules || []).length} 条</Badge>
         </div>
         <ul className="item-list rule-list">

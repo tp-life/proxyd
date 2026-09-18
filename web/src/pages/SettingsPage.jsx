@@ -54,6 +54,11 @@ export function SettingsPage({ onImportConfig, onPost, onRestart }) {
     if (saved) reload();
     return saved;
   }
+  /** 自启提示：开关本身即自启控制入口，不再提供额外关闭按钮；
+      仅已注册未运行且有错误（非零退出码）时展示错误信息。 */
+  const autostartRuntime = settings?.autostart_runtime;
+  const showAutostartError = Boolean(settings?.autostart) && !autostartRuntime?.running
+    && autostartRuntime?.last_exit_code != null && autostartRuntime.last_exit_code !== 0;
   return <div className="settings-layout">
     <PageHeader eyebrow="系统" title="通用设置" detail="管理 proxyd 的启动方式、版本检查和全部模块的配置备份。" />
     <SettingsJump sections={[{ id: "settings-startup", label: "启动与运行" }, { id: "settings-maintenance", label: "维护与备份" }]} />
@@ -64,7 +69,7 @@ export function SettingsPage({ onImportConfig, onPost, onRestart }) {
         <SettingTitle title="开机自启" detail="系统启动时自动运行 proxyd，保留各模块原有开关" help={SETTINGS_HELP.autostart} />
         <div className="setting-control switch-stack">
           <UISwitch disabled={!settings || Boolean(error)} checked={Boolean(settings?.autostart)} label="系统启动时自动启动 proxyd" onCheckedChange={(enabled) => saveSetting("/api/autostart", { enabled }, enabled ? "开机自启已开启" : "开机自启已关闭")} />
-          {settings?.autostart_runtime && <p role="status" className={classNames("permission-note", settings.autostart_runtime.running ? "ok" : "warn")}>{settings.autostart_runtime.message}</p>}
+          {showAutostartError && <p role="status" className="permission-note warn">{autostartRuntime.message}</p>}
           {!settings && !error && <p role="status" className="text-sm text-muted-foreground">正在读取系统设置…</p>}
         </div>
       </section></div>

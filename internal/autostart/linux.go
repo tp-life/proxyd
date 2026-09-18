@@ -43,7 +43,12 @@ func off() error {
 		return err
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		// 只有「文件不存在」才算未开启；权限等真实故障必须上报，
+		// 否则 unit 仍在却报告移除成功。
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
 	}
 	// 只 disable 不 --now：正在运行的实例继续跑，重启后不再拉起。
 	if _, err := run("systemctl", "--user", "disable", unitName); err != nil {
@@ -59,8 +64,13 @@ func status() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, err = os.Stat(path)
-	return err == nil, nil
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // RootDaemonPlistInstalled 在 Linux 上恒为 false（无 root LaunchDaemon 概念）。

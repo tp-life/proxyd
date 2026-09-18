@@ -85,6 +85,10 @@ func main() {
 		case "tun-helper":
 			// 内部子命令：macOS TUN 特权助手服务端，由 launchd 以 root 托管。
 			err = cmdTunHelperServe(os.Args[2:])
+		case "helper":
+			// 统一特权助手：install|uninstall|status 为用户入口；
+			// 无参（root）为 launchd 托管的服务端入口（plist 见 internal/privhelper）。
+			err = cmdHelper(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -188,9 +192,9 @@ usage:
   proxyd modules [-c 配置] list | proxy|remote|gateway on|off|retry  模块管理
   proxyd gateway [-c 配置] status|precheck   LAN 网关状态 / 启用前检查（helper/能力位指引）
   proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
-  proxyd gateway helper install|uninstall|status   （macOS）特权 helper 本地安装管理（需管理员授权）
+  proxyd helper install|uninstall|status   （macOS）统一特权助手本地安装管理（TUN 与 LAN 网关共用，需管理员授权）
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
-  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 管理 macOS 特权助手
+  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 为旧写法，已并入 proxyd helper
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
@@ -361,28 +365,35 @@ func firstRunGuide(configPath string) error {
 // CLI/桌面应用派生的 serve 也会带上，判定时不可靠。
 var stdoutIsTerminal = func() bool { return term.IsTerminal(int(os.Stdout.Fd())) }
 
-// ensureSingleInstance 防止重复启动 serve。
+// ensureSingleInstance 防止重复启动 serve：对 pid 文件加排他文件锁，
+// 锁随进程退出（含 kill -9/断电）由内核自动释放，不存在 stale pid 误判。
+// 启动早期即持锁，同时关闭「检查→登记」之间的并发启动窗口。
 //
 // 参数说明：
 //   - cfg: *config.Config，提供 pid 文件路径。
 //
 // 返回值说明：
-//   - bool：true 表示可以继续启动；false 表示已有活实例，本实例应退出。
+//   - *instanceLock：非 nil 表示本实例获得锁，必须持有到进程退出（defer release）；
+//     nil 表示已有活实例，本实例应退出。
 //   - error：前台终端场景下重复启动返回引导错误；后台/托管场景（stdout 非终端，
-//     如 launchd 重定向到日志文件）打印日志后返回 (false, nil)，调用方以退出码 0
+//     如 launchd 重定向到日志文件）打印日志后返回 (nil, nil)，调用方以退出码 0
 //     干净退出——plist 的 KeepAlive 仅崩溃拉起，不会因此重试，也不会产生双实例。
 //
-// 错误情况：仅前台重复启动返回错误；pid 文件损坏由 readPIDFile 按未运行处理。
-func ensureSingleInstance(cfg *config.Config) (bool, error) {
-	pid, alive := readPIDFile(pidPath(cfg))
-	if !alive {
-		return true, nil
+// 错误情况：仅前台重复启动或锁文件不可读写返回错误。
+func ensureSingleInstance(cfg *config.Config) (*instanceLock, error) {
+	lock, acquired, err := acquireInstanceLock(pidPath(cfg))
+	if err != nil {
+		return nil, fmt.Errorf("获取单实例锁失败: %w", err)
 	}
+	if acquired {
+		return lock, nil
+	}
+	pid, _ := readPIDFileContent(pidPath(cfg))
 	if stdoutIsTerminal() {
-		return false, fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
+		return nil, fmt.Errorf("proxyd 已在运行 (pid %d)，请先 proxyd stop", pid)
 	}
 	log.Printf("[proxyd] 已有实例在运行 (pid %d)，本实例退出以避免双实例", pid)
-	return false, nil
+	return nil, nil
 }
 
 // cmdServe 加载配置、启动本地 API 与 mihomo 调度器，并管理系统集成生命周期。
@@ -406,12 +417,17 @@ func cmdServe(args []string) error {
 		return err
 	}
 	log.Printf("[startup] pid=%d 状态目录检查完成，累计耗时=%s", os.Getpid(), time.Since(started))
-	proceed, err := ensureSingleInstance(cfg)
+	instanceLock, err := ensureSingleInstance(cfg)
 	if err != nil {
 		return err
 	}
-	if !proceed {
+	if instanceLock == nil {
 		return nil
+	}
+	defer instanceLock.release()
+	// 持锁后立即登记 pid（供 stop/status 定位），避免启动早期窗口内 stop 拿不到 pid。
+	if err := instanceLock.writePID(os.Getpid()); err != nil {
+		log.Printf("[proxyd] 写 pid 文件失败（不影响运行）: %v", err)
 	}
 	a, err := app.New(cfg, cfgPath)
 	if err != nil {
@@ -450,12 +466,7 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("start api on %s: %w", cfg.APIListen, err)
 	}
 	log.Printf("[startup] pid=%d API 已监听，累计耗时=%s", os.Getpid(), time.Since(started))
-	// 登记 pid 文件（供 stop/status/防重复启动），退出时清理
-	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
-		log.Printf("[proxyd] 写 pid 文件失败（不影响运行）: %v", err)
-	} else {
-		defer func() { _ = os.Remove(pidPath(cfg)) }()
-	}
+	// pid 文件随实例锁终身持有（见 ensureSingleInstance），退出由内核放锁，无需删除。
 	log.Printf("[proxyd] web 控制台: http://%s/", cfg.APIListen)
 	log.Printf("[proxyd] external controller: http://%s (可对接 metacubexd/yacd)", cfg.ExternalController)
 	log.Printf("[proxyd] 主端口(规则模式): %s:%d，节点映射区间: %d-%d",

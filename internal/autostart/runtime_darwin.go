@@ -103,7 +103,10 @@ func inspect() RuntimeStatus {
 	}
 	s := parseLaunchd(out)
 	s.Enabled = enabled
-	s.Message = "系统服务尚未运行：" + s.State
+	s.Message = "系统服务未在运行"
+	if text := launchdStateText(s.State); text != "未在运行" {
+		s.Message += "（" + text + "）"
+	}
 	if s.Running {
 		s.Message = fmt.Sprintf("系统托管进程运行中（PID %d）", s.PID)
 	}
@@ -114,4 +117,22 @@ func inspect() RuntimeStatus {
 		s.Message += "；自启已关闭，已加载服务保留至本次关机"
 	}
 	return s
+}
+
+// launchdStateText 把 launchd 原始状态映射为中文描述，避免向用户暴露英文枚举。
+// 参数：state 为 string，launchctl print 的 state 字段值。返回：string 中文描述。
+// 错误：无；未知值原样返回，便于发现 launchd 新增状态。
+func launchdStateText(state string) string {
+	switch state {
+	case "running":
+		return "运行中"
+	case "not running":
+		return "未在运行"
+	case "spawn scheduled":
+		return "已排队等待系统拉起"
+	case "unknown":
+		return "状态未知"
+	default:
+		return state
+	}
 }

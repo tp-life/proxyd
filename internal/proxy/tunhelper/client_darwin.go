@@ -41,7 +41,7 @@ func helperHandshake(encoder *json.Encoder, decoder *json.Decoder) error {
 	}
 	if ack.Version != helperProtocolVersion {
 		return fmt.Errorf(
-			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 proxyd tun helper install 升级 helper",
+			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 proxyd helper install 升级 helper",
 			helperProtocolVersion, ack.Version,
 		)
 	}
@@ -53,7 +53,7 @@ func helperDialChecked() (net.Conn, error) {
 	conn, err := helperDial()
 	if err != nil {
 		return nil, fmt.Errorf(
-			"无法连接 tun 特权 helper（%s）: %v；helper 未安装或未运行，请执行 proxyd tun helper install 安装: %w",
+			"无法连接 tun 特权 helper（%s）: %v；helper 未安装或未运行，请执行 proxyd helper install 安装: %w",
 			helperSocketPath, err, ErrHelperUnavailable,
 		)
 	}

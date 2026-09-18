@@ -80,11 +80,18 @@ func runPrivilegedInGUISession(shellScript string, account serviceAccount) error
 	deadline := time.Now().Add(elevateTimeout)
 	for {
 		if data, readErr := os.ReadFile(resultPath); readErr == nil {
-			if code, _ := strconv.Atoi(strings.TrimSpace(string(data))); code == 0 {
-				return nil
+			// wrapper 的 ">" 重定向先创建空文件、printf 再写入退出码；
+			// 空内容或不可解析表示写入尚未完成，继续轮询，绝不能把
+			// Atoi 失败的零值当作授权成功（会把失败误报为成功）。
+			if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+				if code, parseErr := strconv.Atoi(trimmed); parseErr == nil {
+					if code == 0 {
+						return nil
+					}
+					detail, _ := os.ReadFile(stderrPath)
+					return fmt.Errorf("管理员授权失败: %s", strings.TrimSpace(string(detail)))
+				}
 			}
-			detail, _ := os.ReadFile(stderrPath)
-			return fmt.Errorf("管理员授权失败: %s", strings.TrimSpace(string(detail)))
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("等待管理员授权超时（%v）：未检测到密码输入，授权窗口可能未弹出或被忽略；请改在「终端」中直接执行本命令，将改用 sudo 在终端内输入密码", elevateTimeout)

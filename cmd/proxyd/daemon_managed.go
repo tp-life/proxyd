@@ -56,6 +56,32 @@ func warnIfSystemServiceRespawned(stoppedPID int, wasManaged bool) {
 	}
 }
 
+// printAutostartGuidance 在「实例未运行」场景补充开机自启上下文与下一步指引，
+// 避免「刚开了开机自启却报未运行」的困惑：系统服务向独立实例让位是一次性的，
+// 独立实例停止后系统服务不会自动接管，需明确告知交回方式。
+//
+// 参数说明：无。
+//
+// 返回值说明：无；状态与指引直接打印到标准输出。
+//
+// 错误情况：自启未开启、服务未注册或运行态查询失败（非 darwin 恒为 unknown）时
+// 快照字段不足以下结论，静默跳过指引。
+func printAutostartGuidance() {
+	s := inspectService()
+	if !s.Enabled || !s.Loaded {
+		return
+	}
+	switch {
+	case s.Running:
+		fmt.Printf("开机自启：已开启，系统服务运行中 (pid %d)\n", s.PID)
+	case s.State == "spawn scheduled":
+		fmt.Println("开机自启：已开启，系统服务已排队等待拉起，稍后可再查 proxyd status")
+	default:
+		fmt.Println("开机自启：已开启（系统服务当前未运行）")
+		fmt.Println("      立即运行：proxyd start（独立进程）；交回系统服务：proxyd autostart on；否则下次开机自动拉起")
+	}
+}
+
 // reportAutostartServiceState 在 autostart on 后报告系统服务实际状态。
 // 独立实例占用 pidfile 时系统实例会按单实例守卫干净退出让位（ensureSingleInstance），
 // 必须明确告知接管方式，避免误以为开启失败。

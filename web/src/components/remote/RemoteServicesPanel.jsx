@@ -84,7 +84,7 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                 )}
               </form>
               <p className="mt-1 text-xs text-muted-foreground">
-                内嵌 SSH/SCP/Web 终端以该账户降权运行（当前：{status?.session_user || "未知"}）；proxyd 以 root 运行时必须设置为普通账户，否则内嵌 SSH 与 Web 终端拒绝开启（TUN 已改由 tun-helper 代劳，通常不再需要 root 运行 proxyd）。
+                内嵌 SSH/SCP/Web 终端以该账户降权运行（当前：{status?.session_user || "未知"}）；proxyd 以 root 运行时必须设置为普通账户，否则内嵌 SSH 与 Web 终端拒绝开启（TUN 已改由统一特权助手代劳，通常不再需要 root 运行 proxyd）。
               </p>
               {status?.web_terminal && status?.api_loopback === false && (
                 <p className="permission-note warn">

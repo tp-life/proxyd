@@ -13,21 +13,19 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"proxyd/internal/privhelper"
 )
 
 const (
-	// helperLabel 是 helper 的 launchd 服务标识。
-	helperLabel = "com.proxyd.gateway-helper"
-	// helperPlistPath 是 helper 的 LaunchDaemon plist 路径。
-	helperPlistPath = "/Library/LaunchDaemons/com.proxyd.gateway-helper.plist"
-	// helperOwnerUIDEnv 是安装链路经 plist 环境变量记录的属主 UID。
-	helperOwnerUIDEnv = "PROXYD_GATEWAY_OWNER_UID"
+	// legacyOwnerUIDEnv 是旧版独立 gateway-helper plist 记录的属主 UID 环境变量；
+	// 统一助手经 privhelper.OwnerUIDEnv 下发，本变量仅用于旧 plist 过渡期回退。
+	legacyOwnerUIDEnv = "PROXYD_GATEWAY_OWNER_UID"
 	// gatewayPFAnchor 是本模块独占的 pf anchor 名。
 	gatewayPFAnchor = "com.proxyd.gateway"
 	// gatewayAnchorFile 是 anchor 规则文件（root 所有，随 pfctl -a -f 载入）。
@@ -246,7 +244,8 @@ func buildGatewayPFConf(base string) string {
 	return base + reference
 }
 
-// helperOwnerUID 读取安装链路记录的属主 UID（plist 环境变量）。
+// helperOwnerUID 读取安装链路记录的属主 UID：优先统一助手变量
+// （privhelper.OwnerUIDEnv），回退旧版独立 gateway-helper 变量（旧 plist 过渡期）。
 //
 // 参数：无。
 //
@@ -256,15 +255,7 @@ func buildGatewayPFConf(base string) string {
 //
 // 错误情况：属主缺失意味着 helper 被手工/异常启动，直接拒绝服务。
 func helperOwnerUID() (int, error) {
-	raw := strings.TrimSpace(os.Getenv(helperOwnerUIDEnv))
-	if raw == "" {
-		return -1, fmt.Errorf("缺少属主记录（环境变量 %s）；请通过 proxyd gateway helper install 安装", helperOwnerUIDEnv)
-	}
-	uid, err := strconv.Atoi(raw)
-	if err != nil || uid < 0 {
-		return -1, fmt.Errorf("属主 UID %q 非法", raw)
-	}
-	return uid, nil
+	return privhelper.ResolveOwnerUID(os.Getenv, legacyOwnerUIDEnv, "proxyd helper install")
 }
 
 // listenHelperSocket 创建 helper 监听 socket：清掉残留文件、0600、chown 给属主。

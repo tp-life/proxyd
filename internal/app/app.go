@@ -88,6 +88,10 @@ type App struct {
 	proxyLifecycle       lifecycle.Tracker
 	remoteLifecycle      lifecycle.Tracker
 	gatewayLifecycle     lifecycle.Tracker
+	// cfg 是运行配置。可变字段的写必须持 a.mu 且在 refreshing/域事务锁内串行；
+	// StateDir、HealthURL、HealthTimeout 自 New 之后不再修改，允许只读路径免锁读取
+	// （如 snapshotPath、autostartOptions），新增配置项不得加入该不可变清单除非
+	// 确认无任何运行时写路径。
 	cfg                  *config.Config
 	cfgPath              string // 配置文件路径，配置变更时持久化；为空则不落盘
 	runner               *core.Runner
@@ -478,7 +482,7 @@ func (a *App) AutostartStatus() bool {
 func (a *App) AutostartRuntime() autostart.RuntimeStatus {
 	s := autostart.Inspect()
 	if s.Loaded && (!s.Running || s.PID != os.Getpid()) {
-		s.Message += "；当前控制台由独立实例提供"
+		s.Message += "；当前控制台由独立实例提供，重启后系统服务自动接管"
 	}
 	return s
 }
@@ -505,7 +509,7 @@ func (a *App) autostartOptions() (autostart.Options, error) {
 	if err != nil {
 		return autostart.Options{}, err
 	}
-	// TUN 已由 tun-helper 代劳 root 操作（docs/privilege-model.md 方案 B），
+	// TUN 已由统一特权助手代劳 root 操作（docs/adr/0004 方案 B 追述），
 	// 守护进程不再需要 root：自启项始终按注册账户降权运行。
 	return autostart.Options{Exe: exe, ConfigPath: cfgPath, StateDir: a.cfg.StateDir}, nil
 }

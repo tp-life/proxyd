@@ -4,6 +4,7 @@ package autostart
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,36 @@ func TestInspectReportsServiceState(t *testing.T) {
 	}
 	if s := Inspect(); s.State != "unloaded" || s.Loaded {
 		t.Fatalf("未识别服务缺失: %+v", s)
+	}
+}
+
+// TestInspectMessageText 验证未运行消息的中文组装：不暴露 launchd 英文状态，
+// spawn scheduled 给出排队语义，非零退出码保留修复指引。
+// 参数：t 为 *testing.T。返回：无。错误：消息文案不符合预期时失败。
+func TestInspectMessageText(t *testing.T) {
+	previous := queryLaunchd
+	defer func() { queryLaunchd = previous }()
+
+	// 干净停止：纯中文消息，不含英文 state。
+	queryLaunchd = func(...string) (string, error) {
+		return "system/com.proxyd = {\n state = not running\n }", nil
+	}
+	s := Inspect()
+	if s.Message != "系统服务未在运行" {
+		t.Fatalf("干净停止消息异常: %q", s.Message)
+	}
+	// 排队拉起：附中文状态说明。
+	queryLaunchd = func(...string) (string, error) {
+		return "system/com.proxyd = {\n state = spawn scheduled\n }", nil
+	}
+	if s = Inspect(); !strings.Contains(s.Message, "已排队等待系统拉起") {
+		t.Fatalf("排队状态应给中文说明: %q", s.Message)
+	}
+	// 非零退出：保留退出码与修复指引。
+	queryLaunchd = func(...string) (string, error) {
+		return "system/com.proxyd = {\n state = not running\n last exit code = 78: EX_CONFIG\n }", nil
+	}
+	if s = Inspect(); !strings.Contains(s.Message, "78") || !strings.Contains(s.Message, "autostart on") {
+		t.Fatalf("非零退出应保留修复指引: %q", s.Message)
 	}
 }

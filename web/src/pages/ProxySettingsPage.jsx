@@ -175,7 +175,7 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
                     ? overview.tun.helper.reachable
                       ? "TUN 特权助手已安装并可达（开启 TUN 无需 sudo）"
                       : `TUN 特权助手已安装但不可达${overview.tun.helper.detail ? `：${overview.tun.helper.detail}` : ""}`
-                    : "TUN 特权助手未安装：请在终端执行 proxyd tun helper install（一次性管理员授权）"}
+                    : "TUN 特权助手未安装：请在终端执行 proxyd helper install（一次性管理员授权）"}
                 </p>
               )}
             </div>

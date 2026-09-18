@@ -1,8 +1,8 @@
 package main
 
 // 代理域子命令：TUN 与 DNS 预设（tun/dns-preset）。
-// tun helper install|uninstall|status 是 macOS TUN 特权助手的本地安装管理，
-// 不经运行中实例的 API；隐藏子命令 `proxyd tun-helper` 由 launchd 以 root 托管。
+// `proxyd tun helper ...` 是 macOS 特权助手本地管理的旧写法，已并入
+// `proxyd helper install|uninstall|status`（见 helper.go），不经运行中实例的 API。
 
 import (
 	"bufio"
@@ -103,43 +103,15 @@ func cmdTun(args []string) error {
 	return nil
 }
 
-// cmdTunHelperLocal 处理 tun helper 安装管理子命令（install|uninstall|status）。
-// 安装/卸载是本地特权操作：终端 sudo 或管理员授权弹窗，不经 HTTP API。
+// cmdTunHelperLocal 是旧写法 `proxyd tun helper ...` 的兼容入口：
+// 统一特权助手后各模块共用同一助手，转发到 cmdHelper（proxyd helper ...）。
 //
 // 参数：args 为 []string，helper 之后的子命令参数；返回 error。
 //
 // 错误情况：非 macOS 平台返回不支持错误；授权拒绝或 launchctl 失败原样上报。
 func cmdTunHelperLocal(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("用法: proxyd tun helper install|uninstall|status（macOS TUN 特权助手的本地安装管理）")
-	}
-	switch args[0] {
-	case "install":
-		if err := tunhelper.Install(); err != nil {
-			return err
-		}
-		fmt.Println("tun-helper 已安装并启动（launchd 系统域常驻，root 运行；一次性授权，之后开启 TUN 无需 sudo）")
-		return nil
-	case "uninstall":
-		if err := tunhelper.Uninstall(); err != nil {
-			return err
-		}
-		fmt.Println("tun-helper 已卸载")
-		return nil
-	case "status":
-		status := tunhelper.InstalledStatus()
-		fmt.Printf("已安装: %s，已加载: %s，握手可达: %s\n",
-			onOffText(status.Installed), onOffText(status.Running), onOffText(status.Reachable))
-		if status.Detail != "" {
-			fmt.Printf("说明: %s\n", status.Detail)
-		}
-		if !status.Installed || !status.Running || !status.Reachable {
-			return fmt.Errorf("tun-helper 未就绪")
-		}
-		return nil
-	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd tun helper install|uninstall|status", args[0])
-	}
+	fmt.Println("提示：proxyd tun helper 已并入 proxyd helper（统一特权助手，TUN 与 LAN 网关共用）。")
+	return cmdHelper(args)
 }
 
 // cmdTunHelperServe 是 tun-helper 服务端入口（内部子命令 `proxyd tun-helper`，
@@ -166,17 +138,17 @@ func cmdTunHelperServe(_ []string) error {
 //
 // 错误情况：安装失败会打印原因，错误本身不向上替换原始 cause。
 func offerTunHelperInstall(cause error) bool {
-	if !isTerminal() || !strings.Contains(cause.Error(), "tun helper install") {
+	if !isTerminal() || !strings.Contains(cause.Error(), "helper install") {
 		return false
 	}
-	if !confirmPrompt("需要安装 TUN 特权助手 tun-helper（一次性管理员授权，密码在终端输入），现在安装？[Y/n] ") {
+	if !confirmPrompt("需要安装统一特权助手（TUN 与 LAN 网关共用，一次性管理员授权，密码在终端输入），现在安装？[Y/n] ") {
 		return false
 	}
 	if err := tunhelper.Install(); err != nil {
-		fmt.Printf("tun-helper 安装失败: %v\n", err)
+		fmt.Printf("统一特权助手安装失败: %v\n", err)
 		return false
 	}
-	fmt.Println("tun-helper 已安装，重试开启 TUN…")
+	fmt.Println("统一特权助手已安装，重试开启 TUN…")
 	return true
 }
 
