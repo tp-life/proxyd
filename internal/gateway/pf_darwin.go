@@ -39,7 +39,7 @@ func helperCall(op string, params any) (helperResponse, error) {
 	conn, err := helperDial()
 	if err != nil {
 		return helperResponse{}, fmt.Errorf(
-			"无法连接 gateway 特权 helper（%s）: %v；helper 未安装或未运行，请执行 sudo proxyd gateway helper install 安装（安装链路见 docs/adr/0003）: %w",
+			"无法连接 gateway 特权 helper（%s）: %v；helper 未安装或未运行，请执行 sudo proxyd helper install 安装（安装链路见 docs/adr/0003）: %w",
 			helperSocketPath, err, ErrHelperUnavailable,
 		)
 	}
@@ -62,7 +62,7 @@ func helperCall(op string, params any) (helperResponse, error) {
 	}
 	if ack.Version != helperProtocolVersion {
 		return helperResponse{}, fmt.Errorf(
-			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 sudo proxyd gateway helper install 升级 helper",
+			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 sudo proxyd helper install 升级 helper",
 			helperProtocolVersion, ack.Version,
 		)
 	}
@@ -164,9 +164,9 @@ func (helperRunner) DiagnoseGateway(_ context.Context) []DiagnosticCheck {
 	case err == nil:
 		steps = append(steps, DiagnosticCheck{ID: "gateway_helper", Status: "passed", Detail: "helper 握手正常，协议版本兼容", DurationMS: time.Since(start).Milliseconds()})
 	case strings.Contains(err.Error(), "版本不兼容"):
-		steps = append(steps, DiagnosticCheck{ID: "gateway_helper", Status: "failed", Detail: "helper 协议版本不兼容，请重新执行 proxyd gateway helper install", DurationMS: time.Since(start).Milliseconds()})
+		steps = append(steps, DiagnosticCheck{ID: "gateway_helper", Status: "failed", Detail: "helper 协议版本不兼容，请重新执行 proxyd helper install", DurationMS: time.Since(start).Milliseconds()})
 	default:
-		steps = append(steps, DiagnosticCheck{ID: "gateway_helper", Status: "failed", Detail: "helper 未安装或未运行，请执行 proxyd gateway helper install", DurationMS: time.Since(start).Milliseconds()})
+		steps = append(steps, DiagnosticCheck{ID: "gateway_helper", Status: "failed", Detail: "helper 未安装或未运行，请执行 proxyd helper install", DurationMS: time.Since(start).Milliseconds()})
 	}
 	resp, err := helperCall(helperOpForwardGet, nil)
 	if err != nil {

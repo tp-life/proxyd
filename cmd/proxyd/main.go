@@ -85,6 +85,10 @@ func main() {
 		case "tun-helper":
 			// 内部子命令：macOS TUN 特权助手服务端，由 launchd 以 root 托管。
 			err = cmdTunHelperServe(os.Args[2:])
+		case "helper":
+			// 统一特权助手：install|uninstall|status 为用户入口；
+			// 无参（root）为 launchd 托管的服务端入口（plist 见 internal/privhelper）。
+			err = cmdHelper(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -188,9 +192,9 @@ usage:
   proxyd modules [-c 配置] list | proxy|remote|gateway on|off|retry  模块管理
   proxyd gateway [-c 配置] status|precheck   LAN 网关状态 / 启用前检查（helper/能力位指引）
   proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
-  proxyd gateway helper install|uninstall|status   （macOS）特权 helper 本地安装管理（需管理员授权）
+  proxyd helper install|uninstall|status   （macOS）统一特权助手本地安装管理（TUN 与 LAN 网关共用，需管理员授权）
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
-  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 管理 macOS 特权助手
+  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 为旧写法，已并入 proxyd helper
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本

@@ -2,8 +2,8 @@ package app
 
 // 代理域：tun-helper（root 特权助手）编排 —— TUN 设备 fd 的申请、参数复算与运行时注入。
 //
-// 背景见 docs/privilege-model.md 方案 B：macOS 上 utun 创建、地址配置与路由写入需要
-// root，由 LaunchDaemon 托管的 com.proxyd.tun-helper 代劳；主进程恒以普通用户运行，
+// 背景见 docs/adr/0004 方案 B 追述：macOS 上 utun 创建、地址配置与路由写入需要
+// root，由 LaunchDaemon 托管的统一特权助手 com.proxyd.helper 代劳；主进程恒以普通用户运行，
 // 经 SCM_RIGHTS 取得 fd 后注入 mihomo 的 tun.file-descriptor（上游原生支持，fd 模式下
 // sing-tun 跳过设备创建/地址/路由）。fd 是纯运行时状态：不落盘、每次开启重新申请；
 // helper 不持有 fd 副本，主进程退出时内核随最后 fd 关闭自动销毁 utun 与关联路由。
@@ -98,7 +98,7 @@ func (a *App) ensureTUNFDLocked(cfg *config.Config) (int, bool, error) {
 	}
 	fd, ifName, err := requestTUNFD(tunCreateParams(cfg))
 	if err != nil {
-		return 0, false, fmt.Errorf("经 tun-helper 创建 TUN 设备失败（未安装可执行 proxyd tun helper install，一次性管理员授权）: %w", err)
+		return 0, false, fmt.Errorf("经统一特权助手创建 TUN 设备失败（未安装可执行 proxyd helper install，一次性管理员授权）: %w", err)
 	}
 	log.Printf("[app] TUN 设备已由 tun-helper 创建（%s, fd=%d）", ifName, fd)
 	a.tunFD = fd

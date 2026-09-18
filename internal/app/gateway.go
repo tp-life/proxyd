@@ -106,7 +106,7 @@ func (a *App) applyGatewayRuntime(cfg config.GatewayConfig) error {
 		return nil
 	case errors.Is(err, gateway.ErrHelperUnavailable):
 		// helper 缺失是可恢复状态：配置照常提交，装好后经重试/手动 Retry 收敛。
-		complete("degraded", false, "gateway helper 未安装或未运行：请执行 sudo proxyd gateway helper install 安装", 30*time.Second)
+		complete("degraded", false, "统一特权助手未安装或未运行：请执行 sudo proxyd helper install 安装", 30*time.Second)
 		return nil
 	default:
 		complete("failed", false, "网关转发规则应用失败: "+firstErrorLine(err.Error()), 30*time.Second)

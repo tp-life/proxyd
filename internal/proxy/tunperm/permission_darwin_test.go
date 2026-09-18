@@ -32,7 +32,7 @@ func TestCurrentStatusDarwin(t *testing.T) {
 	if status.Allowed {
 		t.Fatal("helper 不可达时普通用户不应允许")
 	}
-	if !strings.Contains(status.Hint, "proxyd tun helper install") {
+	if !strings.Contains(status.Hint, "proxyd helper install") {
 		t.Fatalf("指引应包含 helper 安装命令: %s", status.Hint)
 	}
 }

@@ -54,7 +54,7 @@ func cmdStart(args []string) error {
 	}
 	if os.Geteuid() == 0 {
 		fmt.Println("提示：sudo 启动将得到 root 实例，状态文件属主会随之变化，一般无需 sudo；")
-		fmt.Println("      TUN 无需 root 实例：proxyd tun helper install 安装特权助手后即可 proxyd tun on。")
+		fmt.Println("      TUN 无需 root 实例：proxyd helper install 安装统一特权助手后即可 proxyd tun on。")
 	}
 	warnBrokenSystemService()
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {
@@ -133,6 +133,10 @@ func cmdStop(args []string) error {
 				// 旧版 KeepAlive=true 下 launchd 会立刻拉起替代实例，稍等再观察。
 				time.Sleep(1500 * time.Millisecond)
 				warnIfSystemServiceRespawned(pid, true)
+			} else {
+				// 独立实例停掉后系统服务不会自动接管（让位是一次性的），
+				// 自启仍开启时给出交回指引，避免「自启开着却什么都没在跑」。
+				printAutostartGuidance()
 			}
 			return nil
 		}
@@ -202,6 +206,7 @@ func cmdStatus(args []string) error {
 	pid, alive := readPIDFile(pidPath(cfg))
 	if !alive {
 		fmt.Println("proxyd 未在运行")
+		printAutostartGuidance()
 		return nil
 	}
 	fmt.Printf("proxyd 运行中 (pid %d)\n", pid)

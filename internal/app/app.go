@@ -482,7 +482,7 @@ func (a *App) AutostartStatus() bool {
 func (a *App) AutostartRuntime() autostart.RuntimeStatus {
 	s := autostart.Inspect()
 	if s.Loaded && (!s.Running || s.PID != os.Getpid()) {
-		s.Message += "；当前控制台由独立实例提供"
+		s.Message += "；当前控制台由独立实例提供，重启后系统服务自动接管"
 	}
 	return s
 }
@@ -509,7 +509,7 @@ func (a *App) autostartOptions() (autostart.Options, error) {
 	if err != nil {
 		return autostart.Options{}, err
 	}
-	// TUN 已由 tun-helper 代劳 root 操作（docs/privilege-model.md 方案 B），
+	// TUN 已由统一特权助手代劳 root 操作（docs/adr/0004 方案 B 追述），
 	// 守护进程不再需要 root：自启项始终按注册账户降权运行。
 	return autostart.Options{Exe: exe, ConfigPath: cfgPath, StateDir: a.cfg.StateDir}, nil
 }

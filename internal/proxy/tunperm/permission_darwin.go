@@ -15,7 +15,7 @@ var helperReachable = func() bool {
 
 // currentStatus 检测 macOS 当前进程的 TUN 权限：root 直接允许（mihomo 自行创建
 // utun）；普通用户依赖 tun-helper（LaunchDaemon 常驻的 root 助手，经 SCM_RIGHTS
-// 回传设备 fd，见 docs/privilege-model.md 方案 B），helper 可达即允许。
+// 回传设备 fd，见 docs/adr/0004 方案 B 追述），helper 可达即允许。
 //
 // 参数：无。
 //
@@ -29,6 +29,6 @@ func currentStatus() Status {
 	}
 	return Status{
 		Platform: "macOS",
-		Hint:     "请执行 proxyd tun helper install 安装 TUN 特权助手（一次性管理员授权，之后无需 sudo）；或使用 sudo proxyd serve 以 root 运行",
+		Hint:     "请执行 proxyd helper install 安装统一特权助手（一次性管理员授权，之后无需 sudo）；或使用 sudo proxyd serve 以 root 运行",
 	}
 }

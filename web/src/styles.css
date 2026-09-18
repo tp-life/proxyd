@@ -1655,6 +1655,11 @@
     @apply mb-3 items-end justify-between border-t pt-4;
   }
 
+  /* 提示横跨表单整行，避免挂在输入框下方把底对齐的提交按钮顶偏。 */
+  .rule-form-hint {
+    @apply col-span-full -mt-1.5 text-[11px] leading-4 text-muted-foreground;
+  }
+
   .rule-toolbar .field {
     @apply min-w-[min(100%,420px)] flex-1;
   }

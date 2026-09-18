@@ -32,7 +32,9 @@ web/src/pages/<Module>Page.jsx + web/src/hooks/use<Module>Feed.js   控制台页
 现有模块：`proxy`（代理主功能，域服务在 `internal/proxy/{core,node,pool,subscribe,ruleurl,sysproxy,tunperm,tunhelper}`，
 编排文件以 `proxy_` 前缀命名）、`remote`（远程连接隧道）与 `gateway`（LAN 网关旁路由，域服务在
 `internal/gateway`，helper 换行 JSON 协议与白名单分发在 `helperproto.go`，macOS helper 服务端/安装在
-`helper_*_darwin.go`）。平台通用服务（`logbuf`/`autostart`/`updatecheck`）不属于任何模块。
+`helper_*_darwin.go`）。平台通用服务（`logbuf`/`autostart`/`updatecheck`/`privhelper`）不属于任何模块；
+`privhelper` 是 macOS 统一 root 特权助手（ADR 0004）：单 LaunchDaemon 同进程服务 tunhelper 与 gateway
+两个模块 socket，两模块的安装链路委托给它并在 init 注册各自的卸载清理。
 
 新增模块时按上表各层各加一个文件，不要塞进 proxy 的文件里。
 

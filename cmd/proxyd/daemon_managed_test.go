@@ -85,6 +85,38 @@ func TestWarnIfSystemServiceRespawned(t *testing.T) {
 	}
 }
 
+// TestPrintAutostartGuidance 验证「实例未运行」场景的自启上下文指引：
+// 自启关闭/查询失败静默，运行中报 PID，排队中提示稍候，注册未运行给出交回方式。
+// 参数：t 为 *testing.T。返回：无。错误：各分支输出不符合预期时失败。
+func TestPrintAutostartGuidance(t *testing.T) {
+	// 自启未开启：不追加任何指引。
+	stubInspect(t, autostart.RuntimeStatus{})
+	if out := captureStdout(t, printAutostartGuidance); out != "" {
+		t.Fatalf("自启关闭不应输出指引: %q", out)
+	}
+	// 已开启但运行态查询失败（Loaded=false）：不下结论。
+	stubInspect(t, autostart.RuntimeStatus{Enabled: true, State: "unknown"})
+	if out := captureStdout(t, printAutostartGuidance); out != "" {
+		t.Fatalf("查询失败不应输出指引: %q", out)
+	}
+	// 系统服务运行中：报告 PID。
+	stubInspect(t, autostart.RuntimeStatus{Enabled: true, Loaded: true, Running: true, PID: 4242, State: "running"})
+	if out := captureStdout(t, printAutostartGuidance); !strings.Contains(out, "4242") {
+		t.Fatalf("运行中应报告 PID: %q", out)
+	}
+	// 已排队：提示稍后自愈。
+	stubInspect(t, autostart.RuntimeStatus{Enabled: true, Loaded: true, State: "spawn scheduled"})
+	if out := captureStdout(t, printAutostartGuidance); !strings.Contains(out, "排队") {
+		t.Fatalf("排队中应提示稍候: %q", out)
+	}
+	// 已注册未运行：给出立即运行与交回方式。
+	stubInspect(t, autostart.RuntimeStatus{Enabled: true, Loaded: true, State: "not running"})
+	out := captureStdout(t, printAutostartGuidance)
+	if !strings.Contains(out, "proxyd start") || !strings.Contains(out, "autostart on") || !strings.Contains(out, "下次开机") {
+		t.Fatalf("注册未运行应给出完整指引: %q", out)
+	}
+}
+
 // TestReportAutostartServiceState 验证 autostart on 后的状态报告：独立实例占用时
 // 提示让位与接管方式，系统实例拉起时报 PID，都不可见时退化打印快照消息。
 // 参数：t 为 *testing.T。返回：无。错误：三种分支输出不符合预期时失败。
@@ -117,8 +149,8 @@ func TestReportAutostartServiceState(t *testing.T) {
 	}
 
 	// 无占用且系统实例未起：退化打印快照消息。
-	stubInspect(t, autostart.RuntimeStatus{Loaded: true, State: "spawn scheduled", Message: "系统服务尚未运行：spawn scheduled"})
-	if out := captureStdout(t, func() { reportAutostartServiceState(cfg) }); !strings.Contains(out, "spawn scheduled") {
+	stubInspect(t, autostart.RuntimeStatus{Loaded: true, State: "spawn scheduled", Message: "系统服务未在运行（已排队等待系统拉起）"})
+	if out := captureStdout(t, func() { reportAutostartServiceState(cfg) }); !strings.Contains(out, "已排队等待系统拉起") {
 		t.Fatalf("未运行时应打印快照消息: %q", out)
 	}
 }

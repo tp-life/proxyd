@@ -148,7 +148,7 @@ func TestEnsureAndReleaseTUNFD(t *testing.T) {
 	requestTUNFD = func(tunhelper.CreateTUNParams) (int, string, error) {
 		return -1, "", errors.New("dial failed")
 	}
-	if _, _, err := a.ensureTUNFDLocked(cfg); err == nil || !strings.Contains(err.Error(), "tun helper install") {
+	if _, _, err := a.ensureTUNFDLocked(cfg); err == nil || !strings.Contains(err.Error(), "helper install") {
 		t.Fatalf("申请失败应返回带安装指引的错误: %v", err)
 	}
 	if a.tunFD != 0 {

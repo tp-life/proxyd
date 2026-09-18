@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"proxyd/internal/autostart"
 )
 
 // newFakeDarwinOps 构造带 fake 命令/文件读写的执行能力，返回记录器。
@@ -164,74 +162,14 @@ func TestHelperUIDAuthorization(t *testing.T) {
 	}
 }
 
-func TestRenderHelperPlist(t *testing.T) {
-	plist := RenderHelperPlist("/usr/local/bin/proxyd", 501)
-	for _, want := range []string{
-		"<string>com.proxyd.gateway-helper</string>",
-		"<string>/usr/local/bin/proxyd</string>",
-		"<string>gateway-helper</string>",
-		"<key>PROXYD_GATEWAY_OWNER_UID</key>",
-		"<string>501</string>",
-		"<key>RunAtLoad</key>",
-		"<key>KeepAlive</key>",
-	} {
-		if !strings.Contains(plist, want) {
-			t.Errorf("plist 缺 %q:\n%s", want, plist)
-		}
-	}
-	// XML 转义。
-	escaped := RenderHelperPlist("/opt/a&b/proxyd", 501)
-	if !strings.Contains(escaped, "/opt/a&amp;b/proxyd") {
-		t.Error("路径未做 XML 转义")
-	}
-}
-
-func TestHelperInstallCommandSequence(t *testing.T) {
-	var got [][]string
-	orig := runPrivilegedCommands
-	runPrivilegedCommands = func(commands ...autostart.PrivilegedCommand) error {
-		for _, command := range commands {
-			got = append(got, append([]string{command.Name}, command.Args...))
-		}
-		return nil
-	}
-	defer func() { runPrivilegedCommands = orig }()
-
-	if err := HelperInstall(); err != nil {
-		t.Fatalf("HelperInstall: %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("命令数 = %d: %v", len(got), got)
-	}
-	if got[0][0] != "/usr/bin/install" || got[0][len(got[0])-1] != helperPlistPath {
-		t.Errorf("install 命令异常: %v", got[0])
-	}
-	if got[1][0] != "/bin/launchctl" || got[1][1] != "bootout" {
-		t.Errorf("bootout 命令异常: %v", got[1])
-	}
-	if got[2][0] != "/bin/launchctl" || got[2][1] != "bootstrap" {
-		t.Errorf("bootstrap 命令异常: %v", got[2])
-	}
-}
-
-func TestHelperUninstallSequenceRestoresForward(t *testing.T) {
-	var got [][]string
-	orig := runPrivilegedCommands
-	runPrivilegedCommands = func(commands ...autostart.PrivilegedCommand) error {
-		for _, command := range commands {
-			got = append(got, append([]string{command.Name}, command.Args...))
-		}
-		return nil
-	}
-	defer func() { runPrivilegedCommands = orig }()
-
-	if err := HelperUninstall(); err != nil {
-		t.Fatalf("HelperUninstall: %v", err)
-	}
-	joined := fmt.Sprint(got)
-	for _, want := range []string{"bootout", "pfctl", helperPlistPath, helperSocketPath, gatewayAnchorFile} {
+// TestHelperUninstallCleanupCommands 验证注册到统一助手的卸载清理链：
+// 清 pf anchor、删除 socket/anchor/状态文件。
+// 参数：t 为 *testing.T。返回：无。错误：清理项缺失时失败。
+func TestHelperUninstallCleanupCommands(t *testing.T) {
+	joined := fmt.Sprint(helperUninstallCleanupCommands())
+	for _, want := range []string{"pfctl", helperSocketPath, helperForwardOrigPath, gatewayAnchorFile, gatewayCombinedPFConf} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("卸载命令缺 %q: %v", want, got)
+			t.Errorf("卸载清理缺 %q: %s", want, joined)
 		}
 	}
 }

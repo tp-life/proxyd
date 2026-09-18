@@ -49,43 +49,15 @@ func cmdGateway(args []string) error {
 	}
 }
 
-// cmdGatewayHelperLocal 处理 helper 安装管理子命令（install|uninstall|status）。
-// 安装/卸载是本地特权操作：需要 root（sudo）或经管理员授权弹窗，不经 HTTP API。
+// cmdGatewayHelperLocal 是旧写法 `proxyd gateway helper ...` 的兼容入口：
+// 统一特权助手后各模块共用同一助手，转发到 cmdHelper（proxyd helper ...）。
 //
 // 参数：args 为 []string，helper 之后的子命令参数；返回 error。
 //
 // 错误情况：非 macOS 平台返回不支持错误；授权拒绝或 launchctl 失败原样上报。
 func cmdGatewayHelperLocal(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("用法: proxyd gateway helper install|uninstall|status（macOS 特权 helper 的本地安装管理）")
-	}
-	switch args[0] {
-	case "install":
-		if err := gateway.HelperInstall(); err != nil {
-			return err
-		}
-		fmt.Println("gateway helper 已安装并启动（launchd 系统域常驻，root 运行）")
-		return nil
-	case "uninstall":
-		if err := gateway.HelperUninstall(); err != nil {
-			return err
-		}
-		fmt.Println("gateway helper 已卸载（pf 规则已清除，IPv4 转发恢复原值）")
-		return nil
-	case "status":
-		status := gateway.HelperInstalledStatus()
-		fmt.Printf("已安装: %s，已加载: %s，握手可达: %s\n",
-			onOffText(status.Installed), onOffText(status.Running), onOffText(status.Reachable))
-		if status.Detail != "" {
-			fmt.Printf("说明: %s\n", status.Detail)
-		}
-		if !status.Installed || !status.Running || !status.Reachable {
-			return fmt.Errorf("helper 未就绪")
-		}
-		return nil
-	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd gateway helper install|uninstall|status", args[0])
-	}
+	fmt.Println("提示：proxyd gateway helper 已并入 proxyd helper（统一特权助手，LAN 网关与 TUN 共用）。")
+	return cmdHelper(args)
 }
 
 // cmdGatewayHelperServe 是 helper 服务端入口（内部子命令 `proxyd gateway-helper`，

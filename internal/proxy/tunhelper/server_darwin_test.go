@@ -8,13 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"proxyd/internal/autostart"
 
 	"golang.org/x/sys/unix"
 )
@@ -217,120 +212,17 @@ func TestHelperUIDAuthorization(t *testing.T) {
 	}
 }
 
-func TestRenderHelperPlist(t *testing.T) {
-	plist := RenderHelperPlist("/usr/local/bin/proxyd", 501)
-	for _, want := range []string{
-		"<string>com.proxyd.tun-helper</string>",
-		"<string>/usr/local/bin/proxyd</string>",
-		"<string>tun-helper</string>",
-		"<key>PROXYD_TUN_OWNER_UID</key>",
-		"<string>501</string>",
-		"<key>RunAtLoad</key>",
-		"<key>KeepAlive</key>",
-		"/var/log/com.proxyd.tun-helper.log",
-	} {
-		if !strings.Contains(plist, want) {
-			t.Errorf("plist 缺 %q:\n%s", want, plist)
-		}
-	}
-	// XML 转义。
-	escaped := RenderHelperPlist("/opt/a&b/proxyd", 501)
-	if !strings.Contains(escaped, "/opt/a&amp;b/proxyd") {
-		t.Error("路径未做 XML 转义")
-	}
-}
-
-// TestRenderHelperPlistPassesPlutil 使用 macOS 原生解析器验证 plist（仿 autostart darwin_test.go）。
-func TestRenderHelperPlistPassesPlutil(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "com.proxyd.tun-helper.plist")
-	if err := os.WriteFile(path, []byte(RenderHelperPlist("/usr/local/bin/proxyd", 501)), 0o600); err != nil {
-		t.Fatalf("写入 plist 测试文件失败: %v", err)
-	}
-	if output, err := exec.Command("/usr/bin/plutil", "-lint", path).CombinedOutput(); err != nil {
-		t.Fatalf("plutil 拒绝 tun-helper plist: %v: %s", err, strings.TrimSpace(string(output)))
-	}
-}
-
-func TestHelperInstallOwnerUID(t *testing.T) {
-	getenv := func(env map[string]string) func(string) string {
-		return func(key string) string { return env[key] }
-	}
-	// sudo 提权场景：取 SUDO_UID（真实登录用户）。
-	if uid := helperInstallOwnerUID(0, getenv(map[string]string{"SUDO_UID": "501"}), 0); uid != 501 {
-		t.Errorf("sudo 场景属主 = %d, want 501", uid)
-	}
-	// sudo 但 SUDO_UID 缺失/非法：回退当前 UID。
-	if uid := helperInstallOwnerUID(0, getenv(nil), 0); uid != 0 {
-		t.Errorf("缺 SUDO_UID 应回退: %d", uid)
-	}
-	if uid := helperInstallOwnerUID(0, getenv(map[string]string{"SUDO_UID": "abc"}), 0); uid != 0 {
-		t.Errorf("非法 SUDO_UID 应回退: %d", uid)
-	}
-	// 非 root 直接运行：忽略 SUDO_UID，取当前 UID。
-	if uid := helperInstallOwnerUID(501, getenv(map[string]string{"SUDO_UID": "1"}), 501); uid != 501 {
-		t.Errorf("非 root 场景属主 = %d, want 501", uid)
-	}
-}
-
-func TestInstallCommandSequence(t *testing.T) {
-	var got []autostart.PrivilegedCommand
-	orig := runPrivilegedCommands
-	runPrivilegedCommands = func(commands ...autostart.PrivilegedCommand) error {
-		got = append(got, commands...)
-		return nil
-	}
-	defer func() { runPrivilegedCommands = orig }()
-
-	if err := Install(); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("命令数 = %d: %v", len(got), got)
-	}
-	if got[0].Name != "/usr/bin/install" || got[0].Args[len(got[0].Args)-1] != helperPlistPath {
-		t.Errorf("install 命令异常: %+v", got[0])
-	}
-	if got[1].Name != "/bin/launchctl" || got[1].Args[0] != "bootout" || !got[1].IgnoreError {
-		t.Errorf("bootout 命令异常: %+v", got[1])
-	}
-	if got[2].Name != "/bin/launchctl" || got[2].Args[0] != "bootstrap" {
-		t.Errorf("bootstrap 命令异常: %+v", got[2])
-	}
-}
-
-func TestUninstallSequence(t *testing.T) {
-	var got []autostart.PrivilegedCommand
-	orig := runPrivilegedCommands
-	runPrivilegedCommands = func(commands ...autostart.PrivilegedCommand) error {
-		got = append(got, commands...)
-		return nil
-	}
-	defer func() { runPrivilegedCommands = orig }()
-
-	if err := Uninstall(); err != nil {
-		t.Fatalf("Uninstall: %v", err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("命令数 = %d: %v", len(got), got)
-	}
-	if got[0].Args[0] != "bootout" || !got[0].IgnoreError {
-		t.Errorf("bootout 命令异常: %+v", got[0])
-	}
-	joined := fmt.Sprint(got)
-	for _, want := range []string{helperPlistPath, helperSocketPath} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("卸载命令缺 %q: %v", want, got)
-		}
-	}
-}
-
 func TestInstalledStatusUnreachable(t *testing.T) {
 	origDial := helperDial
 	helperDial = func() (net.Conn, error) { return nil, fmt.Errorf("dial unix: no such file") }
 	defer func() { helperDial = origDial }()
-	origRun := helperRun
-	helperRun = func(string, ...string) (string, error) { return "", fmt.Errorf("no such service") }
-	defer func() { helperRun = origRun }()
+	origInstalled, origRunning, origLegacy := privhelperInstalled, privhelperRunning, privhelperLegacyInstalled
+	privhelperInstalled = func() bool { return false }
+	privhelperRunning = func() bool { return false }
+	privhelperLegacyInstalled = func() bool { return false }
+	defer func() {
+		privhelperInstalled, privhelperRunning, privhelperLegacyInstalled = origInstalled, origRunning, origLegacy
+	}()
 
 	status := InstalledStatus()
 	if status.Reachable || status.Running {
@@ -338,5 +230,25 @@ func TestInstalledStatusUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(status.Detail, "install") {
 		t.Errorf("Detail 应含安装指引: %q", status.Detail)
+	}
+}
+
+// TestInstalledStatusLegacyMigration 验证旧版独立 helper 残留时给出迁移指引。
+// 参数：t 为 *testing.T。返回：无。错误：未识别残留或 Detail 缺指引时失败。
+func TestInstalledStatusLegacyMigration(t *testing.T) {
+	origDial := helperDial
+	helperDial = func() (net.Conn, error) { return nil, fmt.Errorf("dial unix: no such file") }
+	defer func() { helperDial = origDial }()
+	origInstalled, origRunning, origLegacy := privhelperInstalled, privhelperRunning, privhelperLegacyInstalled
+	privhelperInstalled = func() bool { return false }
+	privhelperRunning = func() bool { return false }
+	privhelperLegacyInstalled = func() bool { return true }
+	defer func() {
+		privhelperInstalled, privhelperRunning, privhelperLegacyInstalled = origInstalled, origRunning, origLegacy
+	}()
+
+	status := InstalledStatus()
+	if !strings.Contains(status.Detail, "旧版") || !strings.Contains(status.Detail, "helper install") {
+		t.Errorf("旧版残留应给出迁移指引: %q", status.Detail)
 	}
 }

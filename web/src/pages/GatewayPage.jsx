@@ -138,7 +138,7 @@ export function GatewayPage({ overview, precheck, groups, loading, refreshing, e
             </p>
             {precheck.detail && <p className={precheck.ready ? "text-muted-foreground" : ""}>{precheck.detail}</p>}
             {!precheck.ready && precheck.supported && precheck.platform === "darwin" && (
-              <p className="text-muted-foreground">安装是本地特权操作，请在终端执行：sudo proxyd gateway helper install</p>
+              <p className="text-muted-foreground">安装是本地特权操作，请在终端执行：sudo proxyd helper install</p>
             )}
           </div>
         ) : (
