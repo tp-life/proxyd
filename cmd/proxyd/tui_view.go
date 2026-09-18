@@ -1,8 +1,8 @@
 package main
 
-// 本文件集中实现只读 TUI 的视觉系统与八个数据视图。
-// 所有布局都由当前终端尺寸即时计算，窄窗口会压缩列或改为纵向卡片，
-// 不会因为展示空间不足而改变、筛选或写回后端数据。
+// 本文件集中实现交互式 TUI 的视觉系统与十个数据视图。
+// 所有布局都由当前终端尺寸即时计算，窄窗口会压缩列或改为纵向卡片；
+// 快照渲染只读，写操作仅由显式按键经 Web 控制台同源 API 触发（见 tui_actions.go）。
 
 import (
 	"fmt"
@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"proxyd/internal/api"
+	"proxyd/internal/app"
 )
 
 // TUI 色板以深蓝黑为底，青色表示健康，琥珀色表示注意，红色表示错误。
@@ -55,9 +56,9 @@ type tuiStat struct {
 	Accent color.Color
 }
 
-// View 将当前模型渲染为全屏只读终端视图。
+// View 将当前模型渲染为全屏交互终端视图。
 //
-// 参数说明：无；布局读取模型中的窗口尺寸、当前页、滚动位置和数据快照。
+// 参数说明：无；布局读取模型中的窗口尺寸、当前页、滚动位置、光标和数据快照。
 //
 // 返回值说明：tea.View，启用 alternate screen 并设置终端标题与背景色。
 //
@@ -66,21 +67,38 @@ func (m tuiModel) View() tea.View {
 	width := max(38, m.width-2)
 	header := m.renderHeader(width)
 	tabs := m.renderTabs(width)
-	footer := m.renderFooter(width)
 
 	notice := ""
 	if len(m.warnings) > 0 {
 		notice = lipgloss.NewStyle().Foreground(tuiAmber).Render("△ "+joinTUIWarnings(m.warnings, max(12, width-3))) + "\n"
 	}
-
-	page := m.renderCurrentPage(width)
-	if m.showHelp {
-		page = m.renderHelp(width)
+	if m.actionNote != "" {
+		noteColor, noteIcon := tuiCyan, "✓ "
+		if m.actionErr {
+			noteColor, noteIcon = tuiRed, "✗ "
+		}
+		notice += lipgloss.NewStyle().Foreground(noteColor).Render(noteIcon+truncateTUIText(m.actionNote, max(12, width-3))) + "\n"
 	}
+
 	bodyHeight := m.bodyHeight()
-	visible := visibleTUILines(page, m.scroll, bodyHeight)
+	page, cursorLine := m.renderCurrentPage(width)
+	scroll := m.scroll
+	switch {
+	case m.showHelp:
+		page = m.renderHelp(width)
+		scroll = min(scroll, max(0, lipgloss.Height(page)-bodyHeight))
+	case m.confirm != nil:
+		page = m.renderConfirm(width, bodyHeight)
+		scroll = 0
+	default:
+		// 可选中页让滚动自动跟随光标，保证光标行落在可见区。
+		scroll = m.followCursor(cursorLine, bodyHeight)
+	}
+	maximum := max(0, lipgloss.Height(page)-bodyHeight)
+	visible := visibleTUILines(page, scroll, bodyHeight)
 	visible += strings.Repeat("\n", max(0, bodyHeight-lipgloss.Height(visible)))
 
+	footer := m.renderFooter(width, scroll, maximum)
 	content := header + "\n" + tabs + "\n" + notice + visible + "\n" + footer
 	shell := lipgloss.NewStyle().
 		Background(tuiBackground).
@@ -91,13 +109,34 @@ func (m tuiModel) View() tea.View {
 
 	view := tea.NewView(shell)
 	view.AltScreen = true
-	view.WindowTitle = "proxyd · 只读实时控制台"
+	view.WindowTitle = "proxyd · 实时控制台"
 	view.BackgroundColor = tuiBackground
 	view.ForegroundColor = tuiText
 	return view
 }
 
-// bodyHeight 计算页面内容在固定头部、导航、通知和底栏之间可用的行数。
+// followCursor 计算保证光标行可见的滚动偏移。
+//
+// 参数说明：
+//   - cursorLine: int，光标行在完整页面内容中的绝对行号（-1 表示纯滚动页）。
+//   - bodyHeight: int，当前可见区域行数。
+//
+// 返回值说明：int，滚动偏移；光标在可见区内时保持原值，否则贴边跟随并夹紧到 maxScroll。
+//
+// 错误情况：无；纯滚动页原样返回当前滚动值。
+func (m tuiModel) followCursor(cursorLine, bodyHeight int) int {
+	scroll := m.scroll
+	if cursorLine >= 0 {
+		if cursorLine < scroll {
+			scroll = cursorLine
+		} else if bottom := scroll + bodyHeight - 1; cursorLine > bottom {
+			scroll = cursorLine - bodyHeight + 1
+		}
+	}
+	return min(scroll, m.maxScroll())
+}
+
+// bodyHeight 计算页面内容在固定头部、导航、通知、反馈和底栏之间可用的行数。
 //
 // 参数说明：无。
 //
@@ -105,10 +144,13 @@ func (m tuiModel) View() tea.View {
 //
 // 错误情况：无；过小的终端高度通过下限保护处理。
 func (m tuiModel) bodyHeight() int {
-	// 页头、一级导航和底栏各占一行；告警存在时再为其保留一行。
+	// 页头、一级导航和底栏各占一行；告警与动作反馈存在时再各为其保留一行。
 	// 这里按真实物理高度计算，确保底栏始终贴近终端底部且不会留下无意义空区。
 	chromeHeight := 3
 	if len(m.warnings) > 0 {
+		chromeHeight++
+	}
+	if m.actionNote != "" {
 		chromeHeight++
 	}
 	return max(3, m.height-chromeHeight)
@@ -123,14 +165,14 @@ func (m tuiModel) bodyHeight() int {
 // 错误情况：无；未加载数据时空状态同样可测量。
 func (m tuiModel) maxScroll() int {
 	width := max(38, m.width-2)
-	page := m.renderCurrentPage(width)
+	page, _ := m.renderCurrentPage(width)
 	if m.showHelp {
 		page = m.renderHelp(width)
 	}
 	return max(0, lipgloss.Height(page)-m.bodyHeight())
 }
 
-// renderHeader 渲染品牌、只读标识、连接状态与最近更新时间。
+// renderHeader 渲染品牌、在线标识、待重启徽标与最近更新时间。
 //
 // 参数说明：
 //   - width: int，当前可用内容宽度。
@@ -147,13 +189,16 @@ func (m tuiModel) renderHeader(width int) string {
 	statusLabel := "连接中"
 	statusColor := tuiAmber
 	if m.overview != nil {
-		statusLabel = "实时只读"
+		statusLabel = "在线"
 		statusColor = tuiCyan
 	} else if m.lastError != "" {
 		statusLabel = "实例离线"
 		statusColor = tuiRed
 	}
 	status := renderTUIPill(statusLabel, statusColor)
+	if m.system != nil && m.system.PendingRestart {
+		status += " " + renderTUIPill("待重启", tuiAmber)
+	}
 	updated := ""
 	if !m.lastUpdated.IsZero() && width >= 80 {
 		updated = lipgloss.NewStyle().Foreground(tuiMuted).Render("更新 " + m.lastUpdated.Format("15:04:05"))
@@ -166,7 +211,7 @@ func (m tuiModel) renderHeader(width int) string {
 	return brand + subtitle + gap + right
 }
 
-// renderTabs 渲染八个一级视图及数字快捷键。
+// renderTabs 渲染十个一级视图及数字快捷键（第 10 页显示为 0）。
 //
 // 参数说明：
 //   - width: int，当前可用内容宽度。
@@ -180,7 +225,7 @@ func (m tuiModel) renderTabs(width int) string {
 	}
 	parts := make([]string, 0, len(tuiTabs))
 	for index, tab := range tuiTabs {
-		label := fmt.Sprintf("%d %s", index+1, tab.Short)
+		label := fmt.Sprintf("%d %s", (index+1)%10, tab.Short)
 		style := lipgloss.NewStyle().Padding(0, 1).Foreground(tuiMuted)
 		if tuiPage(index) == m.page {
 			style = style.Bold(true).Foreground(tuiBackground).Background(tuiBlue)
@@ -209,24 +254,26 @@ func (m tuiModel) renderCompactTabs() string {
 	return lipgloss.NewStyle().Bold(true).Foreground(tuiBlue).Render(label)
 }
 
-// renderFooter 渲染键盘帮助、加载状态与滚动进度。
+// renderFooter 渲染按页上下文快捷键提示、动作状态与滚动进度。
 //
 // 参数说明：
 //   - width: int，当前可用内容宽度。
+//   - scroll: int，实际生效的滚动偏移（可选中页为跟随光标后的值）。
+//   - maximum: int，当前页最大滚动偏移。
 //
 // 返回值说明：string，适配宽度的单行底栏。
 //
-// 错误情况：无；页面不可滚动时不显示百分比。
-func (m tuiModel) renderFooter(width int) string {
-	leftText := "h/l 切换  j/k 滚动  r 刷新  ? 帮助  q 退出"
-	if width < 72 {
-		leftText = "h/l 页  j/k 滚  r 刷新  ? 帮助  q 退出"
-	}
-	rightText := "只读"
-	if m.loading {
+// 错误情况：无；页面不可滚动且无动作时不显示右侧状态。
+func (m tuiModel) renderFooter(width, scroll, maximum int) string {
+	leftText := m.footerHints(width)
+	rightText := ""
+	switch {
+	case m.actionBusy:
+		rightText = "执行中: " + m.actionLabel
+	case m.loading:
 		rightText = "刷新中…"
-	} else if maximum := m.maxScroll(); maximum > 0 {
-		rightText = fmt.Sprintf("%d%%", min(100, m.scroll*100/maximum))
+	case maximum > 0:
+		rightText = fmt.Sprintf("%d%%", min(100, scroll*100/maximum))
 	}
 	// 最窄支持宽度下也为右侧状态预留完整空间；只截断无状态的快捷键提示，
 	// 防止超宽底栏让终端自动换行并覆盖上一行内容。
@@ -237,17 +284,58 @@ func (m tuiModel) renderFooter(width int) string {
 	return left + gap + right
 }
 
-// renderCurrentPage 根据当前导航状态分派到对应的只读页面渲染器。
+// footerHints 返回按当前页上下文变化的底栏快捷键提示。
+//
+// 参数说明：
+//   - width: int，当前可用内容宽度；窄终端返回精简版。
+//
+// 返回值说明：string，导航 + 页级行操作 + 全局操作的单行提示。
+//
+// 错误情况：无；纯滚动页没有行操作时只保留导航与全局操作。
+func (m tuiModel) footerHints(width int) string {
+	move := "j/k 滚动"
+	if m.pageSelectable() {
+		move = "j/k 选择"
+	}
+	row := ""
+	switch m.page {
+	case tuiPageOverview:
+		row = "enter 重试 space 启停  "
+	case tuiPageNodes:
+		row = "enter 主出口 a 选优 d 删手动  "
+	case tuiPageSubscriptions:
+		row = "enter 刷新 e 启停  "
+	case tuiPageConnections:
+		row = "x 关闭 X 全关  "
+	case tuiPageRemote:
+		row = "space 启停转发  "
+	case tuiPageGateway:
+		row = "e 开关网关  "
+	case tuiPageDesktop:
+		row = "x 关闭会话  "
+	}
+	if width < 72 {
+		if row != "" {
+			row = strings.TrimRight(row, " ") + "  "
+		}
+		return "h/l 页  " + row + "m/s/u/R/t  ? 帮助  q 退出"
+	}
+	return "h/l 切页  " + move + "  " + row + "m 模式  s 系代  u TUN  R 刷新  t 测速  ? 帮助  q 退出"
+}
+
+// renderCurrentPage 根据当前导航状态分派到对应的页面渲染器。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，完整但尚未按滚动位置裁切的页面内容。
+// 返回值说明：
+//   - string：完整但尚未按滚动位置裁切的页面内容。
+//   - int：光标行在完整内容中的绝对行号；纯滚动页与空状态返回 -1。
 //
 // 错误情况：无；未知页码回退到运行概览。
-func (m tuiModel) renderCurrentPage(width int) string {
+func (m tuiModel) renderCurrentPage(width int) (string, int) {
 	if m.overview == nil {
-		return m.renderEmptyState(width)
+		return m.renderEmptyState(width), -1
 	}
 	switch m.page {
 	case tuiPageNodes:
@@ -255,15 +343,19 @@ func (m tuiModel) renderCurrentPage(width int) string {
 	case tuiPageSubscriptions:
 		return m.renderSubscriptionsPage(width)
 	case tuiPagePorts:
-		return m.renderPortsPage(width)
+		return m.renderPortsPage(width), -1
 	case tuiPageRules:
-		return m.renderRulesPage(width)
+		return m.renderRulesPage(width), -1
 	case tuiPageConnections:
 		return m.renderConnectionsPage(width)
 	case tuiPageRemote:
 		return m.renderRemotePage(width)
+	case tuiPageGateway:
+		return m.renderGatewayPage(width), -1
+	case tuiPageDesktop:
+		return m.renderDesktopPage(width)
 	case tuiPageLogs:
-		return m.renderLogsPage(width)
+		return m.renderLogsPage(width), -1
 	default:
 		return m.renderOverviewPage(width)
 	}
@@ -288,22 +380,29 @@ func (m tuiModel) renderEmptyState(width int) string {
 	return renderTUIPanel(width, title, detail, body)
 }
 
-// renderOverviewPage 渲染运行摘要、有效路由、系统开关和版本状态。
+// renderOverviewPage 渲染运行摘要、有效路由、系统开关、版本状态与模块状态表。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，由自适应统计卡与详情面板组成。
+// 返回值说明：
+//   - string：由自适应统计卡与详情面板组成的内容。
+//   - int：光标行（模块状态表）在完整内容中的绝对行号；无模块数据时返回 -1。
 //
-// 错误情况：无；节点或版本字段缺失时使用保守占位文本。
-func (m tuiModel) renderOverviewPage(width int) string {
+// 错误情况：无；节点、版本或系统字段缺失时使用保守占位文本。
+func (m tuiModel) renderOverviewPage(width int) (string, int) {
 	overview := m.overview
 	alive := countTUIAliveNodes(overview.Nodes)
 	ready := alive > 0 && overview.MixedPort > 0
 	status := "需要检查"
 	statusDetail := "当前没有健康出口"
 	statusColor := tuiAmber
-	if ready {
+	switch {
+	case overview.Testing:
+		status = "测速中"
+		statusDetail = "节点健康检测进行中"
+		statusColor = tuiBlue
+	case ready:
 		status = "代理已就绪"
 		statusDetail = fmt.Sprintf("主入口 127.0.0.1:%d", overview.MixedPort)
 		statusColor = tuiCyan
@@ -341,44 +440,65 @@ func (m tuiModel) renderOverviewPage(width int) string {
 	if overview.Version.Latest != "" && overview.Version.State == "available" {
 		version += " → " + overview.Version.Latest + " 可更新"
 	}
+	if overview.Version.Message != "" {
+		version += " · " + overview.Version.Message
+	}
 	facts := []tuiFact{
 		{Label: "运行模式", Value: tuiModeLabel(overview.Mode)},
 		{Label: "系统代理", Value: tuiOnOff(overview.SystemProxy)},
-		{Label: "TUN", Value: tuiActiveState(overview.TUN.Enabled, overview.TUN.Active)},
+		{Label: "TUN", Value: tuiTUNState(overview.TUN)},
 		{Label: "DNS", Value: tuiDNSLabel(overview.DNSPreset, overview.DNSCustom)},
 		{Label: "节点端口映射", Value: tuiOnOff(overview.PortMappingEnabled)},
 		{Label: "自动选优端口", Value: tuiPortOrOff(overview.AutoPort)},
-		{Label: "系统自启", Value: tuiOnOff(overview.Autostart)},
+		{Label: "系统自启", Value: tuiAutostartState(overview)},
 		{Label: "版本", Value: version},
+		{Label: "运行时长", Value: formatTUIUptime(m.system)},
 	}
-	statusPanel := renderTUIPanel(width, "系统状态", "只读快照 · 修改请使用 Web 或管理命令", renderTUIFacts(width-4, facts))
-	return strings.Join([]string{cardGrid, routePanel, statusPanel}, "\n")
+	statusPanel := renderTUIPanel(width, "系统状态", "只读快照 · 行操作见底栏", renderTUIFacts(tuiPanelBodyWidth(width), facts))
+
+	prefix := cardGrid + "\n" + routePanel + "\n" + statusPanel + "\n"
+	moduleRows := make([][]string, 0, len(m.modules))
+	for _, module := range m.modules {
+		phase := defaultTUIText(module.Phase, "—")
+		if module.Running {
+			phase += " · 运行中"
+		}
+		nextRetry := "—"
+		if module.NextRetryAt != nil {
+			nextRetry = module.NextRetryAt.Local().Format("15:04:05")
+		}
+		moduleRows = append(moduleRows, []string{
+			module.Name, tuiOnOff(module.Enabled), phase, defaultTUIText(module.Error, "—"), nextRetry,
+		})
+	}
+	moduleColumns := []tuiColumn{
+		{Title: "模块", Width: 16},
+		{Title: "启用", Width: 6},
+		{Title: "相位", Width: 12},
+		{Title: "错误", Width: 0},
+		{Title: "下次重试", Width: 10},
+	}
+	highlight := -1
+	if m.cursor < len(moduleRows) {
+		highlight = m.cursor
+	}
+	modulePanel := renderTUIPanel(width, "模块状态", fmt.Sprintf("%d 个模块 · enter 重试 space 启停", len(moduleRows)),
+		renderTUITableHighlight(moduleColumns, moduleRows, tuiPanelBodyWidth(width), highlight))
+	return prefix + modulePanel, tuiTableCursorLine(prefix, highlight)
 }
 
-// renderNodesPage 渲染按健康状态和延迟排序的节点表。
+// renderNodesPage 渲染按健康状态和延迟排序的节点表与手动节点表。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，节点统计卡与完整节点表。
+// 返回值说明：
+//   - string：节点统计摘要与两张表；手动节点 URL 只显示打码摘要。
+//   - int：光标行的绝对行号；光标统一索引 0..len(nodes)-1 为节点表，之后映射手动节点表。
 //
 // 错误情况：无；空节点集合显示明确空状态，失败原因仅在离线节点上展示。
-func (m tuiModel) renderNodesPage(width int) string {
-	nodes := append([]api.NodeEntry(nil), m.overview.Nodes...)
-	sort.SliceStable(nodes, func(left, right int) bool {
-		if nodes[left].Alive != nodes[right].Alive {
-			return nodes[left].Alive
-		}
-		leftDelay := nodes[left].Delay
-		rightDelay := nodes[right].Delay
-		if leftDelay == 0 {
-			leftDelay = ^uint16(0)
-		}
-		if rightDelay == 0 {
-			rightDelay = ^uint16(0)
-		}
-		return leftDelay < rightDelay
-	})
+func (m tuiModel) renderNodesPage(width int) (string, int) {
+	nodes := sortedTUINodes(m.overview.Nodes)
 	rows := make([][]string, 0, len(nodes))
 	for _, node := range nodes {
 		state := "在线"
@@ -388,6 +508,9 @@ func (m tuiModel) renderNodesPage(width int) string {
 		detail := node.Type
 		if !node.Alive && node.FailReason != "" {
 			detail = node.FailReason
+		}
+		if node.Tunnel {
+			detail += "·隧道"
 		}
 		rows = append(rows, []string{
 			state,
@@ -408,18 +531,82 @@ func (m tuiModel) renderNodesPage(width int) string {
 	}
 	summary := fmt.Sprintf("%d 个健康 · %d 个异常 · 映射区间 %d–%d",
 		countTUIAliveNodes(nodes), len(nodes)-countTUIAliveNodes(nodes), m.overview.PortRange[0], m.overview.PortRange[1])
-	return renderTUIPanel(width, "代理节点", summary, renderTUITable(columns, rows, max(12, width-4)))
+	if m.overview.Testing {
+		summary = "测速中…"
+	}
+	nodeHighlight := -1
+	if m.cursor < len(rows) {
+		nodeHighlight = m.cursor
+	}
+	prefix := renderTUIPanel(width, "代理节点", summary, renderTUITableHighlight(columns, rows, tuiPanelBodyWidth(width), nodeHighlight)) + "\n"
+
+	manualRows := make([][]string, 0, len(m.overview.ManualNodes))
+	for _, manual := range m.overview.ManualNodes {
+		entryType := manual.Type
+		source := "结构化出站"
+		if manual.URL != "" {
+			entryType = defaultTUIText(entryType, "url")
+			source = maskTUISourceURL(manual.URL)
+		}
+		manualRows = append(manualRows, []string{defaultTUIText(manual.Name, "—"), entryType, source})
+	}
+	manualColumns := []tuiColumn{
+		{Title: "名称", Width: 24},
+		{Title: "类型", Width: 12},
+		{Title: "URL 摘要", Width: 0},
+	}
+	manualHighlight := -1
+	if index := m.cursor - len(rows); index >= 0 && index < len(manualRows) {
+		manualHighlight = index
+	}
+	manualPanel := renderTUIPanel(width, "手动节点", fmt.Sprintf("%d 条 · 地址凭据已隐藏 · d 删除", len(manualRows)),
+		renderTUITableHighlight(manualColumns, manualRows, tuiPanelBodyWidth(width), manualHighlight))
+
+	cursorLine := tuiTableCursorLine("", nodeHighlight)
+	if nodeHighlight < 0 {
+		cursorLine = tuiTableCursorLine(prefix, manualHighlight)
+	}
+	return prefix + manualPanel, cursorLine
 }
 
-// renderSubscriptionsPage 渲染订阅状态、健康度、流量额度与到期时间。
+// sortedTUINodes 返回节点页渲染与行级动作共用的稳定排序副本。
+//
+// 参数说明：
+//   - nodes: []api.NodeEntry，概览快照中的原始节点顺序。
+//
+// 返回值说明：[]api.NodeEntry，健康优先、按延迟升序的新切片；未测出延迟排在最后。
+//
+// 错误情况：无；nil 输入返回空切片，调用方无需判空。
+func sortedTUINodes(nodes []api.NodeEntry) []api.NodeEntry {
+	sorted := append([]api.NodeEntry(nil), nodes...)
+	sort.SliceStable(sorted, func(left, right int) bool {
+		if sorted[left].Alive != sorted[right].Alive {
+			return sorted[left].Alive
+		}
+		leftDelay := sorted[left].Delay
+		rightDelay := sorted[right].Delay
+		if leftDelay == 0 {
+			leftDelay = ^uint16(0)
+		}
+		if rightDelay == 0 {
+			rightDelay = ^uint16(0)
+		}
+		return leftDelay < rightDelay
+	})
+	return sorted
+}
+
+// renderSubscriptionsPage 渲染订阅状态、启停、端口映射、健康度、流量额度与到期时间。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，完整订阅表；URL 只显示 host 摘要以避免泄露 token。
+// 返回值说明：
+//   - string：完整订阅表；URL 只显示 host 摘要以避免泄露 token。
+//   - int：光标行（订阅表）在完整内容中的绝对行号；无订阅时返回 -1。
 //
 // 错误情况：无；服务端未提供用量信息时显示破折号。
-func (m tuiModel) renderSubscriptionsPage(width int) string {
+func (m tuiModel) renderSubscriptionsPage(width int) (string, int) {
 	rows := make([][]string, 0, len(m.overview.Subs))
 	for _, subscription := range m.overview.Subs {
 		used := "—"
@@ -438,6 +625,8 @@ func (m tuiModel) renderSubscriptionsPage(width int) string {
 		rows = append(rows, []string{
 			subscription.Name,
 			tuiSubscriptionState(subscription.State),
+			tuiOnOff(subscription.Enabled),
+			tuiOnOff(subscription.PortMapping),
 			strings.ToUpper(subscription.Type),
 			fmt.Sprintf("%d / %d", subscription.Alive, subscription.Total),
 			used,
@@ -448,13 +637,21 @@ func (m tuiModel) renderSubscriptionsPage(width int) string {
 	columns := []tuiColumn{
 		{Title: "订阅", Width: 18},
 		{Title: "状态", Width: 9},
+		{Title: "启用", Width: 6},
+		{Title: "端口映射", Width: 8},
 		{Title: "格式", Width: 7},
 		{Title: "可用", Width: 8, Right: true},
 		{Title: "流量", Width: 19, Right: true},
 		{Title: "到期", Width: 11},
 		{Title: "来源", Width: 0},
 	}
-	return renderTUIPanel(width, "订阅资源", fmt.Sprintf("%d 个来源 · 地址凭据已隐藏", len(rows)), renderTUITable(columns, rows, max(12, width-4)))
+	highlight := -1
+	if m.cursor < len(rows) {
+		highlight = m.cursor
+	}
+	panel := renderTUIPanel(width, "订阅资源", fmt.Sprintf("%d 个来源 · 地址凭据已隐藏", len(rows)),
+		renderTUITableHighlight(columns, rows, tuiPanelBodyWidth(width), highlight))
+	return panel, tuiTableCursorLine("", highlight)
 }
 
 // renderPortsPage 渲染主入口、自动选优端口、节点映射和策略分组。
@@ -473,7 +670,7 @@ func (m tuiModel) renderPortsPage(width int) string {
 		{Label: "自动选优", Value: tuiPortOrOff(m.overview.AutoPort)},
 		{Label: "节点映射", Value: tuiOnOff(m.overview.PortMappingEnabled)},
 	}
-	entryPanel := renderTUIPanel(width, "代理入口", "所有地址均为 HTTP + SOCKS5 混合监听", renderTUIFacts(width-4, facts))
+	entryPanel := renderTUIPanel(width, "代理入口", "所有地址均为 HTTP + SOCKS5 混合监听", renderTUIFacts(tuiPanelBodyWidth(width), facts))
 
 	portEntries := m.overview.Ports
 	portState := "正在监听"
@@ -501,7 +698,7 @@ func (m tuiModel) renderPortsPage(width int) string {
 		{Title: "延迟", Width: 9, Right: true},
 		{Title: "监听", Width: 9},
 	}
-	portPanel := renderTUIPanel(width, "节点专属端口", portState, renderTUITable(portColumns, portRows, max(12, width-4)))
+	portPanel := renderTUIPanel(width, "节点专属端口", portState, renderTUITable(portColumns, portRows, tuiPanelBodyWidth(width)))
 
 	groupRows := make([][]string, 0, len(m.overview.Groups))
 	for _, group := range m.overview.Groups {
@@ -509,15 +706,16 @@ func (m tuiModel) renderPortsPage(width int) string {
 		if group.Subscription != "" {
 			members = "订阅 " + group.Subscription
 		}
-		groupRows = append(groupRows, []string{group.Name, strconv.Itoa(group.Port), tuiGroupType(group.Type), members})
+		groupRows = append(groupRows, []string{group.Name, strconv.Itoa(group.Port), tuiGroupType(group.Type), members, defaultTUIText(group.Selected, "—")})
 	}
 	groupColumns := []tuiColumn{
 		{Title: "策略分组", Width: 0},
 		{Title: "端口", Width: 8, Right: true},
 		{Title: "类型", Width: 16},
 		{Title: "成员来源", Width: 24},
+		{Title: "选中出口", Width: 18},
 	}
-	groupPanel := renderTUIPanel(width, "策略分组入口", fmt.Sprintf("%d 个独立监听", len(groupRows)), renderTUITable(groupColumns, groupRows, max(12, width-4)))
+	groupPanel := renderTUIPanel(width, "策略分组入口", fmt.Sprintf("%d 个独立监听", len(groupRows)), renderTUITable(groupColumns, groupRows, tuiPanelBodyWidth(width)))
 	return strings.Join([]string{entryPanel, portPanel, groupPanel}, "\n")
 }
 
@@ -535,7 +733,7 @@ func (m tuiModel) renderRulesPage(width int) string {
 		ruleRows = append(ruleRows, []string{strconv.Itoa(index + 1), rule})
 	}
 	ruleColumns := []tuiColumn{{Title: "优先级", Width: 8, Right: true}, {Title: "自定义规则", Width: 0}}
-	rulesPanel := renderTUIPanel(width, "自定义访问规则", "从上到下匹配 · 首条命中后停止", renderTUITable(ruleColumns, ruleRows, max(12, width-4)))
+	rulesPanel := renderTUIPanel(width, "自定义访问规则", "从上到下匹配 · 首条命中后停止", renderTUITable(ruleColumns, ruleRows, tuiPanelBodyWidth(width)))
 
 	sourceRows := make([][]string, 0, len(m.ruleURLs))
 	for _, source := range m.ruleURLs {
@@ -553,7 +751,7 @@ func (m tuiModel) renderRulesPage(width int) string {
 		{Title: "状态", Width: 0},
 		{Title: "来源", Width: 24},
 	}
-	sourcesPanel := renderTUIPanel(width, "远程规则源", fmt.Sprintf("%d 个来源", len(sourceRows)), renderTUITable(sourceColumns, sourceRows, max(12, width-4)))
+	sourcesPanel := renderTUIPanel(width, "远程规则源", fmt.Sprintf("%d 个来源", len(sourceRows)), renderTUITable(sourceColumns, sourceRows, tuiPanelBodyWidth(width)))
 	return rulesPanel + "\n" + sourcesPanel
 }
 
@@ -562,14 +760,13 @@ func (m tuiModel) renderRulesPage(width int) string {
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，连接统计卡与按当前流量降序排列的只读表格。
+// 返回值说明：
+//   - string：连接统计卡与按当前流量降序排列的表格。
+//   - int：光标行（连接表）在完整内容中的绝对行号；无连接时返回 -1。
 //
 // 错误情况：无；目标域名缺失时回退目的 IP，开始时间非法时显示破折号。
-func (m tuiModel) renderConnectionsPage(width int) string {
-	connections := append([]connEntry(nil), m.connections.Connections...)
-	sort.SliceStable(connections, func(left, right int) bool {
-		return connections[left].Upload+connections[left].Download > connections[right].Upload+connections[right].Download
-	})
+func (m tuiModel) renderConnectionsPage(width int) (string, int) {
+	connections := sortedTUIConnections(m.connections.Connections)
 	cards := []tuiStat{
 		{Value: fmt.Sprintf("%d 条", len(connections)), Detail: "活动连接", Accent: tuiCyan},
 		{Value: "↑ " + formatBytes(m.connections.UploadTotal), Detail: "累计上传", Accent: tuiBlue},
@@ -606,19 +803,43 @@ func (m tuiModel) renderConnectionsPage(width int) string {
 		{Title: "↑ / ↓", Width: 19, Right: true},
 		{Title: "存活", Width: 8, Right: true},
 	}
-	detail := renderTUITable(columns, rows, max(12, width-4))
-	return layoutTUIStatCards(width, cards) + renderTUIPanel(width, "活动连接", "按当前累计流量排序 · 本界面不提供关闭操作", detail)
+	highlight := -1
+	if m.cursor < len(rows) {
+		highlight = m.cursor
+	}
+	prefix := layoutTUIStatCards(width, cards)
+	detail := renderTUITableHighlight(columns, rows, tuiPanelBodyWidth(width), highlight)
+	panel := renderTUIPanel(width, "活动连接", "按当前累计流量排序 · x 关闭选中 X 关闭全部", detail)
+	return prefix + panel, tuiTableCursorLine(prefix, highlight)
 }
 
-// renderRemotePage 渲染 tailcat 服务端、已保存远端与本地转发状态。
+// sortedTUIConnections 返回连接页渲染与关闭动作共用的稳定排序副本。
+//
+// 参数说明：
+//   - connections: []connEntry，连接快照中的原始顺序。
+//
+// 返回值说明：[]connEntry，按当前累计流量（上传+下载）降序的新切片。
+//
+// 错误情况：无；nil 输入返回空切片，调用方无需判空。
+func sortedTUIConnections(connections []connEntry) []connEntry {
+	sorted := append([]connEntry(nil), connections...)
+	sort.SliceStable(sorted, func(left, right int) bool {
+		return sorted[left].Upload+sorted[left].Download > sorted[right].Upload+sorted[right].Download
+	})
+	return sorted
+}
+
+// renderRemotePage 渲染 tailcat 服务端、已保存远端、本地转发状态与审计事件。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，远程模块统计、服务状态和两张明细表。
+// 返回值说明：
+//   - string：远程模块统计、服务状态和三张明细表。
+//   - int：光标行（本地转发表）在完整内容中的绝对行号；无转发时返回 -1。
 //
 // 错误情况：无；连接 token 始终使用 API 返回的打码摘要，不请求完整凭据端点。
-func (m tuiModel) renderRemotePage(width int) string {
+func (m tuiModel) renderRemotePage(width int) (string, int) {
 	service := "已关闭"
 	serviceColor := tuiMuted
 	if m.remote.Running {
@@ -665,14 +886,14 @@ func (m tuiModel) renderRemotePage(width int) string {
 	if m.remote.Error != "" {
 		facts = append(facts, tuiFact{Label: "最近错误", Value: m.remote.Error})
 	}
-	statusPanel := renderTUIPanel(width, "远程服务", "独立于代理数据面 · 敏感凭据仅显示摘要", renderTUIFacts(width-4, facts))
+	statusPanel := renderTUIPanel(width, "远程服务", "独立于代理数据面 · 敏感凭据仅显示摘要", renderTUIFacts(tuiPanelBodyWidth(width), facts))
 
 	peerRows := make([][]string, 0, len(m.peers.Remotes))
 	for _, peer := range m.peers.Remotes {
 		peerRows = append(peerRows, []string{peer.Name, peer.Token})
 	}
 	peerPanel := renderTUIPanel(width, "已保存远端", fmt.Sprintf("%d 台设备", len(peerRows)), renderTUITable(
-		[]tuiColumn{{Title: "名称", Width: 24}, {Title: "Token 摘要", Width: 0}}, peerRows, max(12, width-4)))
+		[]tuiColumn{{Title: "名称", Width: 24}, {Title: "Token 摘要", Width: 0}}, peerRows, tuiPanelBodyWidth(width)))
 
 	forwardRows := make([][]string, 0, len(m.remote.Forwards))
 	for _, forward := range m.remote.Forwards {
@@ -696,8 +917,176 @@ func (m tuiModel) renderRemotePage(width int) string {
 		{Title: "活动", Width: 6, Right: true},
 		{Title: "最近错误", Width: 20},
 	}
-	forwardPanel := renderTUIPanel(width, "本地转发", fmt.Sprintf("%d 条配置", len(forwardRows)), renderTUITable(forwardColumns, forwardRows, max(12, width-4)))
-	return layoutTUIStatCards(width, cards) + strings.Join([]string{statusPanel, peerPanel, forwardPanel}, "\n")
+	highlight := -1
+	if m.cursor < len(forwardRows) {
+		highlight = m.cursor
+	}
+	prefix := layoutTUIStatCards(width, cards) + statusPanel + "\n" + peerPanel + "\n"
+	forwardPanel := renderTUIPanel(width, "本地转发", fmt.Sprintf("%d 条配置 · space 启停", len(forwardRows)),
+		renderTUITableHighlight(forwardColumns, forwardRows, tuiPanelBodyWidth(width), highlight))
+
+	auditRows := make([][]string, 0, len(m.audit))
+	for _, entry := range m.audit {
+		port := "—"
+		if entry.TargetPort > 0 {
+			port = strconv.Itoa(entry.TargetPort)
+		}
+		auditRows = append(auditRows, []string{
+			entry.Time.Local().Format("15:04:05"), entry.Action, tuiAuditPeer(entry), port, defaultTUIText(entry.Reason, "—"),
+		})
+	}
+	auditColumns := []tuiColumn{
+		{Title: "时间", Width: 9},
+		{Title: "动作", Width: 10},
+		{Title: "对端", Width: 0},
+		{Title: "端口", Width: 7, Right: true},
+		{Title: "原因", Width: 18},
+	}
+	auditPanel := renderTUIPanel(width, "审计事件", fmt.Sprintf("最近 %d 条", len(auditRows)), renderTUITable(auditColumns, auditRows, tuiPanelBodyWidth(width)))
+	return prefix + forwardPanel + "\n" + auditPanel, tuiTableCursorLine(prefix, highlight)
+}
+
+// renderGatewayPage 渲染 LAN 网关的运行状态与登记设备表。
+//
+// 参数说明：
+//   - width: int，页面可用宽度。
+//
+// 返回值说明：string，状态 facts 与设备表；本页为纯滚动页，光标行恒为 -1。
+//
+// 错误情况：无；状态未加载或平台不支持时显示 precheck 风格的说明面板。
+func (m tuiModel) renderGatewayPage(width int) string {
+	gateway := m.gateway
+	if gateway == nil {
+		return renderTUIPanel(width, "LAN 网关", "状态未加载", "网关状态暂不可用，等待下一次快照刷新。")
+	}
+	if !gateway.Supported {
+		return renderTUIPanel(width, "LAN 网关", "当前平台不支持",
+			fmt.Sprintf("平台 %s 不支持 LAN 网关旁路由（仅 macOS / Linux）。\n网关页级开关键（e）在此平台上不可用。", gateway.Platform))
+	}
+	dnsListen := tuiOnOff(gateway.DNSRedirect)
+	if gateway.DNSRedirect && gateway.DNSListenPort > 0 {
+		dnsListen += " · 端口 " + strconv.Itoa(gateway.DNSListenPort)
+	}
+	facts := []tuiFact{
+		{Label: "平台", Value: gateway.Platform},
+		{Label: "模块开关", Value: tuiOnOff(gateway.Enabled)},
+		{Label: "相位", Value: tuiGatewayPhase(*gateway)},
+		{Label: "内核转发", Value: tuiOnOff(gateway.Forwarding)},
+		{Label: "规则应用", Value: tuiOnOff(gateway.Applied)},
+		{Label: "执行层", Value: defaultTUIText(gateway.Runner, "—")},
+		{Label: "redir 端口", Value: tuiPortOrOff(gateway.RedirPort)},
+		{Label: "tproxy 端口", Value: tuiPortOrOff(gateway.TProxyPort)},
+		{Label: "DNS 劫持", Value: dnsListen},
+	}
+	if gateway.Error != "" {
+		facts = append(facts, tuiFact{Label: "相位错误", Value: gateway.Error})
+	}
+	if gateway.Err != "" {
+		facts = append(facts, tuiFact{Label: "执行层错误", Value: gateway.Err})
+	}
+	statusPanel := renderTUIPanel(width, "网关状态", "LAN 旁路由 · e 开关网关", renderTUIFacts(tuiPanelBodyWidth(width), facts))
+
+	deviceRows := make([][]string, 0, len(gateway.Devices))
+	for _, device := range gateway.Devices {
+		deviceRows = append(deviceRows, []string{
+			device.Name, device.IP, defaultTUIText(device.MAC, "—"), defaultTUIText(device.Policy, "proxy"),
+		})
+	}
+	deviceColumns := []tuiColumn{
+		{Title: "名称", Width: 20},
+		{Title: "IP", Width: 18},
+		{Title: "MAC", Width: 20},
+		{Title: "策略", Width: 0},
+	}
+	devicePanel := renderTUIPanel(width, "登记设备", fmt.Sprintf("%d 台设备", len(deviceRows)), renderTUITable(deviceColumns, deviceRows, tuiPanelBodyWidth(width)))
+	return statusPanel + "\n" + devicePanel
+}
+
+// renderDesktopPage 渲染远程桌面的服务监听、连接档案与活动会话。
+//
+// 参数说明：
+//   - width: int，页面可用宽度。
+//
+// 返回值说明：
+//   - string：三张明细表；远端 token 只显示打码摘要。
+//   - int：光标行（活动会话表）在完整内容中的绝对行号；无会话时返回 -1。
+//
+// 错误情况：无；状态未加载时显示明确空状态面板。
+func (m tuiModel) renderDesktopPage(width int) (string, int) {
+	if m.desktop == nil {
+		return renderTUIPanel(width, "远程桌面", "状态未加载", "桌面状态暂不可用，等待下一次快照刷新。"), -1
+	}
+	desktop := m.desktop
+	serviceRows := make([][]string, 0, len(desktop.Services))
+	for _, service := range desktop.Services {
+		port := "—"
+		if service.Port > 0 {
+			port = strconv.Itoa(service.Port)
+		}
+		listening := "未监听"
+		if service.Listening {
+			listening = "监听中"
+		}
+		serviceRows = append(serviceRows, []string{
+			strings.ToUpper(service.Protocol), port, listening, tuiOnOff(service.Exposed),
+		})
+	}
+	serviceColumns := []tuiColumn{
+		{Title: "协议", Width: 10},
+		{Title: "端口", Width: 8, Right: true},
+		{Title: "监听", Width: 10},
+		{Title: "经隧道暴露", Width: 0},
+	}
+	remoteState := "远程模块已停用"
+	if desktop.RemoteEnabled {
+		remoteState = "远程模块已启用"
+	}
+	servicePanel := renderTUIPanel(width, "桌面服务", remoteState, renderTUITable(serviceColumns, serviceRows, tuiPanelBodyWidth(width)))
+
+	profileRows := make([][]string, 0, len(desktop.Connections))
+	for _, profile := range desktop.Connections {
+		profileRows = append(profileRows, []string{
+			profile.Name,
+			maskTUIRemoteTarget(profile.Remote),
+			strings.ToUpper(profile.Protocol),
+			strconv.Itoa(profile.RemotePort),
+			defaultTUIText(profile.Username, "—"),
+		})
+	}
+	profileColumns := []tuiColumn{
+		{Title: "名称", Width: 18},
+		{Title: "远端", Width: 0},
+		{Title: "协议", Width: 8},
+		{Title: "远端端口", Width: 9, Right: true},
+		{Title: "用户名", Width: 14},
+	}
+	profilePanel := renderTUIPanel(width, "连接档案", fmt.Sprintf("%d 条 · 不保存密码", len(profileRows)), renderTUITable(profileColumns, profileRows, tuiPanelBodyWidth(width)))
+
+	sessionRows := make([][]string, 0, len(desktop.Sessions))
+	for _, session := range desktop.Sessions {
+		sessionRows = append(sessionRows, []string{
+			session.ConnectionName,
+			strings.ToUpper(string(session.Protocol)),
+			session.LocalAddress,
+			strconv.FormatInt(session.ActiveConnections, 10),
+			formatTUISessionAge(session.StartedAt),
+		})
+	}
+	sessionColumns := []tuiColumn{
+		{Title: "连接", Width: 18},
+		{Title: "协议", Width: 8},
+		{Title: "本机地址", Width: 0},
+		{Title: "活跃连接", Width: 9, Right: true},
+		{Title: "时长", Width: 10, Right: true},
+	}
+	highlight := -1
+	if m.cursor < len(sessionRows) {
+		highlight = m.cursor
+	}
+	prefix := servicePanel + "\n" + profilePanel + "\n"
+	sessionPanel := renderTUIPanel(width, "活动会话", fmt.Sprintf("%d 个 · x 关闭会话", len(sessionRows)),
+		renderTUITableHighlight(sessionColumns, sessionRows, tuiPanelBodyWidth(width), highlight))
+	return prefix + sessionPanel, tuiTableCursorLine(prefix, highlight)
 }
 
 // renderLogsPage 渲染进程内最近日志，颜色层级由日志等级文本表达。
@@ -718,10 +1107,10 @@ func (m tuiModel) renderLogsPage(width int) string {
 		{Title: "等级", Width: 8},
 		{Title: "日志内容", Width: 0},
 	}
-	return renderTUIPanel(width, "运行日志", fmt.Sprintf("最近 %d 条 · 每 3 秒刷新", len(rows)), renderTUITable(columns, rows, max(12, width-4)))
+	return renderTUIPanel(width, "运行日志", fmt.Sprintf("最近 %d 条 · 每 3 秒刷新", len(rows)), renderTUITable(columns, rows, tuiPanelBodyWidth(width)))
 }
 
-// renderHelp 渲染只读交互说明与数据来源。
+// renderHelp 渲染交互说明、键位总表与安全边界。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
@@ -732,25 +1121,61 @@ func (m tuiModel) renderLogsPage(width int) string {
 func (m tuiModel) renderHelp(width int) string {
 	body := strings.Join([]string{
 		"导航",
-		"  1–8           直接打开对应视图",
-		"  h / l         上一个 / 下一个视图",
-		"  Tab           下一个视图",
+		"  1–9, 0        直接打开对应视图（0 = 日志）",
+		"  h / l         上一个 / 下一个视图（Tab 同 l）",
 		"",
-		"阅读",
-		"  j / k         向下 / 向上滚动",
-		"  PgDn / PgUp   半屏滚动",
-		"  g / G         页首 / 页尾",
+		"光标与滚动",
+		"  j / k         可选中页移动光标；入口/规则/网关/日志页滚动",
+		"  PgDn / PgUp   半屏移动 / 滚动",
+		"  g / G         首行 / 尾行（纯滚动页为页首 / 页尾）",
+		"",
+		"全局操作（任意页）",
+		"  m             代理模式循环：规则 → 全局 → 直连",
+		"  s             系统代理开关",
+		"  u             TUN 开关",
+		"  R             后台刷新全部订阅并测速",
+		"  t             后台测速（测速进行中会被拒绝）",
+		"  r             立即重新读取快照",
+		"",
+		"行操作（按当前页生效）",
+		"  概览  enter 重试模块 · space 启停模块（停用需确认）",
+		"  节点  enter 设为主出口 · a 自动选优 · d 删除手动节点（需确认）",
+		"  订阅  enter 刷新该订阅 · e / space 启停",
+		"  连接  x 关闭选中连接 · X 关闭全部（需确认）",
+		"  远程  space 启停选中转发",
+		"  网关  e 开关网关（停用需确认）",
+		"  桌面  x 关闭选中会话（需确认）",
+		"",
+		"确认",
+		"  y / n / Esc   危险操作：执行 / 取消 / 取消",
 		"",
 		"状态",
-		"  r             立即重新读取全部 GET 接口",
 		"  ? / Esc       打开 / 关闭帮助",
 		"  q / Ctrl-C    退出并恢复原终端画面",
 		"",
 		"安全边界",
-		"  本界面不包含编辑、开关、删除、刷新订阅、测速或关闭连接能力。",
-		"  数据来自 Web 控制台同源只读 API；完整 token/secret 端点不会被请求。",
+		"  快照轮询只读：自动刷新只调用 GET 接口；写操作仅由上述显式按键",
+		"  触发，全部经 Web 控制台同源 API 执行（服务端配置变更有事务保证）。",
+		"  凭据仍打码：完整 token/secret 端点不会被请求，订阅地址只显示摘要。",
 	}, "\n")
-	return renderTUIPanel(width, "键盘与只读边界", "按 Esc 或 ? 返回", body)
+	return renderTUIPanel(width, "键盘与操作边界", "按 Esc 或 ? 返回", body)
+}
+
+// renderConfirm 在内容区中部渲染危险操作的确认面板。
+//
+// 参数说明：
+//   - width: int，页面可用宽度。
+//   - bodyHeight: int，内容区可见行数，用于垂直居中。
+//
+// 返回值说明：string，水平与垂直居中的确认面板，等待 y/n 输入。
+//
+// 错误情况：无；确认文本由动作构造器给出，过长时截断展示。
+func (m tuiModel) renderConfirm(width, bodyHeight int) string {
+	boxWidth := min(width, 64)
+	text := lipgloss.Wrap(m.confirm.Text, max(20, boxWidth-8), "")
+	box := renderTUIPanel(boxWidth, "确认操作", "危险操作", text+"\n\ny 执行 · n / Esc 取消")
+	padding := max(0, (bodyHeight-lipgloss.Height(box))/2)
+	return strings.Repeat("\n", padding) + lipgloss.PlaceHorizontal(width, lipgloss.Center, box)
 }
 
 // renderTUIPill 渲染紧凑状态标签。
@@ -807,6 +1232,19 @@ func renderTUIPanel(width int, title, detail, body string) string {
 		BorderForeground(tuiBorder).
 		Padding(0, 1).
 		Render(header + "\n" + body)
+}
+
+// tuiPanelBodyWidth 计算面板内容区（扣除边框与左右内边距）可用的正文宽度。
+//
+// 参数说明：
+//   - width: int，传入 renderTUIPanel 的页面宽度。
+//
+// 返回值说明：int，表格/事实网格的安全宽度；行内容不超过它才不会在面板内换行，
+//   光标行号计算（一行 = 一条记录）也因此成立。
+//
+// 错误情况：无；极窄宽度使用 8 列下限以避免负尺寸。
+func tuiPanelBodyWidth(width int) int {
+	return max(8, width-8)
 }
 
 // renderTUIStatCard 渲染固定三行的指标卡；width 在布局阶段统一覆盖。
@@ -919,6 +1357,21 @@ func renderTUIFacts(width int, facts []tuiFact) string {
 //
 // 错误情况：无；行列不齐、窄终端和换行文本都会被安全规整与截断。
 func renderTUITable(columns []tuiColumn, rows [][]string, width int) string {
+	return renderTUITableHighlight(columns, rows, width, -1)
+}
+
+// renderTUITableHighlight 渲染自适应表格，并用反色高亮指定选中行。
+//
+// 参数说明：
+//   - columns: []tuiColumn，列标题、建议宽度和对齐方式。
+//   - rows: [][]string，原始单元格文本。
+//   - width: int，可用表格宽度。
+//   - highlight: int，选中行下标（0 基）；负数表示无选中行，与 renderTUITable 一致。
+//
+// 返回值说明：string，包含表头、分隔线和全部数据行的 ANSI 文本。
+//
+// 错误情况：无；highlight 越界时安全忽略，不标记任何行。
+func renderTUITableHighlight(columns []tuiColumn, rows [][]string, width, highlight int) string {
 	if len(columns) == 0 {
 		return ""
 	}
@@ -947,9 +1400,28 @@ func renderTUITable(columns []tuiColumn, rows [][]string, width int) string {
 		if rowIndex%2 == 1 {
 			style = style.Foreground(lipgloss.Color("#B8C7D9"))
 		}
+		if rowIndex == highlight {
+			style = lipgloss.NewStyle().Bold(true).Foreground(tuiBackground).Background(tuiBlue)
+		}
 		lines = append(lines, style.Render(strings.Join(cells, "  ")))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// tuiTableCursorLine 计算光标行在完整页面内容中的绝对行号。
+//
+// 参数说明：
+//   - prefix: string，光标所在面板之前的全部内容（必须以 "\n" 结尾或为空）。
+//   - rowIndex: int，光标在表体中的行号（0 基）；负数表示本页无可选中行。
+//
+// 返回值说明：int，绝对行号；面板结构为上边框 + 标题 + 表头两行，故行偏移为 4。
+//
+// 错误情况：无；rowIndex 为负时返回 -1，调用方按纯滚动页处理。
+func tuiTableCursorLine(prefix string, rowIndex int) int {
+	if rowIndex < 0 {
+		return -1
+	}
+	return strings.Count(prefix, "\n") + 4 + rowIndex
 }
 
 // resolveTUIColumnWidths 把建议列宽压缩或扩展到实际终端宽度。
@@ -1374,6 +1846,139 @@ func tuiActiveState(enabled, active bool) string {
 		return "已配置 · 未生效"
 	}
 	return "关闭"
+}
+
+// tuiTUNState 在 TUN 运行状态后补充权限提示。
+//
+// 参数说明：
+//   - tun: app.TUNStatus，TUN 开关与当前进程权限快照。
+//
+// 返回值说明：string，已配置但无权限时附带平台修复提示。
+//
+// 错误情况：无；Permission 为空时退化为纯运行状态文本。
+func tuiTUNState(tun app.TUNStatus) string {
+	state := tuiActiveState(tun.Enabled, tun.Active)
+	if tun.Enabled && !tun.Allowed && tun.Permission != "" {
+		state += " · " + tun.Permission
+	}
+	return state
+}
+
+// tuiAutostartState 在自启开关后附带托管进程运行态。
+//
+// 参数说明：
+//   - overview: *api.Overview，包含 Autostart 与 AutostartRuntime 快照。
+//
+// 返回值说明：string，如“开启 · 运行中 (pid 1234)”；未注册时返回关闭。
+//
+// 错误情况：无；运行态字段缺失时退化为开关文本。
+func tuiAutostartState(overview *api.Overview) string {
+	if !overview.Autostart {
+		return "关闭"
+	}
+	runtime := overview.AutostartRuntime
+	switch {
+	case runtime.Running && runtime.PID > 0:
+		return fmt.Sprintf("开启 · 运行中 (pid %d)", runtime.PID)
+	case runtime.Message != "":
+		return "开启 · " + runtime.Message
+	case runtime.State != "":
+		return "开启 · " + runtime.State
+	default:
+		return "开启"
+	}
+}
+
+// tuiGatewayPhase 组合网关模块相位与运行标记。
+//
+// 参数说明：
+//   - gateway: app.GatewayOverview，网关完整状态视图。
+//
+// 返回值说明：string，如“running · 运行中”；相位为空时返回破折号。
+//
+// 错误情况：无。
+func tuiGatewayPhase(gateway app.GatewayOverview) string {
+	phase := defaultTUIText(gateway.Phase, "—")
+	if gateway.Running {
+		phase += " · 运行中"
+	}
+	return phase
+}
+
+// formatTUIUptime 把系统运行秒数压缩为中文时长。
+//
+// 参数说明：
+//   - system: *app.SystemStatus，系统状态快照；nil 表示尚未加载。
+//
+// 返回值说明：string，如“2 天 3 小时”；未加载返回破折号。
+//
+// 错误情况：无；负值按 0 秒处理。
+func formatTUIUptime(system *app.SystemStatus) string {
+	if system == nil {
+		return "—"
+	}
+	seconds := max(0, system.UptimeSeconds)
+	switch {
+	case seconds < 60:
+		return fmt.Sprintf("%d 秒", seconds)
+	case seconds < 3600:
+		return fmt.Sprintf("%d 分钟", seconds/60)
+	case seconds < 86400:
+		return fmt.Sprintf("%d 小时 %d 分", seconds/3600, seconds%3600/60)
+	default:
+		return fmt.Sprintf("%d 天 %d 小时", seconds/86400, seconds%86400/3600)
+	}
+}
+
+// formatTUISessionAge 把桌面会话的开始时间转换为已持续时长。
+//
+// 参数说明：
+//   - started: time.Time，会话启动时间。
+//
+// 返回值说明：string，如“45s”“12m”“3h5m”；零值返回破折号。
+//
+// 错误情况：无；未来时间按 0s 处理。
+func formatTUISessionAge(started time.Time) string {
+	if started.IsZero() {
+		return "—"
+	}
+	elapsed := max(0, int64(time.Since(started).Seconds()))
+	switch {
+	case elapsed < 60:
+		return fmt.Sprintf("%ds", elapsed)
+	case elapsed < 3600:
+		return fmt.Sprintf("%dm", elapsed/60)
+	default:
+		return fmt.Sprintf("%dh%dm", elapsed/3600, elapsed%3600/60)
+	}
+}
+
+// tuiAuditPeer 生成审计事件的对端展示名。
+//
+// 参数说明：
+//   - entry: tuiAuditEntry，远程审计事件。
+//
+// 返回值说明：string，优先 SSH 公钥别名，其次客户端名，最后为密钥首尾摘要。
+//
+// 错误情况：无；对端字段全空返回破折号，过短密钥整体替换为三个星号。
+func tuiAuditPeer(entry tuiAuditEntry) string {
+	if entry.SSHKeyName != "" {
+		return entry.SSHKeyName
+	}
+	if entry.ClientName != "" {
+		return entry.ClientName
+	}
+	key := entry.SSHFingerprint
+	if key == "" {
+		key = entry.ClientKey
+	}
+	if key == "" {
+		return "—"
+	}
+	if len(key) <= 14 {
+		return "***"
+	}
+	return key[:6] + "…" + key[len(key)-6:]
 }
 
 // tuiPortOrOff 将可选端口转换为端口号或关闭状态。

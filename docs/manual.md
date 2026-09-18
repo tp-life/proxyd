@@ -163,6 +163,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd update-check [on\|off]` | 查看/开关启动版本检查；无参显示当前/最新版本与检查状态 |
 | `proxyd conn list` / `proxyd conn close <id\|all>` | 查看活动连接（出站、规则、目标、上下行、存活时长与内存占用）/ 关闭单条或全部连接 |
 | `proxyd traffic` | 实时上/下行速率（每秒刷新，Ctrl-C 退出） |
+| `proxyd ls [-c 配置]` | 交互式 TUI 控制台：10 个视图页（概览/节点/订阅/入口/规则/连接/网关/远程/桌面/日志），快照轮询只读、显式按键触发写操作（危险操作需 y/n 确认），`?` 查看按键帮助 |
 | `proxyd config path` | 打印当前使用的配置文件绝对路径 |
 | `proxyd config export [--full] [-o 文件]` | 导出配置；默认打码（隐藏凭据），`--full` 完整备份；默认打印到标准输出 |
 | `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
