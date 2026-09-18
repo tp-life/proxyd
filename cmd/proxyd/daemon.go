@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,8 +13,9 @@ import (
 )
 
 // 后台守护模式：start/stop/restart/status。
-// pid 文件由 serve 进程自身登记/清理（state-dir/proxyd.pid），
-// 日志重定向到 state-dir/proxyd.log。
+// pid 文件由 serve 进程启动早期写入并持有排他文件锁（见 instance_lock.go），
+// 存活判断以锁为准（免疫 stale pid 与 PID 复用），文件内容仅用于定位进程；
+// 文件永不删除，避免 unlink 竞态。日志重定向到 state-dir/proxyd.log。
 
 const daemonHealthTimeout = time.Second
 
@@ -27,26 +27,6 @@ var daemonHealthClient = &http.Client{Timeout: daemonHealthTimeout}
 func pidPath(cfg *config.Config) string { return filepath.Join(cfg.StateDir, "proxyd.pid") }
 
 func logPathFor(cfg *config.Config) string { return filepath.Join(cfg.StateDir, "proxyd.log") }
-
-// readPIDFile 读 pid 文件并检查进程是否存活；文件缺失/损坏/进程已退出都返回 alive=false。
-func readPIDFile(path string) (pid int, alive bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
-	pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	return pid, pidAlive(pid)
-}
-
-func writePIDFile(path string, pid int) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o644)
-}
 
 // loadConfigFile 仅供 start/stop/status 等读取配置文件（不合并订阅地址）。
 func loadConfigFile(name string, args []string) (*config.Config, string, error) {
@@ -123,25 +103,20 @@ func cmdStart(args []string) error {
 	return nil
 }
 
-// cmdStop 停止后台实例：SIGTERM，等待退出，清理 pid 文件；兼容 stale pid。
+// cmdStop 停止后台实例：SIGTERM，等待文件锁释放（即进程退出，免疫 PID 复用误判）。
 func cmdStop(args []string) error {
 	cfg, _, err := loadConfigFile("stop", args)
 	if err != nil {
 		return err
 	}
 	path := pidPath(cfg)
-	data, err := os.ReadFile(path)
-	if err != nil {
+	pid, alive := readPIDFile(path)
+	if !alive {
 		return fmt.Errorf("proxyd 未在运行")
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		_ = os.Remove(path)
-		return fmt.Errorf("pid 文件损坏，已清理；proxyd 视为未在运行")
-	}
-	if !pidAlive(pid) {
-		_ = os.Remove(path)
-		return fmt.Errorf("proxyd 未在运行（已清理过期 pid 文件）")
+	if pid <= 0 {
+		// 锁被持有但 pid 尚未写入：实例处于启动早期窗口，稍等即可读到。
+		return fmt.Errorf("proxyd 正在启动中（尚未登记 pid），请稍后重试")
 	}
 	wasManaged := false
 	if s := inspectService(); s.Running && s.PID == pid {
@@ -152,8 +127,7 @@ func cmdStop(args []string) error {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if !pidAlive(pid) {
-			_ = os.Remove(path) // serve 退出时也会删，幂等
+		if _, alive := readPIDFile(path); !alive {
 			fmt.Println("proxyd 已停止")
 			if wasManaged {
 				// 旧版 KeepAlive=true 下 launchd 会立刻拉起替代实例，稍等再观察。

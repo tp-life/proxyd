@@ -96,8 +96,12 @@ func TestReportAutostartServiceState(t *testing.T) {
 	cfg := newAPITestConfig(t)
 	cfg.StateDir = t.TempDir()
 
-	// 独立实例占用 pidfile：必须提示让位与接管方式。
-	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
+	// 独立实例持有实例锁：必须提示让位与接管方式。
+	lock, acquired, err := acquireInstanceLock(pidPath(cfg))
+	if err != nil || !acquired {
+		t.Fatalf("获取实例锁失败: acquired=%v err=%v", acquired, err)
+	}
+	if err := lock.writePID(os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	stubInspect(t, autostart.RuntimeStatus{Loaded: true, State: "not running"})
@@ -105,10 +109,8 @@ func TestReportAutostartServiceState(t *testing.T) {
 		t.Fatalf("独立实例占用缺少提示: %q", out)
 	}
 
-	// 无占用且系统实例已运行：直接报 PID。
-	if err := os.Remove(pidPath(cfg)); err != nil {
-		t.Fatal(err)
-	}
+	// 无占用（锁已释放）且系统实例已运行：直接报 PID。
+	lock.release()
 	stubInspect(t, autostart.RuntimeStatus{Loaded: true, Running: true, PID: 4242, State: "running"})
 	if out := captureStdout(t, func() { reportAutostartServiceState(cfg) }); !strings.Contains(out, "4242") {
 		t.Fatalf("系统实例启动未报告: %q", out)
@@ -122,30 +124,39 @@ func TestReportAutostartServiceState(t *testing.T) {
 }
 
 // TestEnsureSingleInstance 验证单实例守卫：前台终端报错，后台/托管场景干净退出让位，
-// 且让位分支必须报告 proceed=false（曾经返回 nil 被 cmdServe 当作继续启动，造成双实例）。
-// 参数：t 为 *testing.T。返回：无。错误：两分支判断错误或缺 pid 文件误判时失败。
+// 且让位分支必须报告 nil 锁（曾经返回 nil 被 cmdServe 当作继续启动，造成双实例）。
+// 参数：t 为 *testing.T。返回：无。错误：两分支判断错误或锁未生效时失败。
 func TestEnsureSingleInstance(t *testing.T) {
 	cfg := newAPITestConfig(t)
 	cfg.StateDir = t.TempDir()
 	previous := stdoutIsTerminal
 	t.Cleanup(func() { stdoutIsTerminal = previous })
 
-	proceed, err := ensureSingleInstance(cfg)
-	if err != nil || !proceed {
-		t.Fatalf("无 pid 文件应放行: %v, %v", proceed, err)
+	lock, err := ensureSingleInstance(cfg)
+	if err != nil || lock == nil {
+		t.Fatalf("无持锁实例应放行: lock=%v, err=%v", lock, err)
 	}
-	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
+	if err := lock.writePID(os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
+	defer lock.release()
+
 	stdoutIsTerminal = func() bool { return true }
-	proceed, err = ensureSingleInstance(cfg)
-	if err == nil || !strings.Contains(err.Error(), "已在运行") || proceed {
-		t.Fatalf("前台终端应拒绝重复启动: %v, %v", proceed, err)
+	dup, err := ensureSingleInstance(cfg)
+	if err == nil || !strings.Contains(err.Error(), "已在运行") || dup != nil {
+		t.Fatalf("前台终端应拒绝重复启动: lock=%v, err=%v", dup, err)
 	}
 	stdoutIsTerminal = func() bool { return false }
-	proceed, err = ensureSingleInstance(cfg)
-	if err != nil || proceed {
-		t.Fatalf("后台/托管场景应干净退出让位: %v, %v", proceed, err)
+	dup, err = ensureSingleInstance(cfg)
+	if err != nil || dup != nil {
+		t.Fatalf("后台/托管场景应干净退出让位: lock=%v, err=%v", dup, err)
+	}
+
+	// 锁释放后（模拟进程退出，内核放锁）应允许新实例启动。
+	lock.release()
+	lock, err = ensureSingleInstance(cfg)
+	if err != nil || lock == nil {
+		t.Fatalf("锁释放后应放行: lock=%v, err=%v", lock, err)
 	}
 }
 
@@ -171,8 +182,13 @@ func TestRestartManagedInstance(t *testing.T) {
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}
-	// 新实例已就绪：pidfile 指向本进程（存活），oldPID 是不存在的旧值。
-	if err := writePIDFile(pidPath(cfg), os.Getpid()); err != nil {
+	// 新实例已就绪：本进程持有实例锁（存活），oldPID 是不存在的旧值。
+	lock, acquired, err := acquireInstanceLock(pidPath(cfg))
+	if err != nil || !acquired {
+		t.Fatalf("获取实例锁失败: acquired=%v err=%v", acquired, err)
+	}
+	defer lock.release()
+	if err := lock.writePID(os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	if err := restartManagedInstance(cfg, path, os.Getpid()+999); err != nil {

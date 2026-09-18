@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry 是一条内存日志记录。
@@ -15,6 +16,11 @@ type Entry struct {
 	Line  string `json:"line"`
 	Level string `json:"level,omitempty"`
 }
+
+// maxLineBytes 是单条日志与 Writer 行内暂存的上限。环形缓冲只限制条数，
+// 一条巨型日志（如整段订阅正文）或永不换行的写入流会把内存配额占满，
+// 超长内容统一截断并标记。
+const maxLineBytes = 64 << 10
 
 // Ring 是固定容量的线程安全日志环形缓冲。
 type Ring struct {
@@ -53,6 +59,14 @@ func (r *Ring) Add(line string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
+	}
+	if len(line) > maxLineBytes {
+		truncated := line[:maxLineBytes]
+		// 截断点可能落在多字节字符中间，回退到合法 UTF-8 边界（至多 3 字节）。
+		for !utf8.ValidString(truncated) {
+			truncated = truncated[:len(truncated)-1]
+		}
+		line = truncated + "…（日志过长已截断）"
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -143,6 +157,13 @@ func (w *Writer) Write(p []byte) (int, error) {
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
 			_, _ = w.buf.Write(p)
+			// 无换行的写入流不能无限暂存：超过上限直接按一条日志落环（Add 内截断）。
+			if w.buf.Len() > maxLineBytes {
+				if w.ring != nil {
+					w.ring.Add(w.buf.String())
+				}
+				w.buf.Reset()
+			}
 			break
 		}
 		_, _ = w.buf.Write(p[:i])

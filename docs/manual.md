@@ -121,7 +121,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd serve -range A-B <url>` | 指定映射端口区间 |
 | `proxyd <url>` | `serve <url>` 的快捷形式 |
 | `proxyd start [-c 配置]` | 后台守护模式：派生 detached 子进程执行 serve，日志落 `state-dir/proxyd.log`，pid 写 `state-dir/proxyd.pid`；启动后做就绪等待（轮询 API，最长 10s）并打印 Web 地址；已运行则报错 |
-| `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s，清理 pid 文件；stale pid 自动清理 |
+| `proxyd stop` | 读 pid 文件发 SIGTERM 优雅退出，等待最长 10s；实例存活以 pid 文件上的文件锁为准（免疫 stale pid 与 PID 复用），pid 文件永久保留不再删除 |
 | `proxyd restart` | 重启当前实例；macOS 同配置由系统托管时，请求旧实例退出并等待系统拉起替代进程 |
 | `proxyd status` | 运行中显示 pid、端口、Web 地址、API 健康状态，并追加实例汇总（模式/节点存活/端口映射/主端口策略/系统代理/TUN/DNS/自启/新版本提醒） |
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
@@ -520,7 +520,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `tsnet/<节点>-<哈希>/` | tailscale 出站按节点隔离的 tsnet 状态目录（配置历史不备份这些文件） |
 | `cache/<订阅名>.cache` | 各订阅的原始响应缓存（拉取失败时降级用） |
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
-| `proxyd.pid` | 运行中实例的 pid（serve 启动时登记、退出时清理；供 stop/status/防重复启动） |
+| `proxyd.pid` | 运行中实例的 pid 与单实例锁文件（serve 启动时持锁并写入 pid；锁随进程退出自动释放，文件永久保留；stop/status/防重复启动以锁为准，不受过期内容影响） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
 | `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token。配置 `remote.key-file` 时改用指定路径，此文件不再使用 |
 | `remote/ssh_host_ed25519_key` | Web Terminal 与 builtin-ssh 共用的 SSH host key（0600）；首次使用时原子生成，重启后保持稳定 |
@@ -856,7 +856,7 @@ Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文�
 - **节点数多于端口数**：按延迟保留最快的一批，其余节点仍在主端口的 PROXY 选择组里可用。
 - **端口被占**：换 `port-range` / `mixed-port` / `auto-port` / `api-listen` / `external-controller`（分组端口同理）。
 - **异常退出后系统代理没恢复**：`proxyd sysproxy off` 手动关闭（正常退出会自动恢复）。
-- **proxyd stop 提示未在运行但进程还在**：异常退出可能留下过期 pid 文件，stop 会自动清理；确认进程残留时手动 kill。
+- **proxyd stop 提示未在运行但进程还在**：实例存活以 pid 文件上的文件锁判定，旧版本（无文件锁）运行的进程不受锁约束；确认进程残留时手动 kill，之后 stop/status 即恢复正常。
 - **重启后节点还在吗**：在。配置里有订阅/手动节点；`state-dir/nodes.json` 快照让启动即刻可用，`mapping.json` 保证端口不漂。
 
 

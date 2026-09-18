@@ -506,12 +506,27 @@ func sanitizeFileName(name string) string {
 }
 
 // writeCache 把响应体写入缓存文件。
+// 临时文件 + rename 原子替换，避免崩溃留下截断缓存；缓存含节点凭据，
+// 权限与配置文件一致使用 0600，不向同机其他用户暴露。
 func writeCache(stateDir, subName string, body []byte) error {
 	p := cachePath(stateDir, subName)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, body, 0o644)
+	return writeFileAtomic(p, body)
+}
+
+// writeFileAtomic 先写同目录临时文件再 rename，保证目标文件要么完整要么不存在。
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // ReadCachedUserInfo 读取订阅用量缓存。
@@ -559,5 +574,5 @@ func writeUserInfoCache(stateDir, subName string, info UserInfo) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	return writeFileAtomic(p, data)
 }

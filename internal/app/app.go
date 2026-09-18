@@ -88,6 +88,10 @@ type App struct {
 	proxyLifecycle       lifecycle.Tracker
 	remoteLifecycle      lifecycle.Tracker
 	gatewayLifecycle     lifecycle.Tracker
+	// cfg 是运行配置。可变字段的写必须持 a.mu 且在 refreshing/域事务锁内串行；
+	// StateDir、HealthURL、HealthTimeout 自 New 之后不再修改，允许只读路径免锁读取
+	// （如 snapshotPath、autostartOptions），新增配置项不得加入该不可变清单除非
+	// 确认无任何运行时写路径。
 	cfg                  *config.Config
 	cfgPath              string // 配置文件路径，配置变更时持久化；为空则不落盘
 	runner               *core.Runner

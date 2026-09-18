@@ -56,6 +56,24 @@ func (t *Tracker) Complete(generation uint64, phase string, running bool, messag
 	}
 }
 
+// CompleteCurrent 以当前世代提交结果，用于流水线收尾阶段覆盖本轮尝试的最终状态。
+// 与 Begin+Complete 组合的区别：不新增尝试计数，也不会先把相位闪成 starting。
+// 参数：phase、running、message 同 Complete；retryAfter 为零时不安排重试。
+// 返回无；调用方需确保没有并发流水线正在运行（本包调用点均持串行锁）。
+func (t *Tracker) CompleteCurrent(phase string, running bool, message string, retryAfter time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.state.Phase = phase
+	t.state.Running = running
+	t.state.Error = message
+	t.state.UpdatedAt = time.Now().UTC()
+	t.state.NextRetryAt = nil
+	if retryAfter > 0 {
+		next := t.state.UpdatedAt.Add(retryAfter)
+		t.state.NextRetryAt = &next
+	}
+}
+
 // Snapshot 返回独立快照；参数无，返回 State；尚无操作时为 idle，无错误。
 func (t *Tracker) Snapshot() State {
 	t.mu.Lock()
