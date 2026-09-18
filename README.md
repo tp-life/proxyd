@@ -28,7 +28,7 @@
 - 配置备份与恢复：Web 设置页默认导出打码 YAML，也可显式导出含凭据的完整备份；导入通过完整校验并原子落盘，重启后生效
 - 新版本提示：启动后异步检查官方 GitHub Releases，概览页仅在发现更新时提示；可用 `check-updates: false` 或设置页开关关闭
 - 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
-- 现代化只读 TUI：`proxyd ls` 复用 Web 控制台的本地 API，集中展示概览、节点、订阅、入口、规则、连接、远程隧道与日志；不会调用任何写接口，来源地址和凭据仅显示安全摘要
+- 现代化交互式 TUI：`proxyd ls` 复用 Web 控制台的本地 API，覆盖概览、节点、订阅、入口、规则、连接、网关、远程隧道、远程桌面与日志共 10 个视图页；快照轮询只读，模式切换/启停/测速/关闭连接等写操作仅由显式按键触发（危险操作需 y/n 确认），来源地址和凭据仅显示安全摘要
 - 远程连接（周边功能，与代理独立）：内嵌 [tailcat](https://github.com/tailscale/tailcat) 隧道（WireGuard 端到端加密 + DERP 中继，无需 Tailscale 账号/客户端），把本机端口（如 SSH 22）暴露给持有 token 的对端；`proxyd ssh <远端>` 一键经隧道连接，`proxyd scp` 直接经隧道传文件，支持本地常驻转发（listen 可留空自动分配端口），详见 [手册](docs/manual.md#十远程连接tailcat-隧道)
 - 独立远程桌面管理：Web「远程桌面」页分别提供服务端 RDP/VNC 监听检测与隧道开放，以及客户端连接档案、临时会话和系统客户端唤起；连接档案不保存密码或 token 副本
 - REST API 与 Web 控制台：
@@ -110,7 +110,7 @@ proxyd main-auto [on|off]        proxyd main-port 42999   # 主端口最优节�
 proxyd main-node <节点名|key|off>                         # 主端口固定节点（可按名称）/ 清除
 proxyd conn list | proxyd conn close <id|all>             # 活动连接查看/关闭
 proxyd traffic                                            # 实时上/下行速率
-proxyd ls                                                 # 打开现代化只读 TUI（h/l 切页、j/k 滚动、q 退出）
+proxyd ls                                                 # 打开交互式 TUI（h/l 切页、j/k 移动光标、? 帮助、q 退出）
 proxyd dns-preset [off|fake-ip|redir-host]   proxyd update-check [on|off]
 proxyd config export [--full] -o 备份.yaml | proxyd config import 备份.yaml
 proxyd refresh                   proxyd test
@@ -127,7 +127,7 @@ proxyd desk vnc mac-studio     # 临时转发远端 5900 并打开本机 VNC 客
 
 启动后打开 **Web 控制台 `http://127.0.0.1:19091/`**：侧边栏除代理与系统管理外，还把「远程连接」（tailcat/SSH/通用端口转发）和「远程桌面」（RDP/VNC 服务与连接档案）拆成两个独立页面。远程桌面服务端页会分别展示操作系统服务是否真实监听、端口是否已通过隧道开放；客户端页保存不含密码的常用连接并按需建立临时回环转发。控制台还可查看实时流量趋势、搜索与筛选节点、启停和编辑订阅、管理映射/分组/规则、暂停连接或日志刷新，以及一键切换规则/全局/直连模式。系统设置采用页内分区导航，可管理主端口、自动选优、TUN、系统代理、开机自启与配置备份；配置导入会先展示差异预览，确认摘要未变化后才原子写入。常规状态每 60 秒刷新，活动连接页停留期间每 2 秒更新；并提供 `⌘K` / `Ctrl+K` 命令面板执行跳页、刷新、测速与模式切换。
 
-偏好终端时可运行 **`proxyd ls`**。TUI 每 3 秒读取与 Web 控制台同源的只读接口，并通过实时流量流更新速率；支持数字键或 `h/l` 切页、`j/k` 滚动、`r` 立即刷新、`?` 查看帮助、`q` 退出。它不提供切换、编辑、测速、刷新订阅或关闭连接等操作。
+偏好终端时可运行 **`proxyd ls`**。TUI 每 3 秒读取与 Web 控制台同源的只读接口，并通过实时流量流更新速率；支持数字键或 `h/l` 切页、`j/k` 移动光标或滚动、`r` 立即刷新、`?` 查看帮助、`q` 退出。写操作（切换模式/主出口、启停订阅与模块、测速、刷新订阅、关闭连接或桌面会话、删除手动节点等）仅由显式按键触发，关闭全部连接、停用订阅、删除节点等危险操作会先弹出 y/n 确认面板，凭据仍只显示打码摘要。
 
 也可以命令行开关系统代理（指向主端口）：
 

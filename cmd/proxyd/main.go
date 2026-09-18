@@ -227,7 +227,7 @@ usage:
   proxyd update-check [on|off]          查看/开关启动版本检查
   proxyd conn list|close <id|all>       查看/关闭活动连接
   proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
-  proxyd ls [-c 配置]                   启动只读 TUI，展示 Web 控制台数据
+  proxyd ls [-c 配置]                   启动交互式 TUI（10 个视图页；轮询只读，写操作仅显式按键，? 帮助）
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 远程连接（tailcat 隧道，与代理功能独立）:
