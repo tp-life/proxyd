@@ -284,6 +284,11 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 			}
 			if info, ok := currentInfos[subscription.Name]; ok {
 				infos[subscription.Name] = info
+			} else if info, err := subscribe.ReadCachedUserInfo(stateDir, subscription.Name); err == nil && !info.IsZero() {
+				// 内存中没有该订阅的用量（典型场景：进程重启后节点来自快照恢复，
+				// 尚未经过任何订阅拉取），从用量 sidecar 补回，否则控制台的流量
+				// 与到期展示会一直缺失，直到用户下一次手动同步。
+				infos[subscription.Name] = info
 			}
 			if len(bySource[subscription.Name]) > 0 {
 				continue
@@ -608,6 +613,16 @@ func (a *App) restoreSnapshot() error {
 	a.mu.Lock()
 	a.nodes = nodes
 	a.assigns = assigns
+	// 节点来自快照时内存用量为空，直接从用量 sidecar 恢复，让控制台在首次
+	// 健康检查之前就能展示订阅流量与到期信息；读取失败按无用量处理。
+	for _, sub := range a.cfg.Subscriptions {
+		if !sub.IsEnabled() {
+			continue
+		}
+		if info, err := subscribe.ReadCachedUserInfo(a.cfg.StateDir, sub.Name); err == nil && !info.IsZero() {
+			a.subInfos[sub.Name] = info
+		}
+	}
 	a.mu.Unlock()
 	if snap == nil || len(nodes) == 0 {
 		log.Printf("[snapshot] 没有可用节点快照，已按空节点启动；请在控制台手动同步订阅")

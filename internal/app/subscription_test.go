@@ -2,11 +2,18 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	urlpkg "net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
@@ -207,5 +214,115 @@ func TestHealthRefreshNeverFetchesEmptySubscription(t *testing.T) {
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("仅测速不应下载订阅，实际请求次数=%d", requests.Load())
+	}
+}
+
+
+// TestHealthRefreshRestoresCachedUserInfo 验证仅测速路径在内存没有用量时会从用量
+// sidecar 恢复：进程重启后节点来自快照、尚未拉取订阅时，控制台仍应展示流量与到期信息。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于构造隔离状态目录与计数订阅服务。
+//
+// 返回值：无。
+//
+// 错误情况：Refresh(false) 访问网络、未恢复 sidecar 用量，或应用创建失败时测试失败。
+func TestHealthRefreshRestoresCachedUserInfo(t *testing.T) {
+	// 探测目标与最小 CONNECT 代理：mihomo 的 http 出站 URLTest 固定走 CONNECT 隧道，
+	// 建立隧道后双向转发到真实目标，使缓存节点能通过健康检查。
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(targetSrv.Close)
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		upstream, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			_ = upstream.Close()
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		client, _, err := hijacker.Hijack()
+		if err != nil {
+			_ = upstream.Close()
+			return
+		}
+		_, _ = client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		go func() {
+			_, _ = io.Copy(upstream, client)
+			_ = upstream.Close()
+		}()
+		go func() {
+			_, _ = io.Copy(client, upstream)
+			_ = client.Close()
+		}()
+	}))
+	t.Cleanup(proxySrv.Close)
+	proxyURL, err := urlpkg.Parse(proxySrv.URL)
+	if err != nil {
+		t.Fatalf("解析代理地址失败: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	cacheDir := filepath.Join(stateDir, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("创建缓存目录失败: %v", err)
+	}
+	body := fmt.Sprintf("proxies:\n  - name: n1\n    type: http\n    server: %s\n    port: %s\n", proxyURL.Hostname(), proxyURL.Port())
+	if err := os.WriteFile(filepath.Join(cacheDir, "cached.cache"), []byte(body), 0o600); err != nil {
+		t.Fatalf("写入订阅正文缓存失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "cached.userinfo.json"),
+		[]byte(`{"upload":1024,"download":2048,"total":4096,"expire":1893456000}`), 0o600); err != nil {
+		t.Fatalf("写入用量缓存失败: %v", err)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+	}))
+	t.Cleanup(server.Close)
+
+	disabledPortMapping := false
+	a, err := New(&config.Config{
+		Subscriptions: []config.Subscription{{Name: "cached", URL: server.URL, Type: "clash"}},
+		Listen:        "127.0.0.1",
+		PortRange:     [2]int{42000, 42010},
+		PortMapping:   &disabledPortMapping, // 关闭一对一 listener，避免测试绑定真实端口
+		Mode:          "rule",
+		LogLevel:      "silent",
+		StateDir:      stateDir,
+		Rules:         []string{"MATCH,PROXY"},
+		HealthURL:     targetSrv.URL + "/generate_204",
+		HealthTimeout: config.Duration(5 * time.Second),
+	}, "")
+	if err != nil {
+		t.Fatalf("创建应用失败: %v", err)
+	}
+	t.Cleanup(a.Shutdown)
+	// 模拟进程重启后的状态：节点已由快照恢复到内存，但内存用量为空。
+	proxyPort, err := strconv.Atoi(proxyURL.Port())
+	if err != nil {
+		t.Fatalf("解析代理端口失败: %v", err)
+	}
+	a.nodes = []*node.Node{connectProxyNode("n1", "cached", proxyURL.Hostname(), proxyPort)}
+
+	if err := a.Refresh(context.Background(), false); err != nil {
+		t.Fatalf("有缓存节点时仅测速不应失败: %v", err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("仅测速不应下载订阅，实际请求次数=%d", requests.Load())
+	}
+	info, ok := a.SubscriptionUserInfos()["cached"]
+	if !ok || info.Total != 4096 || info.Expire != 1893456000 {
+		t.Fatalf("用量信息应从 sidecar 恢复: %+v", a.SubscriptionUserInfos())
 	}
 }
