@@ -1,10 +1,12 @@
 /** 代理设置页仅管理 proxy 上下文的入口、解析与网络接管。 */
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { ArrowRightLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { Switch as UISwitch } from "@/components/ui/switch";
 import { Field } from "@/components/Field";
+import { FixedNodeDialog } from "@/components/FixedNodeDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { SettingTitle } from "@/components/SettingTitle";
 import { SettingsJump } from "@/components/SettingsJump";
@@ -73,6 +75,13 @@ function isLoopbackListen(addr) {
   return value === "" || value === "localhost" || value === "::1" || value.startsWith("127.");
 }
 
+/** exitChoiceLabel 把默认出口取值转换为提示文案；value 为 string，返回 string，无异常。 */
+function exitChoiceLabel(value) {
+  if (value === "AUTO") return "自动最快";
+  if (value === "DIRECT") return "直连";
+  return value;
+}
+
 /**
  * ProxySettingsPage 渲染代理配置表单。
  * 参数：forms/overview 为 object，onForm/onPost 为 Function；返回 JSX。
@@ -80,21 +89,31 @@ function isLoopbackListen(addr) {
  */
 export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
   const [lanShareConfirm, setLanShareConfirm] = useState(false);
+  const [exitPickerOpen, setExitPickerOpen] = useState(false);
+  const exitTrigger = useRef(null);
   /*
-   * 默认出口下拉列出 AUTO、全部可用节点与 DIRECT。选中值来自内置 PROXY 组，节点按
-   * 名字匹配（与 groupstate 口径一致）；选中节点已失效时补一个兜底项让当前值仍可
-   * 回显。AUTO 需要至少一个可用节点，生成层才创建 AUTO 组。
+   * 默认出口来自内置 PROXY 组的持久化选中项（节点名 / AUTO / DIRECT），页面只负责回显，
+   * 实际选择交给出口弹窗；节点按名字匹配（与 groupstate 口径一致）。AUTO 需要至少一个
+   * 可用节点，生成层才创建 AUTO 组。
    */
-  const selectableNodes = [...overview.nodes].sort((a, b) => Number(b.alive) - Number(a.alive) || a.delay - b.delay || a.name.localeCompare(b.name));
   const defaultExit = (overview.groups || []).find((group) => group.name === "PROXY")?.selected || "";
-  const canAuto = overview.nodes.some((node) => node.alive && !node.tunnel);
-  const exitOptions = [
-    { value: "AUTO", label: "自动最快（AUTO）", disabled: !canAuto },
-    ...selectableNodes.filter((node) => node.alive).map((node) => ({ value: node.name, label: `${node.name} · ${formatDelay(node)}` })),
-    { value: "DIRECT", label: "直连（DIRECT）" },
-  ];
-  if (defaultExit && !exitOptions.some((option) => option.value === defaultExit)) {
-    exitOptions.push({ value: defaultExit, label: `${defaultExit}（当前不可用）`, disabled: true });
+  const exitNode = (overview.nodes || []).find((node) => node.name === defaultExit) || null;
+  const canAuto = (overview.nodes || []).some((node) => node.alive && !node.tunnel);
+  const exitLabel = defaultExit === "AUTO" ? "自动最快（AUTO）" : defaultExit === "DIRECT" ? "直连（DIRECT）" : defaultExit || "未选择默认出口";
+  const exitDetail = defaultExit === "AUTO"
+    ? "由 AUTO 测速组选择当前延迟最低的可用节点"
+    : defaultExit === "DIRECT"
+      ? "不经过任何节点，直接访问目标"
+      : exitNode
+        ? `${exitNode.subscription === "manual" ? "手动节点" : exitNode.subscription || "未知来源"} · ${exitNode.alive ? formatDelay(exitNode) : "当前不可用"}`
+        : defaultExit ? "该出口已不在节点目录中，请重新选择" : "尚未设置默认出口，请选择一个出口";
+  // 出口是否仍然可用：DIRECT 恒可用，AUTO 需要有可用节点，节点出口需要在目录中存活。
+  const exitReady = defaultExit === "DIRECT" || (defaultExit === "AUTO" ? canAuto : Boolean(exitNode?.alive));
+
+  /** openExitPicker 打开出口弹窗并记录焦点入口；event 为 React.MouseEvent，返回 void，无同步异常。 */
+  function openExitPicker(event) {
+    exitTrigger.current = event.currentTarget;
+    setExitPickerOpen(true);
   }
   return (
     <div className="settings-layout">
@@ -118,13 +137,20 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
                 <Button className="form-submit" type="button" onClick={() => onPost("/api/main-port", { port: Number.parseInt(forms.mainPort, 10) }, `主端口已更新为 ${forms.mainPort}`)}>保存端口</Button>
               </div>
               <Field label="默认出口" hint="规则模式未命中规则的流量出口；TUN 与网关流量同样经过它">
-                <Select
-                  ariaLabel="默认出口"
-                  value={defaultExit}
-                  onValueChange={(node) => onPost("/api/groups/PROXY/select", { node }, `默认出口已切换为「${node}」`)}
-                  options={exitOptions}
-                />
+                <button
+                  aria-haspopup="dialog"
+                  className="exit-picker-trigger"
+                  type="button"
+                  onClick={openExitPicker}
+                >
+                  <span className="exit-picker-trigger-main">
+                    <strong>{exitLabel}</strong>
+                    <small>{exitDetail}</small>
+                  </span>
+                  <ArrowRightLeft size={16} aria-hidden="true" />
+                </button>
               </Field>
+              {defaultExit && !exitReady && <p className="permission-note warn">当前默认出口不可用，请重新选择。</p>}
             </div>
           </section>
           <section className="setting-row">
@@ -209,6 +235,17 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
           </section>
         </div>
       </section>
+
+      {exitPickerOpen && (
+        <FixedNodeDialog
+          canAuto={canAuto}
+          currentNode={defaultExit}
+          nodes={overview.nodes}
+          triggerElement={exitTrigger.current}
+          onClose={() => setExitPickerOpen(false)}
+          onSelect={(node) => onPost("/api/groups/PROXY/select", { node }, `默认出口已切换为「${exitChoiceLabel(node)}」`)}
+        />
+      )}
 
       <ConfirmDialog
         open={lanShareConfirm}
