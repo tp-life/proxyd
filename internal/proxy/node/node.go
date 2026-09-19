@@ -19,7 +19,7 @@ type Node struct {
 	FailReason string
 }
 
-// Key 返回用于端口快照、main-node 持久化以及通用去重基础的稳定节点身份。
+// Key 返回用于端口快照与通用去重基础的稳定节点身份。
 //
 // 参数：无；方法读取当前 Node.Mapping。
 //
@@ -27,7 +27,7 @@ type Node struct {
 // dialer-proxy 名称，避免同一服务器经不同上游拨号时被错误去重。凭据提取优先级为
 // uuid → password → auth-key → private-key（后两者覆盖 tailscale/wireguard/ssh 等
 // 隧道类出站）。tailscale 类型无常规 server/port 时以 control-url 顶替 server 位置
-// 参与身份。普通节点保持历史 Key 格式不变，从而兼容已经持久化的 main-node 和端口映射快照。
+// 参与身份。普通节点保持历史 Key 格式不变，从而兼容已经持久化的端口映射快照。
 // 合并节点时应调用 DedupKey；它会为拥有独立 tsnet 状态的 Tailscale 出站补充名称维度。
 //
 // 错误情况：无；缺失或未知类型字段按空字符串参与身份计算。
@@ -68,8 +68,7 @@ func (n *Node) Key() string {
 	return key
 }
 
-// DedupKey 返回节点合并阶段使用的领域身份，不改变端口快照与 main-node 持久化所用
-// 的历史 Key 格式。
+// DedupKey 返回节点合并阶段使用的领域身份，不改变端口快照所用的历史 Key 格式。
 //
 // 参数说明：无；方法读取 Node.Name 与 Node.Mapping，不修改节点内容。
 //

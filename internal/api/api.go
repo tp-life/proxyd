@@ -121,6 +121,7 @@ func (s *Server) Start() error {
 	s.registerProxyTailscaleRoutes(mux)
 	s.registerProxyOpenVPNRoutes(mux)
 	s.registerProxyRuleRoutes(mux)
+	s.registerProxyAdBlockRoutes(mux)
 	s.registerProxyGroupRoutes(mux)
 	s.registerProxyPortRoutes(mux)
 	// 系统与共享路由（system-proxy/tun/dns-preset/update-check/config/restart/autostart/logs/healthz）。

@@ -529,17 +529,6 @@ type Config struct {
 	// Main mixed port (rule-mode entry). Default: PortRange[0]-1.
 	MixedPort int `yaml:"mixed-port"`
 
-	// MainAuto 为 true 时主端口跳过规则匹配，固定走 AUTO url-test 组
-	// （全部可用节点中延迟最低者）；与独立的 auto-port 并存、互不影响。
-	// 无可用节点时本轮跳过该设置（主端口回退规则模式），日志有提示。
-	MainAuto bool `yaml:"main-auto,omitempty"`
-
-	// MainNode 主端口固定节点：不开优选时让主端口跳过规则、直达指定节点。
-	// 存节点 Key（协议+地址+凭据，重命名/重名时稳定），空串 = 不固定（现有行为）。
-	// MainAuto 开启时本字段被忽略（auto 优先）；节点当前不可用（失效/订阅刷新后
-	// 消失）时本轮回退规则模式并打日志，配置保留不删，节点恢复后自动再生效。
-	MainNode string `yaml:"main-node,omitempty"`
-
 	// AutoPort 自动选优端口（type mixed，固定走全部可用节点中延迟最低者）。0=关闭。
 	AutoPort int `yaml:"auto-port,omitempty"`
 
@@ -583,6 +572,11 @@ type Config struct {
 	// 数据面寄生于 proxy 模块的 mihomo（redir/tproxy 入口 + SRC-IP-CIDR 设备规则），
 	// 特权操作平台分治（macOS root helper / Linux setcap，见 docs/adr/0003）；默认关闭。
 	Gateway GatewayConfig `yaml:"gateway,omitempty" json:"gateway"`
+
+	// AdBlock 广告拦截子功能（proxy 模块）：开启后注入 adblock rule-provider +
+	// RULE-SET,adblock,REJECT 规则（排在 custom-rules/rule-urls 之后、内置 rules 之前）；
+	// 默认关闭。主端口恒为规则模式，开启后对规则未命中的流量一致生效。
+	AdBlock AdBlockConfig `yaml:"adblock,omitempty" json:"adblock"`
 
 	// migratedLegacy 记录 Parse 是否执行过兼容迁移（不参与序列化），
 	// 供启动路径把迁移结果一次性写回配置文件。
@@ -828,6 +822,7 @@ func (c *Config) applyDefaults() {
 	c.TUN.ApplyDefaults()
 	c.Desktop.ApplyDefaults()
 	c.Gateway.ApplyDefaults()
+	c.AdBlock.ApplyDefaults()
 	// geo 下载地址：默认镜像 + 用户按键覆盖
 	merged := make(map[string]any, len(DefaultGeoXUrl))
 	for k, v := range DefaultGeoXUrl {
@@ -1039,6 +1034,9 @@ func (c *Config) validate(allowMissingAPISecret bool) error {
 		return err
 	}
 	if err := c.checkGateway(); err != nil {
+		return err
+	}
+	if err := c.AdBlock.Validate(); err != nil {
 		return err
 	}
 	return nil

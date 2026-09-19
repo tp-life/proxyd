@@ -23,7 +23,7 @@ export const NAV_ITEMS = [
   { id: "connections", label: "活动连接", group: "proxy", section: "代理资源", icon: Link2 },
   { id: "proxy/tailscale", label: "Tailscale", group: "proxy", section: "VPN 接入", icon: Network, keywords: "Tailnet Headscale tsnet VPN 接入" },
   { id: "proxy/openvpn", label: "OpenVPN", group: "proxy", section: "VPN 接入", icon: Shield, keywords: "OpenVPN VPN 隧道 证书" },
-  { id: "proxy/settings", label: "代理设置", group: "proxy", section: "代理配置", icon: Settings, keywords: "DNS TUN 系统代理 端口 固定节点" },
+  { id: "proxy/settings", label: "代理设置", group: "proxy", section: "代理配置", icon: Settings, keywords: "DNS TUN 系统代理 端口 默认出口" },
   { id: "gateway", keywords: "旁路由 网关 LAN 设备 分流 helper", label: "LAN 网关", group: "gateway", icon: Router, detail: "登记局域网设备，把它的网关/DNS 指向本机即可分流。" },
   { id: "remote/devices", keywords: "SSH 连接 诊断 diagnose 设备", label: "设备与连接", group: "remote", icon: Laptop, detail: "保存远端设备，连接 SSH 并检查链路。" },
   { id: "remote/services", label: "本机服务", group: "remote", icon: Server, detail: "管理本机隧道、SSH、浏览器终端和暴露端口。" },

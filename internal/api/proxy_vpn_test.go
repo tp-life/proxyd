@@ -175,15 +175,32 @@ func TestGroupSelectAPI(t *testing.T) {
 	if rec := post("vpn", `{"node":"self"}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("节点不在可用成员中 status=%d, want 400", rec.Code)
 	}
+
+	// 内置 PROXY 组（默认出口）：DIRECT 恒可选并持久化选中；
+	// 无可用节点时 AUTO 与节点名均拒绝。
+	if rec := post("PROXY", `{"node":"AUTO"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("无可用节点时 PROXY 选 AUTO status=%d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if rec := post("PROXY", `{"node":"self"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("PROXY 选不可用节点 status=%d, want 400 (body=%s)", rec.Code, rec.Body.String())
+	}
+	rec := post("PROXY", `{"node":"DIRECT"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PROXY 选 DIRECT status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := srv.app.GroupSelected()["PROXY"]; got != "DIRECT" {
+		t.Fatalf("PROXY 选中项未持久化: %q", got)
+	}
 }
 
 // TestListGroupsExposesTypeAndSelected 验证分组列表响应始终暴露归一化后的
 // type（空值补 url-test），并对 select 分组附带持久化的当前选中项；
-// overview 的 groups 字段与列表接口共用同一结构。
+// overview 的 groups 字段与列表接口共用同一结构。列表头部恒为内置 PROXY
+// 项（builtin=true，默认出口），其选中项同样来自 groupstate。
 func TestListGroupsExposesTypeAndSelected(t *testing.T) {
 	srv := vpnGroupTestServer(t)
 	stateDir := srv.app.Config().StateDir
-	if err := groupstate.Save(filepath.Join(stateDir, groupstate.FileName), map[string]string{"vpn": "self"}); err != nil {
+	if err := groupstate.Save(filepath.Join(stateDir, groupstate.FileName), map[string]string{"vpn": "self", "PROXY": "DIRECT"}); err != nil {
 		t.Fatalf("写入选中状态失败: %v", err)
 	}
 
@@ -196,14 +213,17 @@ func TestListGroupsExposesTypeAndSelected(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("分组数量 = %d, want 2", len(entries))
+	if len(entries) != 3 {
+		t.Fatalf("分组数量 = %d, want 3", len(entries))
 	}
-	if entries[0].Type != config.GroupTypeSelect || entries[0].Selected != "self" {
-		t.Errorf("select 分组条目异常: %+v", entries[0])
+	if entries[0].Name != "PROXY" || !entries[0].Builtin || entries[0].Type != config.GroupTypeSelect || entries[0].Selected != "DIRECT" {
+		t.Errorf("内置 PROXY 分组条目异常: %+v", entries[0])
 	}
-	if entries[1].Type != config.GroupTypeURLTest || entries[1].Selected != "" {
-		t.Errorf("普通分组条目异常: %+v", entries[1])
+	if entries[1].Type != config.GroupTypeSelect || entries[1].Selected != "self" || entries[1].Builtin {
+		t.Errorf("select 分组条目异常: %+v", entries[1])
+	}
+	if entries[2].Type != config.GroupTypeURLTest || entries[2].Selected != "" {
+		t.Errorf("普通分组条目异常: %+v", entries[2])
 	}
 
 	ov := httptest.NewRecorder()
@@ -217,8 +237,25 @@ func TestListGroupsExposesTypeAndSelected(t *testing.T) {
 	if err := json.Unmarshal(ov.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Groups) != 2 || payload.Groups[0].Selected != "self" || payload.Groups[0].Type != config.GroupTypeSelect {
+	if len(payload.Groups) != 3 || !payload.Groups[0].Builtin || payload.Groups[0].Selected != "DIRECT" ||
+		payload.Groups[1].Selected != "self" || payload.Groups[1].Type != config.GroupTypeSelect {
 		t.Fatalf("overview 分组条目异常: %+v", payload.Groups)
+	}
+}
+
+// TestMainNodeRoutesRemoved 验证 main-node / main-auto 管理端点已随内置 PROXY
+// 组（默认出口）改造移除，经真实 ServeMux 路由返回 404。
+func TestMainNodeRoutesRemoved(t *testing.T) {
+	srv := vpnGroupTestServer(t)
+	mux := http.NewServeMux()
+	srv.registerProxyGroupRoutes(mux)
+	srv.registerProxyPortRoutes(mux)
+	for _, path := range []string{"/api/main-node", "/api/main-auto"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST %s status=%d, want 404", path, rec.Code)
+		}
 	}
 }
 

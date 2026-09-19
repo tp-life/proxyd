@@ -25,7 +25,7 @@ func (s *Server) registerProxyNodeRoutes(mux *http.ServeMux) {
 // NodeEntry 是节点列表中的单条记录。
 type NodeEntry struct {
 	Name         string `json:"name"`
-	Key          string `json:"key"`  // 稳定身份（协议+地址+凭据），main-node 等按它引用节点
+	Key          string `json:"key"`  // 稳定身份（协议+地址+凭据），去重与稳定端口分配按它识别节点
 	Type         string `json:"type"` // 出站协议（ss/vmess/...）
 	Subscription string `json:"subscription"`
 	Delay        uint16 `json:"delay"`
@@ -40,11 +40,9 @@ type Overview struct {
 	Mode               string                  `json:"mode"`
 	Listen             string                  `json:"listen"`
 	MixedPort          int                     `json:"mixed_port"`
-	MainAuto           bool                    `json:"main_auto"`            // 主端口是否固定走最优节点（跳过规则）
-	MainNode           string                  `json:"main_node"`            // 主端口固定节点（node key；空串=跟随规则）
-	MainNodeUp         bool                    `json:"main_node_up"`         // main-node 当前是否生效（节点可用且 main-auto 未开）
 	AutoPort           int                     `json:"auto_port"`            // 0 表示关闭
 	PortMappingEnabled bool                    `json:"port_mapping_enabled"` // 一对一节点端口 listener 是否实际启用
+	AdBlockEnabled     bool                    `json:"adblock_enabled"`      // 广告拦截是否开启（规则模式恒生效）
 	SystemProxy        bool                    `json:"system_proxy"`         // 配置状态（是否启用系统代理）
 	TUN                app.TUNStatus           `json:"tun"`                  // TUN 开关与当前进程权限状态
 	DNSPreset          string                  `json:"dns_preset"`           // off|fake-ip|redir-host
@@ -92,10 +90,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		Mode:               s.app.Mode(),
 		Listen:             cfg.Listen,
 		MixedPort:          cfg.MixedPort,
-		MainAuto:           cfg.MainAuto,
-		MainNode:           cfg.MainNode,
 		AutoPort:           cfg.AutoPort,
 		PortMappingEnabled: cfg.PortMappingEnabled(),
+		AdBlockEnabled:     cfg.AdBlock.Enable,
 		SystemProxy:        cfg.SystemProxy && !cfg.ProxyDisabled,
 		TUN:                s.app.TUNStatus(),
 		DNSPreset:          cfg.DNSPreset,
@@ -127,12 +124,6 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 			if n.Alive {
 				ov.Subs[i].Alive++
 			}
-		}
-		// main-node 生效与否只取决于节点可用且 main-auto 未开（与内核 resolveMainInbound 一致）；
-		// 节点是否有独立端口监听（portOf）受端口映射开关影响，与主端口固定 listener 无关，
-		// 不能作为生效条件，否则关闭映射时概览会误报「固定节点不可用/已回退」。
-		if cfg.MainNode != "" && !cfg.MainAuto && n.Alive && n.Key() == cfg.MainNode {
-			ov.MainNodeUp = true
 		}
 	}
 	for index := range ov.Subs {

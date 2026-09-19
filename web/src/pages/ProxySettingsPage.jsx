@@ -1,5 +1,7 @@
 /** 代理设置页仅管理 proxy 上下文的入口、解析与网络接管。 */
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { Switch as UISwitch } from "@/components/ui/switch";
 import { Field } from "@/components/Field";
@@ -13,8 +15,8 @@ const SETTINGS_HELP = {
   mainEntry: {
     heading: "主代理入口如何工作",
     paragraphs: [
-      "主端口是应用最常使用的 HTTP + SOCKS5 混合代理入口。默认情况下，它按照当前的规则、全局或直连模式决定出口。",
-      "开启“始终使用当前延迟最低的节点”后，主端口会绕过访问规则并交给 AUTO 测速组；固定节点同样会绕过规则。两者同时配置时，自动选优优先于固定节点。",
+      "主端口是应用最常使用的 HTTP + SOCKS5 混合代理入口，按当前的规则、全局或直连模式决定出口。",
+      "规则模式下未命中任何规则的流量、以及 TUN 与网关的同类流量，都由「默认出口」决定：可以固定到某个节点，也可以交给 AUTO 测速组自动选择延迟最低的节点，或直接连接（DIRECT）。默认出口只在规则模式生效。",
     ],
     note: "修改端口会热更新代理核心；端口不能与 API、节点映射、自动选优或策略分组端口冲突。",
   },
@@ -55,25 +57,44 @@ const SETTINGS_HELP = {
     ],
     note: "修改接管方式可能短暂影响现有连接；操作前请确认主端口和规则配置可用。",
   },
+  lanShare: {
+    heading: "局域网共享是什么",
+    paragraphs: [
+      "默认所有代理入口只监听 127.0.0.1，仅本机应用可用。开启共享后切换为监听 0.0.0.0，同一局域网的设备把代理指向 http://<本机IP>:<端口> 即可共用你的代理出口。",
+      "切换通过热更新完成，进程不重启、现有配置不丢失；关闭后恢复为只监听 127.0.0.1。若配置文件中 listen 已手改为指定的网卡地址，开启操作会保留该地址不变。",
+    ],
+    note: "代理数据面没有访问认证：开启期间同网段任何人都能使用你的代理并消耗订阅流量，请仅在可信网络中开启。",
+  },
 };
+
+// isLoopbackListen 判断 listen 是否为本机回环地址；空值按默认 127.0.0.1 处理。
+function isLoopbackListen(addr) {
+  const value = (addr || "").trim().toLowerCase();
+  return value === "" || value === "localhost" || value === "::1" || value.startsWith("127.");
+}
 
 /**
  * ProxySettingsPage 渲染代理配置表单。
  * 参数：forms/overview 为 object，onForm/onPost 为 Function；返回 JSX。
- * 错误：端口与运行约束由已有 API 校验；提交失败由父组件提示，失效固定节点保留回显。
+ * 错误：端口与运行约束由已有 API 校验；提交失败由父组件提示，失效的默认出口保留回显。
  */
 export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
-  // 固定节点下拉必须包含全部节点（含失效）：只列可用节点时，已固定但暂时失效的节点
-  // 会不在选项里，Select 无法回显出具体节点名。失效节点标记文案并禁止新选。
+  const [lanShareConfirm, setLanShareConfirm] = useState(false);
+  /*
+   * 默认出口下拉列出 AUTO、全部可用节点与 DIRECT。选中值来自内置 PROXY 组，节点按
+   * 名字匹配（与 groupstate 口径一致）；选中节点已失效时补一个兜底项让当前值仍可
+   * 回显。AUTO 需要至少一个可用节点，生成层才创建 AUTO 组。
+   */
   const selectableNodes = [...overview.nodes].sort((a, b) => Number(b.alive) - Number(a.alive) || a.delay - b.delay || a.name.localeCompare(b.name));
-  const nodeOptions = selectableNodes.map((node) => ({
-    value: node.key,
-    label: node.alive ? `${node.name} · ${formatDelay(node)}` : `${node.name} · 失效`,
-    disabled: !node.alive,
-  }));
-  // 已配置的固定节点不在当前列表（订阅刷新后消失）时补一个兜底项，让当前值仍可回显
-  if (overview.main_node && !selectableNodes.some((node) => node.key === overview.main_node)) {
-    nodeOptions.push({ value: overview.main_node, label: "已配置的节点（当前不在节点列表）", disabled: true });
+  const defaultExit = (overview.groups || []).find((group) => group.name === "PROXY")?.selected || "";
+  const canAuto = overview.nodes.some((node) => node.alive && !node.tunnel);
+  const exitOptions = [
+    { value: "AUTO", label: "自动最快（AUTO）", disabled: !canAuto },
+    ...selectableNodes.filter((node) => node.alive).map((node) => ({ value: node.name, label: `${node.name} · ${formatDelay(node)}` })),
+    { value: "DIRECT", label: "直连（DIRECT）" },
+  ];
+  if (defaultExit && !exitOptions.some((option) => option.value === defaultExit)) {
+    exitOptions.push({ value: defaultExit, label: `${defaultExit}（当前不可用）`, disabled: true });
   }
   return (
     <div className="settings-layout">
@@ -96,17 +117,12 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
                 <Field label="主端口"><input type="number" min="1" max="65535" value={forms.mainPort} onChange={(event) => onForm("mainPort", event.target.value)} /></Field>
                 <Button className="form-submit" type="button" onClick={() => onPost("/api/main-port", { port: Number.parseInt(forms.mainPort, 10) }, `主端口已更新为 ${forms.mainPort}`)}>保存端口</Button>
               </div>
-              <UISwitch checked={overview.main_auto} label="始终使用当前延迟最低的节点" onCheckedChange={(enabled) => onPost("/api/main-auto", { enabled }, enabled ? "主端口已切换为最优节点" : "主端口已恢复规则模式")} />
-              <Field label="固定节点" hint={overview.main_auto ? "关闭自动选择后可固定节点" : "留空时跟随当前规则和模式"}>
+              <Field label="默认出口" hint="规则模式未命中规则的流量出口；TUN 与网关流量同样经过它">
                 <Select
-                  ariaLabel="主端口固定节点"
-                  disabled={overview.main_auto}
-                  value={overview.main_node || ""}
-                  onValueChange={(node) => onPost("/api/main-node", { node }, node ? "主端口已固定到所选节点" : "主端口已恢复规则模式")}
-                  options={[
-                    { value: "", label: "跟随规则与模式" },
-                    ...nodeOptions,
-                  ]}
+                  ariaLabel="默认出口"
+                  value={defaultExit}
+                  onValueChange={(node) => onPost("/api/groups/PROXY/select", { node }, `默认出口已切换为「${node}」`)}
+                  options={exitOptions}
                 />
               </Field>
             </div>
@@ -121,6 +137,17 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
                 <Button className="form-submit" type="button" onClick={() => onPost("/api/port-range", { range: `${forms.rangeLo}-${forms.rangeHi}` }, "端口区间已更新")}>保存范围</Button>
               </div>
               <p className="permission-note ok">关闭后保留稳定分配；主端口、自动选优与分组端口继续工作。</p>
+            </div>
+          </section>
+          <section className="setting-row">
+            <SettingTitle title="局域网共享" detail="允许局域网设备使用本机代理" help={SETTINGS_HELP.lanShare} />
+            <div className="setting-control">
+              <UISwitch
+                checked={!isLoopbackListen(overview.listen)}
+                label="允许局域网设备使用代理"
+                onCheckedChange={(enabled) => enabled ? setLanShareConfirm(true) : onPost("/api/lan-share", { enabled: false }, "局域网共享已关闭")}
+              />
+              <p className="permission-note warn">开启后所有代理入口监听 0.0.0.0；数据面无认证，请仅在可信网络开启。</p>
             </div>
           </section>
           <section className="setting-row">
@@ -183,6 +210,14 @@ export function ProxySettingsPage({ forms, overview, onForm, onPost }) {
         </div>
       </section>
 
+      <ConfirmDialog
+        open={lanShareConfirm}
+        onOpenChange={setLanShareConfirm}
+        title="开启局域网共享？"
+        description="开启后所有代理入口将监听 0.0.0.0，同一局域网的任何设备都能通过 http://<本机IP>:<端口> 使用你的代理。代理数据面没有访问认证，请确认当前网络可信。"
+        confirmLabel="开启共享"
+        onConfirm={() => onPost("/api/lan-share", { enabled: true }, "局域网共享已开启")}
+      />
     </div>
   );
 }

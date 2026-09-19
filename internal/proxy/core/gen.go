@@ -20,14 +20,20 @@ import (
 // Assignment 是端口到节点的映射（internal/pool 定义的别名）。
 type Assignment = pool.Assignment
 
+const (
+	// adBlockProviderName 是广告拦截注入的 rule-provider 保留键名。
+	adBlockProviderName = "adblock"
+	// adBlockRule 是开启广告拦截时插入的规则：命中的域名直接 REJECT。
+	adBlockRule = "RULE-SET,adblock,REJECT"
+)
+
 // Generate 生成完整的 mihomo YAML 配置：
-// 主端口 mixed-port 默认走常规 Clash 规则模式（rule/global/direct）；
-// main-auto 开启时主端口改为 listener 固定走 AUTO url-test 组（跳过规则匹配），
-// 无可用节点时回退规则模式（打日志）；
-// main-node 非空（且 main-auto 未开启）时主端口 listener 固定直达该节点（跳过规则），
-// 节点当前不可用时回退规则模式（打日志，配置保留，恢复后自动再生效）；
+// 主端口恒为顶层 mixed-port，走常规 Clash 规则模式（rule/global/direct）；
+// 规则兜底的 MATCH,PROXY 落到内置 PROXY select 组（全部可用节点 + AUTO + DIRECT），
+// 组的持久化选中项（默认出口）经 default-selected 注入，未选择时落成员首位；
 // 每个节点分配一个 listener（type mixed，proxy 固定出口到该节点）；
-// auto-port 开启时额外生成一个固定走 AUTO url-test 组（全部可用节点选优）的 listener；
+// 有可用节点即生成 AUTO url-test 组（全部可用节点选优）；
+// auto-port 开启时额外生成一个固定走 AUTO 组的 listener；
 // 每个节点分组额外生成一个 proxy-group + 固定走该组的 mixed listener；
 // 分组可以显式列节点，也可以按订阅名动态取该订阅当前可用节点。
 // tun 段由 config.TUNConfig 提供常用默认值并保留高级字段，生成时完整交给 mihomo；
@@ -37,8 +43,6 @@ type Assignment = pool.Assignment
 // 注意：listener 名称统一用端口号（"L<port>"），不带节点/分组名。
 // mihomo 热更新（PatchInboundListeners）先 Listen 新 listener、后关闭旧 listener，
 // 同端口改名会 bind 冲突把端口打挂；同名但配置不同才会按 关闭→监听 的正确顺序处理。
-// main-auto/main-node 切换时主端口在 mixed-port 与 listener 之间转换，同属 inbound 热更新范畴，
-// 名称同样保持 L<port> 规范。
 func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]byte, error) {
 	return generate(cfg, assigns, nil, imported, nil)
 }
@@ -161,34 +165,37 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	m["proxies"] = proxies
 
-	// 主端口入口形态：main-auto（AUTO 组）优先于 main-node（固定节点），
-	// 两者都未生效时回退顶层 mixed-port 规则模式。
-	mainTarget := resolveMainInbound(cfg, assigns, nodes)
-	if cfg.MainAuto && cfg.MainNode != "" {
-		log.Printf("[core] main-auto 已开启，main-node 本轮被忽略（auto 优先）")
-	}
-	if cfg.MainAuto && mainTarget == "" {
-		log.Printf("[core] main-auto 已开启但当前无可用节点，本轮主端口回退规则模式")
-	}
-	if !cfg.MainAuto && cfg.MainNode != "" && mainTarget == "" {
-		log.Printf("[core] main-node 指定的节点当前不可用（失效或已消失），本轮主端口回退规则模式")
-	}
-	if mainTarget == "" {
-		m["mixed-port"] = cfg.MixedPort
-	}
+	// 主端口恒为顶层 mixed-port 规则模式；兜底 MATCH,PROXY 落到内置 PROXY select 组，
+	// 组的选中项（默认出口）由用户在控制台/API 选择并经 default-selected 持久化。
+	m["mixed-port"] = cfg.MixedPort
 
-	// 主端口规则模式下使用的选择组：所有节点 + 内置 DIRECT（空 assigns 时仅 DIRECT）。
-	names := append(slices.Clone(nodeNames), "DIRECT")
-	groups := []map[string]any{
-		{"name": "PROXY", "type": "select", "proxies": names},
-	}
-
-	// AUTO url-test 组（全部可用节点中延迟最低）：auto-port 与 main-auto 共用。
-	autoWanted := cfg.AutoPort > 0 || mainTarget == "AUTO"
-	switch {
-	case autoWanted && len(nodeNames) == 0:
+	// AUTO url-test 组（全部可用节点中延迟最低）：有可用节点即生成，
+	// 供内置 PROXY 组（「自动最快」选项）与 auto-port listener 引用；成员限 nodeNames，
+	// 不含隧道类节点（隧道节点延迟语义不同，只经 PROXY 组直接选择）。
+	autoGroupOn := len(nodeNames) > 0
+	if cfg.AutoPort > 0 && !autoGroupOn {
 		log.Printf("[core] auto-port %d 已开启但当前无可用节点，本轮跳过该 listener", cfg.AutoPort)
-	case autoWanted:
+	}
+
+	// 内置 PROXY select 组：规则模式的默认出口。成员 = 全部可用节点
+	// （availableProxyNodes 顺序：assigns 在前、额外可用节点含隧道在后）+ AUTO（存在时）
+	// + DIRECT 殿后；无持久化选择时 mihomo 原生落成员首位（第一可用节点），行为与旧版一致。
+	// 持久化选中项（state-dir/group-selected.json 的 "PROXY" 键）仅在仍是当前成员时
+	// 写入 default-selected；失效值被忽略，mihomo 按其原生语义回退成员首位。
+	proxyMembers := make([]string, 0, len(proxyNodes)+2)
+	for _, n := range proxyNodes {
+		proxyMembers = append(proxyMembers, n.Name)
+	}
+	if autoGroupOn {
+		proxyMembers = append(proxyMembers, "AUTO")
+	}
+	proxyMembers = append(proxyMembers, "DIRECT")
+	proxyGroup := map[string]any{"name": "PROXY", "type": "select", "proxies": proxyMembers}
+	if sel := selected["PROXY"]; sel != "" && slices.Contains(proxyMembers, sel) {
+		proxyGroup["default-selected"] = sel
+	}
+	groups := []map[string]any{proxyGroup}
+	if autoGroupOn {
 		groups = append(groups, map[string]any{
 			"name":      "AUTO",
 			"type":      "url-test",
@@ -206,17 +213,6 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 				"proxy":  "AUTO",
 			})
 		}
-	}
-	if mainTarget != "" {
-		// 主端口以 listener 形式固定走 mainTarget（AUTO 组或指定节点）：
-		// 规则匹配（自定义/内置规则）对其不再生效；节点映射端口、分组端口、auto-port 不受影响。
-		listeners = append(listeners, map[string]any{
-			"name":   fmt.Sprintf("L%d", cfg.MixedPort),
-			"type":   "mixed",
-			"listen": cfg.Listen,
-			"port":   cfg.MixedPort,
-			"proxy":  mainTarget,
-		})
 	}
 
 	// 节点分组：组名与节点名/保留名冲突或成员交集为空时跳过（打日志）。
@@ -261,18 +257,44 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	m["proxy-groups"] = groups
 
 	// 规则合并顺序：gateway 设备规则（SRC-IP-CIDR）最前 → 用户 custom-rules →
-	// rule-urls 导入规则 → 内置规则（追加在 GEOSITE/GEOIP/MATCH 之后永远不会命中，
-	// 所以设备/自定义/导入规则必须前置）。
-	rules := make([]string, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(cfg.Rules))
+	// rule-urls 导入规则 → 广告拦截 RULE-SET → 内置规则（追加在 GEOSITE/GEOIP/MATCH
+	// 之后永远不会命中，所以设备/自定义/导入规则必须前置）。广告规则排在导入规则之后，
+	// 用户可用 custom-rules / rule-urls 自行加白名单例外。
+	rules := make([]string, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(cfg.Rules)+1)
 	if gatewayActive(cfg) {
 		rules = append(rules, gatewayDeviceRules(cfg, groups)...)
 	}
 	rules = append(rules, cfg.CustomRules...)
 	rules = append(rules, imported...)
+	if cfg.AdBlock.Enable {
+		rules = append(rules, adBlockRule)
+	}
 	rules = append(rules, cfg.Rules...)
 	m["rules"] = rules
-	if cfg.RuleProviders != nil {
-		m["rule-providers"] = cfg.RuleProviders
+	ruleProviders := cfg.RuleProviders
+	if cfg.AdBlock.Enable {
+		// adblock 是 proxyd 保留的 rule-provider 键；用户手写 rule-providers 占用
+		// 该键时直接报错（经配置事务回滚），避免静默覆盖用户配置。
+		if _, taken := ruleProviders[adBlockProviderName]; taken {
+			return nil, fmt.Errorf("rule-providers 中 %q 是广告拦截功能的保留名，请改用其它键名", adBlockProviderName)
+		}
+		merged := make(map[string]any, len(ruleProviders)+1)
+		for key, value := range ruleProviders {
+			merged[key] = value
+		}
+		// 默认规则集（Loyalsoldier clash-rules reject.txt）是 domain 行为的
+		// YAML payload 文本；下载/缓存/周期刷新全部由 mihomo 负责。
+		merged[adBlockProviderName] = map[string]any{
+			"type":     "http",
+			"behavior": "domain",
+			"format":   "yaml",
+			"url":      cfg.AdBlock.RuleURL,
+			"interval": 86400,
+		}
+		ruleProviders = merged
+	}
+	if ruleProviders != nil {
+		m["rule-providers"] = ruleProviders
 	}
 	if len(listeners) > 0 {
 		m["listeners"] = listeners
@@ -509,43 +531,6 @@ func resolveGroupMembersFromNodes(g config.NodeGroup, nodes []*node.Node, nodeSe
 		}
 	}
 	return members
-}
-
-// resolveMainInbound 计算主端口固定 listener 的 proxy 目标：
-// main-auto 开启且有可用节点时为 "AUTO"（auto 优先，main-node 被忽略）；
-// 否则 main-node 非空且该节点（按 Key 匹配）当前可用时为节点名；
-// 其余情况返回空串 = 主端口回退顶层 mixed-port 规则模式。
-//
-// 节点查找范围：先查获得本地端口的 assignment，再查完整节点集 nodes 中的 Alive 节点
-// ——隧道类节点不参与端口映射（不会出现在 assigns），但 ADR 0002 允许 main-node
-// 引用它们；节点失效时维持既有「回退规则模式」行为不变。
-func resolveMainInbound(cfg *config.Config, assigns []Assignment, nodes []*node.Node) string {
-	if cfg.MainAuto {
-		if len(assigns) > 0 {
-			return "AUTO"
-		}
-		return ""
-	}
-	if cfg.MainNode != "" {
-		for _, a := range assigns {
-			if a.Node != nil && a.Node.Key() == cfg.MainNode {
-				return a.Node.Name
-			}
-		}
-		for _, n := range nodes {
-			if n != nil && n.Alive && n.Key() == cfg.MainNode {
-				return n.Name
-			}
-		}
-	}
-	return ""
-}
-
-// MainInboundIsListener 报告给定配置与节点下主端口是否为固定 listener 形态
-// （供 App 判断 mixed-port ↔ listener 转换，决定是否需要先释放主端口再热更新）。
-// nodes 为当前完整节点集（含健康状态），用于识别 main-node 引用的隧道类节点。
-func MainInboundIsListener(cfg *config.Config, assigns []Assignment, nodes []*node.Node) bool {
-	return resolveMainInbound(cfg, assigns, nodes) != ""
 }
 
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。

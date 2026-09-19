@@ -119,10 +119,6 @@ func main() {
 			err = cmdPortMapping(os.Args[2:])
 		case "auto-port":
 			err = cmdAutoPort(os.Args[2:])
-		case "main-auto":
-			err = cmdMainAuto(os.Args[2:])
-		case "main-node":
-			err = cmdMainNode(os.Args[2:])
 		case "main-port":
 			err = cmdMainPort(os.Args[2:])
 		case "dns-preset":
@@ -215,13 +211,11 @@ usage:
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
   proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点...]   修改分组
-  proxyd groups select <组名> <节点名>   选择 select 分组的出口节点（持久化）
+  proxyd groups select <组名> <节点名>   选择 select 分组的出口节点（持久化；组名 PROXY 即默认出口）
   proxyd logs [--tail N] [--level info|warning|error|debug]   查看最近日志
   proxyd port-range <起-止>             修改节点映射端口区间
   proxyd port-mapping [on|off|status]   开关/查看节点一对一端口映射
   proxyd auto-port <端口|off>           设置自动选优端口
-  proxyd main-auto [on|off]             主端口固定走最优节点（跳过规则）；无参查看
-  proxyd main-node [节点名|key|off]     主端口固定走指定节点（跳过规则）；无参查看
   proxyd main-port <端口>               修改主端口；无参查看
   proxyd dns-preset [off|fake-ip|redir-host]   查看/切换 DNS 预设
   proxyd update-check [on|off]          查看/开关启动版本检查

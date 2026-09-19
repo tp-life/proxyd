@@ -302,7 +302,7 @@ func (m tuiModel) footerHints(width int) string {
 	case tuiPageOverview:
 		row = "enter 重试 space 启停  "
 	case tuiPageNodes:
-		row = "enter 主出口 a 选优 d 删手动  "
+		row = "enter 出口 a AUTO d 删手动  "
 	case tuiPageSubscriptions:
 		row = "enter 刷新 e 启停  "
 	case tuiPageConnections:
@@ -1139,7 +1139,7 @@ func (m tuiModel) renderHelp(width int) string {
 		"",
 		"行操作（按当前页生效）",
 		"  概览  enter 重试模块 · space 启停模块（停用需确认）",
-		"  节点  enter 设为主出口 · a 自动选优 · d 删除手动节点（需确认）",
+		"  节点  enter 设为默认出口 · a 默认出口→AUTO · d 删除手动节点（需确认）",
 		"  订阅  enter 刷新该订阅 · e / space 启停",
 		"  连接  x 关闭选中连接 · X 关闭全部（需确认）",
 		"  远程  space 启停选中转发",
@@ -1576,44 +1576,45 @@ func countTUIAliveNodes(nodes []api.NodeEntry) int {
 	return count
 }
 
-// resolveTUIMainRoute 按后端真实优先级解析主入口策略与可确认出口。
+// resolveTUIMainRoute 解析主入口策略与默认出口：主端口恒为规则模式；
+// global/direct 模式下出口由模式本身决定，规则模式的默认出口取内置 PROXY 组的
+// 持久化选中项（未选择时落成员首位，选中节点不可用时同样回退成员首位）。
 //
 // 参数说明：
-//   - overview: *api.Overview，包含 main-auto、main-node、mode 与节点快照。
+//   - overview: *api.Overview，包含 mode、groups（含内置 PROXY 项）与节点快照。
 //
-// 返回值说明：string, string，分别是策略标签和当前出口描述。
+// 返回值说明：string, string，分别是策略标签和当前默认出口描述。
 //
-// 错误情况：无；固定节点不可用时明确显示回退到当前 mode，而不误报原节点生效。
+// 错误情况：无；选中节点不可用时明确显示回退成员首位，而不误报原节点生效。
 func resolveTUIMainRoute(overview *api.Overview) (string, string) {
 	if overview == nil {
 		return "未知策略", "暂无数据"
 	}
-	if overview.MainAuto {
-		best := "AUTO 最优节点"
-		var bestNode *api.NodeEntry
-		for index := range overview.Nodes {
-			node := &overview.Nodes[index]
-			if !node.Alive {
-				continue
-			}
-			if bestNode == nil || (node.Delay > 0 && (bestNode.Delay == 0 || node.Delay < bestNode.Delay)) {
-				bestNode = node
-			}
-		}
-		if bestNode != nil {
-			best = bestNode.Name
-		}
-		return "自动最快", best
+	label := tuiModeLabel(overview.Mode)
+	if overview.Mode != "rule" {
+		return label, tuiModeExit(overview.Mode)
 	}
-	if overview.MainNode != "" {
-		for _, node := range overview.Nodes {
-			if node.Key == overview.MainNode && node.Alive && overview.MainNodeUp {
-				return "固定节点", node.Name
-			}
+	selected := ""
+	for _, g := range overview.Groups {
+		if g.Name == "PROXY" && g.Builtin {
+			selected = g.Selected
+			break
 		}
-		return "固定节点 · 已回退", tuiModeExit(overview.Mode)
 	}
-	return tuiModeLabel(overview.Mode), tuiModeExit(overview.Mode)
+	switch {
+	case selected == "":
+		return label, "成员首位（未选择）"
+	case selected == "AUTO":
+		return label, "AUTO 自动最快"
+	case selected == "DIRECT":
+		return label, "DIRECT 直连"
+	}
+	for _, n := range overview.Nodes {
+		if n.Name == selected && n.Alive {
+			return label, selected
+		}
+	}
+	return label, selected + "（不可用，已回退成员首位）"
 }
 
 // connectionDestination 生成活动连接的目标地址。

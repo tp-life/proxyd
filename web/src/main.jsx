@@ -162,6 +162,7 @@ function App() {
   const navigation = useMemo(() => visibleNavigation(modules), [modules]);
   const [moduleBusy, setModuleBusy] = useState("");
   const [ruleUrls, setRuleUrls] = useState([]);
+  const [adblock, setAdblock] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -197,6 +198,7 @@ function App() {
     rule: "",
     ruleURLName: "",
     ruleURL: "",
+    adblockURL: "",
     groupName: "",
     groupPort: "",
     groupType: "fallback",
@@ -228,16 +230,22 @@ function App() {
     async (silent = false) => {
       try {
         setLoading(true);
-        // 三个来源各自提交结果，规则源失败不会阻断模块开关或总览；8 秒超时限制积压。
+        // 各来源独立提交结果，规则源/广告拦截失败不会阻断模块开关或总览；8 秒超时限制积压。
         const signal = AbortSignal.timeout(8000);
         const results = await Promise.allSettled([
           requestJSON("/api/overview", { signal }),
           requestJSON("/api/rule-urls", { signal }),
           requestJSON("/api/modules", { signal }),
+          requestJSON("/api/adblock", { signal }),
         ]);
-        const [overviewResult, rulesResult, modulesResult] = results;
+        const [overviewResult, rulesResult, modulesResult, adblockResult] = results;
         if (modulesResult.status === "fulfilled") setModules(modulesResult.value || []);
         if (rulesResult.status === "fulfilled") setRuleUrls(rulesResult.value || []);
+        if (adblockResult.status === "fulfilled") {
+          const nextAdblock = adblockResult.value;
+          setAdblock(nextAdblock);
+          setForms((current) => ({ ...current, adblockURL: current.adblockURL || nextAdblock.rule_url || "" }));
+        }
         if (overviewResult.status === "fulfilled") {
           const nextOverview = overviewResult.value;
           setOverview(nextOverview);
@@ -727,60 +735,34 @@ function App() {
   }
 
   /**
-   * applyMainPolicy 把界面中的互斥“主入口策略”翻译为现有后端配置。
+   * selectOverviewExit 保存规则模式的默认出口（内置 PROXY 组选中项）。
    *
    * 功能说明：
-   * 后端为了兼容配置文件，仍使用 `main_auto` 与 `main_node` 两个字段表达优先级；
-   * 此处处理规则和自动策略，固定策略由节点弹窗明确选择目标后交给 selectOverviewNode。
-   * 切换时先清除会与目标策略冲突的状态，避免意外恢复一个旧的固定节点。
+   * 出口取值是节点名、AUTO 或 DIRECT（不是节点 key），与 groupstate 的持久化口径
+   * 一致；后端会校验节点仍然可用、AUTO 有可用节点、DIRECT 恒可用。AUTO 需要至少
+   * 一个可用节点，节点按名字匹配，避免同名节点的 key 差异导致选中态对不上。
    *
    * 参数说明：
-   * - policy: "rule" | "auto"，用户选择的主入口策略。
+   * - value: string，默认出口值（节点名 / "AUTO" / "DIRECT"）。
    *
    * 返回值说明：
-   * 返回 Promise<void>；接口全部成功后概览会通过 postJSON 自动重新加载。
+   * 返回 Promise<boolean>；接口成功后概览会通过 postJSON 自动重新加载，失败返回 false。
    *
    * 可能的异常/错误情况：
-   * 任一步接口写入失败时由 postJSON 展示错误并停止后续切换。
+   * 出口已失效时本地拒绝写入；接口失败或 15 秒超时由 postJSON 提示。
    */
-  async function applyMainPolicy(policy) {
-    /*
-     * “规则分流”在持久化层不是独立字段，而是 main_auto=false 且 main_node 为空的
-     * 组合状态。必须先关闭自动选优再清空固定节点：main_auto 的优先级最高，如果
-     * 只清空 main_node，主入口仍会继续自动选节点，界面与实际流量会不一致。
-     */
-    if (policy === "rule") {
-      if (overview?.main_auto && !(await postJSON("/api/main-auto", { enabled: false }, "已关闭主端口自动选优"))) return;
-      if (overview?.main_node) await postJSON("/api/main-node", { node: "" }, "主端口已恢复规则分流");
-      return;
-    }
-    /*
-     * 自动选优需要先清除旧固定节点。虽然 main_auto=true 时后端会覆盖 main_node，
-     * 但保留旧值会导致用户以后关闭自动模式时悄悄恢复过期节点，所以这里主动清理
-     * 配置意图，使一次切换只对应一个明确策略。
-     */
-    if (policy === "auto") {
-      if (overview?.main_node && !(await postJSON("/api/main-node", { node: "" }, "已清除固定节点"))) return;
-      if (!overview?.main_auto) await postJSON("/api/main-auto", { enabled: true }, "主端口已切换为自动最快");
-      return;
-    }
-  }
-
-  /**
-   * selectOverviewNode 保存概览弹窗选中的节点，并使固定策略生效。
-   * 参数：key 为 string，节点稳定身份；返回 Promise<boolean>，全部操作成功为 true。
-   * 错误：节点已失效时拒绝写入；接口失败或 15 秒超时由 postJSON 提示，返回 false。
-   * 自动策略优先于固定节点，因此先保存目标，再关闭自动选优；第一步失败时原出口不变，
-   * 第二步失败时仍保持自动出口，弹窗保留供重试。每次写入后读取后端快照，不虚报实际出口。
-   */
-  async function selectOverviewNode(key) {
-    if (!overview.nodes.some((node) => node.key === key && node.alive)) {
-      showToast("该节点当前不可用，请选择其他节点", "err");
+  async function selectOverviewExit(value) {
+    if (value === "AUTO") {
+      if (!overview.nodes.some((node) => node.alive && !node.tunnel)) {
+        showToast("当前没有可用节点，无法选择自动最快", "err");
+        return false;
+      }
+    } else if (value !== "DIRECT" && !overview.nodes.some((node) => node.name === value && node.alive)) {
+      showToast("该节点当前不可用，请选择其他出口", "err");
       return false;
     }
-    if (!(await postJSON("/api/main-node", { node: key }, overview.main_auto ? "" : "主端口已固定到所选节点", "POST", AbortSignal.timeout(15000)))) return false;
-    if (overview.main_auto) return postJSON("/api/main-auto", { enabled: false }, "主端口已切换为固定节点", "POST", AbortSignal.timeout(15000));
-    return true;
+    const label = value === "AUTO" ? "自动最快" : value === "DIRECT" ? "直连" : value;
+    return postJSON("/api/groups/PROXY/select", { node: value }, `默认出口已切换为「${label}」`, "POST", AbortSignal.timeout(15000));
   }
 
   /**
@@ -883,8 +865,7 @@ function App() {
                 onMode={(mode) => postJSON("/api/mode", { mode }, `已切换到${MODE_LABELS[mode]}模式`)}
                 onNavigate={setActiveView}
                 onPalette={() => setPaletteOpen(true)}
-                onPolicy={applyMainPolicy}
-                onSelectNode={selectOverviewNode}
+                onSelectNode={selectOverviewExit}
                 onPortMapping={(enabled) => postJSON("/api/port-mapping", { enabled }, enabled ? "节点端口映射已开启" : "节点端口映射已关闭")}
                 onRefresh={() => triggerOperation("/api/refresh", "刷新订阅")}
                 onSystemProxy={(enabled) => postJSON("/api/system-proxy", { enabled }, enabled ? "系统代理已开启" : "系统代理已关闭")}
@@ -900,7 +881,7 @@ function App() {
                 overview={overview}
                 onDelete={deleteJSON}
                 onForm={updateForm}
-                onMainNode={(node) => postJSON("/api/main-node", { node }, node ? "主端口已固定到该节点" : "主端口已恢复规则模式")}
+                onSelectExit={(node) => postJSON("/api/groups/PROXY/select", { node }, `默认出口已切换为「${node}」`)}
                 onPost={postJSON}
                 onSourceChange={setNodeSourceFilter}
                 onTest={() => triggerOperation("/api/test", "测速")}
@@ -963,6 +944,7 @@ function App() {
                 ruleContent={ruleContent}
                 ruleUrls={ruleUrls}
                 overview={overview}
+                adblock={adblock}
                 onDelete={deleteJSON}
                 onForm={updateForm}
                 onPost={postJSON}

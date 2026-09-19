@@ -540,43 +540,30 @@ rules:
 	}
 }
 
-func TestMainNodePersist(t *testing.T) {
-	// main-node（节点 Key）落盘并原样读回；空值默认不写出（omitempty）。
+func TestLegacyMainNodeKeysIgnored(t *testing.T) {
+	// 旧配置残留的 main-node / main-auto 键：功能已删除（由内置 PROXY 组选择取代），
+	// 非严格 yaml.Unmarshal 应静默忽略，加载不报错且 Save 后不再写回这些键。
 	body := `
 subscriptions:
   - name: a
     url: https://example.com/sub
 port-range: [42000, 42010]
 main-node: "socks5|1.2.3.4|10001|p"
+main-auto: true
 rules:
   - MATCH,PROXY
 `
 	path := writeTemp(t, body)
 	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("Load 含旧 main-node/main-auto 键的配置应成功: %v", err)
 	}
-	if cfg.MainNode != "socks5|1.2.3.4|10001|p" {
-		t.Fatalf("MainNode = %q", cfg.MainNode)
-	}
-	if err := cfg.Save(path); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	cfg2, err := Load(path)
-	if err != nil {
-		t.Fatalf("re-Load: %v", err)
-	}
-	if cfg2.MainNode != cfg.MainNode {
-		t.Errorf("main-node 持久化往返不一致: %q vs %q", cfg2.MainNode, cfg.MainNode)
-	}
-
-	cfg.MainNode = ""
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	raw, _ := os.ReadFile(path)
-	if strings.Contains(string(raw), "main-node") {
-		t.Errorf("main-node 为空时不应写出: %s", raw)
+	if strings.Contains(string(raw), "main-node") || strings.Contains(string(raw), "main-auto") {
+		t.Errorf("旧键不应被写回配置文件:\n%s", raw)
 	}
 }
 
@@ -1023,5 +1010,66 @@ func TestRemoteRedaction(t *testing.T) {
 	}
 	if cfg.Desktop.Connections[0].Remote != desktopToken {
 		t.Error("RedactedCopy 修改了源桌面配置")
+	}
+}
+
+func TestAdBlockConfig(t *testing.T) {
+	// 默认值：关闭，RuleURL 补默认规则集地址。
+	var ab AdBlockConfig
+	ab.ApplyDefaults()
+	if ab.Enable {
+		t.Error("AdBlock 默认应为关闭")
+	}
+	if ab.RuleURL != DefaultAdBlockRuleURL {
+		t.Errorf("RuleURL 默认 = %q, want %q", ab.RuleURL, DefaultAdBlockRuleURL)
+	}
+	// 校验：关闭时不检查地址；开启时必须为 http(s)。
+	if err := ab.Validate(); err != nil {
+		t.Errorf("关闭状态下 Validate 应为 nil: %v", err)
+	}
+	if err := (AdBlockConfig{Enable: true, RuleURL: "ftp://example.com/x.txt"}).Validate(); err == nil {
+		t.Error("非 http(s) 规则集地址应报错")
+	}
+	if err := (AdBlockConfig{Enable: true, RuleURL: "https://example.com/reject.txt"}).Validate(); err != nil {
+		t.Errorf("合法地址不应报错: %v", err)
+	}
+}
+
+func TestLoadAdBlockDefaults(t *testing.T) {
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdBlock.Enable {
+		t.Error("未配置时广告拦截应默认关闭")
+	}
+	if cfg.AdBlock.RuleURL != DefaultAdBlockRuleURL {
+		t.Errorf("RuleURL 默认 = %q, want %q", cfg.AdBlock.RuleURL, DefaultAdBlockRuleURL)
+	}
+
+	cfg, err = Load(writeTemp(t, validYAML+"\nadblock:\n  enable: true\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AdBlock.Enable || cfg.AdBlock.RuleURL != DefaultAdBlockRuleURL {
+		t.Errorf("开启且省略 rule-url 时应补默认地址: %+v", cfg.AdBlock)
+	}
+
+	if _, err = Load(writeTemp(t, validYAML+"\nadblock:\n  enable: true\n  rule-url: \"notaurl\"\n")); err == nil {
+		t.Error("开启时非法 rule-url 应导致 Load 报错")
+	}
+}
+
+func TestAdBlockClone(t *testing.T) {
+	cfg := minimalValidConfig()
+	cfg.AdBlock = AdBlockConfig{Enable: true, RuleURL: "https://example.com/reject.txt"}
+	cloned := cfg.Clone()
+	if cloned.AdBlock != cfg.AdBlock {
+		t.Errorf("Clone 应原样复制 AdBlock: %+v", cloned.AdBlock)
+	}
+	// 值类型复制：修改副本不影响原配置。
+	cloned.AdBlock.Enable = false
+	if !cfg.AdBlock.Enable {
+		t.Error("Clone 与原配置共享了 AdBlock 状态")
 	}
 }

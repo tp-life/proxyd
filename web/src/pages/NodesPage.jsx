@@ -83,7 +83,7 @@ const VPN_TEXTAREA_CLASS = "mono-input min-h-24 w-full rounded-md border bg-back
  * NodesPage 渲染跨来源聚合的节点工作台。
  *
  * 功能说明：
- * 节点与订阅拆分后，本页只承担节点搜索、来源/协议/状态筛选、测速和主节点选择。
+ * 节点与订阅拆分后，本页只承担节点搜索、来源/协议/状态筛选、测速和默认出口选择。
  * 添加手动节点使用 Radix Dialog，避免常驻大表单挤压列表首屏。
  *
  * 参数说明：
@@ -91,7 +91,7 @@ const VPN_TEXTAREA_CLASS = "mono-input min-h-24 w-full rounded-md border bg-back
  * - forms: object，全局受控表单状态。
  * - initialSource: string，从订阅页跳转时指定的初始来源。
  * - overview: object，概览、节点和稳定端口分配数据。
- * - onDelete/onForm/onMainNode/onPost/onSourceChange/onTest: Function，页面动作回调。
+ * - onDelete/onForm/onSelectExit/onPost/onSourceChange/onTest: Function，页面动作回调。
  * - workspace: string，可选的独立隧道工作区；`tailscale`、`openvpn` 或默认节点页。
  *
  * 返回值说明：
@@ -100,8 +100,13 @@ const VPN_TEXTAREA_CLASS = "mono-input min-h-24 w-full rounded-md border bg-back
  * 可能的异常/错误情况：
  * 空地址会在前端拦截；后端解析、热更新或持久化失败由 onPost 统一 toast。
  */
-export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete, onForm, onMainNode, onPost, onSourceChange, onTest, workspace = "nodes" }) {
+export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete, onForm, onSelectExit, onPost, onSourceChange, onTest, workspace = "nodes" }) {
   const dedicatedTunnel = workspace === "tailscale" || workspace === "openvpn";
+  /*
+   * 默认出口取内置 PROXY 组的持久化选中项（节点名 / AUTO / DIRECT）；节点行只按
+   * 名字标记，与 groupstate 的存储口径一致。
+   */
+  const defaultExit = (overview.groups || []).find((group) => group.name === "PROXY")?.selected || "";
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [terminating, setTerminating] = useState(false);
@@ -652,11 +657,11 @@ export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete,
           )}
           <NodeTable
             assignmentMap={assignmentMap}
-            mainNode={overview.main_node}
+            defaultExit={defaultExit}
             mappingEnabled={overview.port_mapping_enabled}
             nodes={visibleNodes}
             testing={testing}
-            onMainNode={onMainNode}
+            onSelectExit={onSelectExit}
           />
         </>
       )}
@@ -1086,10 +1091,10 @@ function tunnelGroupMemberNames(group, overviewNodes) {
  * 参数说明：
  * - nodes: Array<object>，节点数据。
  * - assignmentMap: Map<string, number>，按来源与节点名索引的稳定端口分配。
- * - mainNode: string，当前主端口固定节点 key。
+ * - defaultExit: string，当前默认出口（节点名 / AUTO / DIRECT）。
  * - mappingEnabled: boolean，节点一对一 listener 是否启用。
  * - testing: boolean，节点健康检测进行中；延迟列显示「测速中…」而不是上一轮结果。
- * - onMainNode: Function，设置主端口节点回调。
+ * - onSelectExit: Function，设置默认出口回调。
  *
  * 返回值说明：
  * 返回表格 React 元素。
@@ -1097,7 +1102,7 @@ function tunnelGroupMemberNames(group, overviewNodes) {
  * 可能的异常/错误情况：
  * 无；节点不可用时按钮禁用。
  */
-function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled = true, testing = false, onMainNode }) {
+function NodeTable({ nodes, assignmentMap = new Map(), defaultExit = "", mappingEnabled = true, testing = false, onSelectExit }) {
   const columns = useMemo(
     () => [
       {
@@ -1109,7 +1114,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
           <span className={classNames("node-name", !node.alive && "text-muted-foreground")} title={node.name}>
             {node.name}
             {node.tunnel && <Badge variant="secondary">隧道</Badge>}
-            {mainNode && node.key === mainNode && <Badge variant="outline">主端口</Badge>}
+            {defaultExit === node.name && <Badge variant="outline">默认出口</Badge>}
           </span>
         ),
       },
@@ -1158,13 +1163,13 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
         header: "操作",
         width: "156px",
         cell: (node) => (
-          <Button size="sm" variant="outline" disabled={!node.alive || mainNode === node.key} type="button" onClick={() => onMainNode(node.key)}>
-            {mainNode === node.key ? "当前主端口" : "设为主端口"}
+          <Button size="sm" variant="outline" disabled={!node.alive || defaultExit === node.name} type="button" onClick={() => onSelectExit(node.name)}>
+            {defaultExit === node.name ? "当前默认出口" : "设为默认出口"}
           </Button>
         ),
       },
     ],
-    [assignmentMap, mainNode, mappingEnabled, onMainNode, testing],
+    [assignmentMap, defaultExit, mappingEnabled, onSelectExit, testing],
   );
 
   return (
@@ -1173,7 +1178,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), mainNode, mappingEnabled 
       columns={columns}
       data={nodes}
       emptyState="暂无节点"
-      getRowClassName={(node) => (mainNode && node.key === mainNode ? "main-node-row" : "")}
+      getRowClassName={(node) => (defaultExit === node.name ? "default-exit-row" : "")}
       getRowId={(node, index) => node.key || `${node.subscription}:${node.name}:${index}`}
       height={tableViewportHeight(nodes.length, 880)}
       minColumnWidth={84}

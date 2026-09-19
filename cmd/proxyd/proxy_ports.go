@@ -1,14 +1,12 @@
 package main
 
-// 代理域子命令：代理模式与端口相关设置（mode/port-range/port-mapping/auto-port/main-*）。
+// 代理域子命令：代理模式与端口相关设置（mode/port-range/port-mapping/auto-port/main-port）。
 
 import (
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-
-	"proxyd/internal/api"
 )
 
 func cmdMode(args []string) error {
@@ -157,113 +155,6 @@ func cmdPortMapping(args []string) error {
 	return nil
 }
 
-func cmdMainAuto(args []string) error {
-	cfgFile, rest, err := parseCFlag("main-auto", args)
-	if err != nil {
-		return err
-	}
-	c, err := newAPIClient(cfgFile)
-	if err != nil {
-		return err
-	}
-	if len(rest) == 0 {
-		ov, err := c.overview()
-		if err != nil {
-			return err
-		}
-		if ov.MainAuto {
-			fmt.Printf("主端口最优节点: 开启（主端口 %d 跳过规则、直连最优节点）\n", ov.MixedPort)
-		} else {
-			fmt.Printf("主端口最优节点: 关闭（主端口 %d 走规则模式）\n", ov.MixedPort)
-		}
-		return nil
-	}
-	if len(rest) != 1 {
-		return fmt.Errorf("用法: proxyd main-auto [-c 配置] [on|off]")
-	}
-	on, err := parseOnOff(rest[0])
-	if err != nil {
-		return err
-	}
-	if err := c.do(http.MethodPost, "/api/main-auto", map[string]bool{"enabled": on}, nil); err != nil {
-		return err
-	}
-	if on {
-		fmt.Println("主端口已切换为最优节点模式（跳过规则，与 auto-port 互不影响）")
-	} else {
-		fmt.Println("主端口已恢复规则模式")
-	}
-	return nil
-}
-
-// cmdMainNode 查看/设置主端口固定节点：无参显示当前设置；
-// `off` 清除（恢复规则模式）；其余参数视为节点 key（overview 里每个节点的 key 字段）。
-func cmdMainNode(args []string) error {
-	cfgFile, rest, err := parseCFlag("main-node", args)
-	if err != nil {
-		return err
-	}
-	c, err := newAPIClient(cfgFile)
-	if err != nil {
-		return err
-	}
-	if len(rest) == 0 {
-		ov, err := c.overview()
-		if err != nil {
-			return err
-		}
-		if ov.MainNode == "" {
-			fmt.Printf("主端口固定节点: 未设置（主端口 %d 走规则模式）\n", ov.MixedPort)
-			return nil
-		}
-		name := ""
-		for _, n := range ov.Nodes {
-			if n.Key == ov.MainNode {
-				name = n.Name
-				break
-			}
-		}
-		state := "生效中（主端口跳过规则、直达该节点）"
-		switch {
-		case ov.MainAuto:
-			state = "main-auto 已开启，当前被忽略（auto 优先）"
-		case !ov.MainNodeUp:
-			state = "节点当前不可用，已回退规则模式（恢复后自动再生效）"
-		}
-		if name == "" {
-			name = "（节点已不在列表中）"
-		}
-		fmt.Printf("主端口固定节点: %s\n  key: %s\n  状态: %s\n", name, ov.MainNode, state)
-		return nil
-	}
-	if len(rest) != 1 {
-		return fmt.Errorf("用法: proxyd main-node [-c 配置] [节点名|节点key|off]")
-	}
-	key := rest[0]
-	if strings.ToLower(key) == "off" {
-		key = ""
-	} else {
-		// 允许直接给节点名称；key 精确匹配优先，名称需唯一
-		ov, err := c.overview()
-		if err != nil {
-			return err
-		}
-		key, err = resolveNodeKey(ov, key)
-		if err != nil {
-			return err
-		}
-	}
-	if err := c.do(http.MethodPost, "/api/main-node", map[string]string{"node": key}, nil); err != nil {
-		return err
-	}
-	if key == "" {
-		fmt.Println("主端口已恢复规则模式（main-node 已清除）")
-	} else {
-		fmt.Println("主端口已固定到指定节点（跳过规则）；main-auto 开启时该设置不生效")
-	}
-	return nil
-}
-
 func cmdMainPort(args []string) error {
 	cfgFile, rest, err := parseCFlag("main-port", args)
 	if err != nil {
@@ -293,32 +184,4 @@ func cmdMainPort(args []string) error {
 	}
 	fmt.Printf("主端口已改为 %d（已热更新；系统代理开启时已自动重绑）\n", port)
 	return nil
-}
-
-// resolveNodeKey 把用户输入的节点 key 或名称解析为节点 key。
-// key 精确匹配优先；名称匹配要求唯一，重名时列出候选引导用户改用 key。
-func resolveNodeKey(ov *api.Overview, target string) (string, error) {
-	for _, n := range ov.Nodes {
-		if n.Key == target {
-			return n.Key, nil
-		}
-	}
-	var matches []api.NodeEntry
-	for _, n := range ov.Nodes {
-		if n.Name == target {
-			matches = append(matches, n)
-		}
-	}
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("节点 %q 不存在（可用 proxyd nodes 查看节点列表）", target)
-	case 1:
-		return matches[0].Key, nil
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "存在 %d 个同名节点 %q，请改用 key 指定：", len(matches), target)
-	for _, n := range matches {
-		fmt.Fprintf(&b, "\n  %s（订阅 %s，端口 %d）", n.Key, n.Subscription, n.Port)
-	}
-	return "", fmt.Errorf("%s", b.String())
 }

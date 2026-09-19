@@ -16,9 +16,8 @@ func (s *Server) registerProxyPortRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/port-range", s.handleSetPortRange)
 	mux.HandleFunc("POST /api/port-mapping", s.handleSetPortMapping)
 	mux.HandleFunc("POST /api/auto-port", s.handleSetAutoPort)
-	mux.HandleFunc("POST /api/main-auto", s.handleSetMainAuto)
-	mux.HandleFunc("POST /api/main-node", s.handleSetMainNode)
 	mux.HandleFunc("POST /api/main-port", s.handleSetMainPort)
+	mux.HandleFunc("POST /api/lan-share", s.handleSetLANShare)
 }
 
 // PortEntry 是映射表中的单条端口记录。
@@ -141,39 +140,6 @@ func (s *Server) handleSetAutoPort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]int{"auto_port": req.Port})
 }
 
-// handleSetMainAuto 开关「主端口使用最优节点」（跳过规则匹配），持久化 + 热更新。
-func (s *Server) handleSetMainAuto(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Enabled bool `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := s.app.SetMainAuto(req.Enabled); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]bool{"main_auto": req.Enabled})
-}
-
-// handleSetMainNode 设置主端口固定节点（node key；空串=恢复规则模式），持久化 + 热更新。
-// main-auto 开启时该设置被忽略（auto 优先）。
-func (s *Server) handleSetMainNode(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Node string `json:"node"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if err := s.app.SetMainNode(req.Node); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]string{"main_node": req.Node})
-}
-
 // handleSetMainPort 修改主端口：校验冲突 + 持久化 + 热更新；
 // 系统代理已开启时自动重新绑定到新端口。
 func (s *Server) handleSetMainPort(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +155,33 @@ func (s *Server) handleSetMainPort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]int{"mixed_port": req.Port})
+}
+
+// handleSetLANShare 开关局域网共享（listen 在 127.0.0.1 ↔ 0.0.0.0 间热切换），
+// 并返回提交后的有效状态；当前已是非回环自定义地址时开启为 no-op。
+//
+// 参数：
+//   - w: http.ResponseWriter，写出 JSON 响应或事务失败信息。
+//   - r: *http.Request，请求体必须是 `{ "enabled": boolean }`。
+//
+// 返回值：无；成功返回 HTTP 200 与 `{enabled, listen}` 字段。
+//
+// 错误情况：JSON 无效返回 400；热更新、持久化或回滚失败也返回 400，正文保留
+// 应用层合并错误，便于 UI 明确提示用户检查运行态。
+func (s *Server) handleSetLANShare(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetLANShare(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	enabled, listen := s.app.LANShare()
+	writeJSON(w, map[string]any{"enabled": enabled, "listen": listen})
 }
 
 func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {

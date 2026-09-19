@@ -584,15 +584,15 @@
   .radix-data-table tbody tr.radix-data-table-expanded > td {
     @apply h-auto overflow-visible whitespace-normal p-2;
   }
-  /* 主端口固定节点行：主色描边 + 浅底色高亮，和整表 hover 共存 */
-  .radix-data-table tbody tr.main-node-row {
+  /* 默认出口节点行：主色描边 + 浅底色高亮，和整表 hover 共存 */
+  .radix-data-table tbody tr.default-exit-row {
     @apply bg-primary/10;
     box-shadow: inset 3px 0 0 var(--primary);
   }
-  .radix-data-table tbody tr.main-node-row:hover {
+  .radix-data-table tbody tr.default-exit-row:hover {
     @apply bg-primary/15;
   }
-  .radix-data-table tbody tr.main-node-row td:first-child {
+  .radix-data-table tbody tr.default-exit-row td:first-child {
     @apply pl-3;
   }
   .radix-data-table-sort {
@@ -2269,7 +2269,7 @@
     @apply ml-auto;
   }
 
-  /* 固定节点弹窗加宽以容纳三列卡片；长列表仍在中间滚动，搜索和确认按钮始终可见。 */
+  /* 默认出口弹窗加宽以容纳三列卡片；长列表仍在中间滚动，搜索和确认按钮始终可见。 */
   .fixed-node-dialog {
     @apply flex flex-col gap-4 overflow-hidden;
     width: min(960px, calc(100vw - 32px));

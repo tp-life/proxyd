@@ -167,6 +167,50 @@ func (t TUNConfig) Validate() error {
 	return nil
 }
 
+// DefaultAdBlockRuleURL 是默认的广告拦截规则集地址：Loyalsoldier clash-rules 的
+// reject 列表（约 19 万条广告/跟踪域名，domain 行为 + YAML payload 格式），走 jsDelivr
+// CDN，避免「下载规则需要先翻墙」的鸡生蛋问题。可在 adblock.rule-url 覆盖；
+// 自定义地址必须提供相同格式（domain behavior 的 YAML payload 文本）。
+const DefaultAdBlockRuleURL = "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/reject.txt"
+
+// AdBlockConfig 描述广告拦截子功能：开启后生成配置注入 adblock rule-provider
+// （mihomo 负责下载/缓存/周期刷新）与 RULE-SET,adblock,REJECT 规则。
+type AdBlockConfig struct {
+	Enable  bool   `yaml:"enable" json:"enable"`
+	RuleURL string `yaml:"rule-url,omitempty" json:"rule_url,omitempty"`
+}
+
+// ApplyDefaults 为缺失的广告拦截字段补齐默认值。
+//
+// 参数：无；接收者为待补默认值的 AdBlockConfig 指针。
+//
+// 返回值：无；RuleURL 为空时填入 DefaultAdBlockRuleURL，Enable 保持用户显式设置。
+//
+// 错误情况：无；字段合法性由 Validate 统一检查。
+func (a *AdBlockConfig) ApplyDefaults() {
+	if a.RuleURL == "" {
+		a.RuleURL = DefaultAdBlockRuleURL
+	}
+}
+
+// Validate 校验广告拦截配置。
+//
+// 参数：无；接收者为待校验的 AdBlockConfig。
+//
+// 返回值：
+//   - error：开启时 rule-url 缺失或非 http(s) 地址返回错误，否则返回 nil。
+//
+// 错误情况：规则集内容与格式的正确性由 mihomo 在加载 rule-provider 时兜底。
+func (a AdBlockConfig) Validate() error {
+	if !a.Enable {
+		return nil
+	}
+	if !strings.HasPrefix(a.RuleURL, "http://") && !strings.HasPrefix(a.RuleURL, "https://") {
+		return fmt.Errorf("adblock.rule-url %q 必须是 http(s) URL", a.RuleURL)
+	}
+	return nil
+}
+
 const (
 	// DNSPresetOff 禁用 proxyd 生成的 DNS 段，沿用系统 DNS 或用户手写 dns 配置。
 	DNSPresetOff = "off"

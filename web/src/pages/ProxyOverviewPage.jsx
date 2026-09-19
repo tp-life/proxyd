@@ -36,28 +36,19 @@ import { classNames, delayClass, formatBytes, formatDelay } from "@/lib/format";
  * MODE_HELP 描述 mihomo 三种运行模式的真实选路语义。
  *
  * 功能说明：
- * 这组说明不仅是界面文案，也是防止误操作的业务边界提示。很多代理软件把
- * “规则模式”误解成整个进程的总开关，但 proxyd 的 mode 只在主入口使用规则分流
- * 策略时参与选路；节点专属端口、自动选优端口和策略分组端口都有独立出口，不读取
- * 这里的模式。把每种模式的执行路径写在界面旁边，可以让用户在切换前理解影响范围。
- *
- * 参数说明：
- * 无；对象 key 与后端 `/api/mode` 接受的 rule/global/direct 枚举保持一致。
- *
- * 返回值说明：
- * 每项包含标题与详细说明，供概览页按当前 mode 展示。
- *
- * 可能的异常/错误情况：
- * 如果后端未来新增 mode 而未同步本对象，界面会使用保守兜底文案，不会阻断切换。
+ * 这组说明不仅是界面文案，也是防止误操作的业务边界提示。mode 决定主入口是否走
+ * 访问规则：规则模式下未命中规则的流量落到内置 PROXY 组的「默认出口」；全局模式
+ * 交给内置 GLOBAL 组；直连模式全部直走。节点专属端口、自动选优端口和策略分组端口
+ * 都有独立出口，不读取这里的模式。
  */
 const MODE_HELP = {
   rule: {
     title: "按规则决定出口",
-    detail: "依次匹配自定义规则、远程规则源和内置规则；首条命中立即生效，后续规则不再继续判断。",
+    detail: "依次匹配自定义规则、远程规则源和内置规则；首条命中立即生效，未命中的流量走默认出口。",
   },
   global: {
     title: "全部交给代理组",
-    detail: "主入口流量跳过访问规则，统一进入 PROXY 选择组，再由当前代理组节点负责转发。",
+    detail: "主入口流量跳过访问规则，统一进入 GLOBAL 选择组；默认出口仅在规则模式下生效。",
   },
   direct: {
     title: "全部直接连接",
@@ -66,15 +57,15 @@ const MODE_HELP = {
 };
 
 /**
- * ProxyOverviewPage 渲染代理运行概览，保留主入口策略、流量与节点管理操作。
+ * ProxyOverviewPage 渲染代理运行概览，保留主入口模式、默认出口与节点管理操作。
  *
  * 参数说明：
- * - overview: object，/api/overview 响应。
+ * - overview: object，/api/overview 响应（含内置 PROXY 分组的选中项）。
  * - aliveCount: number，可用节点数量。
  * - busy/loading: string | boolean，全局后台操作与同步状态。
  * - traffic: object，实时速率流状态。
- * - onCopy/onMenu/onMode/onNavigate/onPalette/onPolicy/onPortMapping/onRefresh/onSystemProxy/onTest/onTun: Function，用户操作回调。
- * - onSelectNode: (key: string) => Promise<boolean>，写入固定节点并刷新概览，失败返回 false。
+ * - onCopy/onCopyEnv/onMenu/onMode/onNavigate/onPalette/onPortMapping/onRefresh/onSystemProxy/onTest/onTun: Function，用户操作回调。
+ * - onSelectNode: (value: string) => Promise<boolean>，写入默认出口（节点名 / AUTO / DIRECT）并刷新概览，失败返回 false。
  *
  * 返回值说明：
  * 返回概览页 React 元素。
@@ -94,7 +85,6 @@ export function ProxyOverviewPage({
   onMode,
   onNavigate,
   onPalette,
-  onPolicy,
   onPortMapping,
   onRefresh,
   onSelectNode,
@@ -112,41 +102,27 @@ export function ProxyOverviewPage({
   const updated = overview.server_time ? new Date(overview.server_time) : new Date();
   const ready = aliveCount > 0 && overview.mixed_port > 0;
   const takenOver = Boolean(overview.system_proxy || overview.tun?.active || overview.tun?.enabled);
-  const policy = resolveMainPolicy(overview);
-  const activeNode = resolveActiveNode(overview, policy);
-  const attentionItems = buildOverviewAttention(overview, traffic, aliveCount);
   /*
-   * 这里必须同时区分“配置意图”和“运行时有效策略”：
-   * 1. main_auto 优先级最高，它开启时 mode 与 main_node 都不参与主端口选路；
-   * 2. main_auto 关闭且 main_node 存在时，用户意图是固定节点；
-   * 3. 固定节点暂时失效时，后端为了保持主入口可用会临时恢复顶层 mixed-port，
-   *    并继续遵循 mode；它不会删除 main_node，节点恢复后仍可回到原配置；
-   * 4. 只有规则策略或上述运行时回退发生时，rule/global/direct 才决定主端口路径。
-   *
-   * 因此界面保留“固定节点”选中态表达持久化意图，同时在路由和出口处明确标记
-   * “已回退”，避免把失效节点误报成真实出口。节点专属端口、自动选优端口与分组
-   * 端口拥有独立 listener，不经过此判断，也不会被 mode 切换影响。
+   * 默认出口只由内置 PROXY 组的持久化选中项表达：节点名 / "AUTO" / "DIRECT"。
+   * 选中节点失效时生成层会忽略该值并落回成员首位，这里据此标记「已回退」，
+   * 不把失效节点误报为真实出口。该出口只在规则模式生效，TUN 与网关的
+   * 未命中流量同样经 PROXY 组转发。
    */
-  const fallbackToMainMode = policy === "fixed" && !activeNode;
-  const usesConfiguredMode = policy === "rule" || fallbackToMainMode;
+  const exit = resolveDefaultExit(overview);
+  const canAuto = (overview.nodes || []).some((node) => node.alive && !node.tunnel);
+  const modeLabel = MODE_LABELS[overview.mode] || overview.mode || "未知";
+  const exitLabel = exit.label;
+  const exitDetail = describeExit(exit);
+  const exitOk = exit.kind === "direct" || Boolean(exit.node && !exit.fallback);
+  const exitStatus = exit.kind === "direct" ? "直连" : exit.fallback ? "已回退" : exit.ok ? "可用" : "不可用";
   const modeHelp = MODE_HELP[overview.mode] || {
     title: "使用后端配置模式",
     detail: `当前后端返回未识别模式“${overview.mode || "未知"}”，界面不会推测其选路行为。`,
   };
-  const modeInactive = !usesConfiguredMode;
-  const policyLabel = policy === "auto"
-    ? "自动最快"
-    : policy === "fixed"
-      ? fallbackToMainMode ? `固定节点（回退至${MODE_LABELS[overview.mode] || overview.mode}）` : "固定节点"
-      : MODE_LABELS[overview.mode] === "规则"
-        ? "规则分流"
-        : `${MODE_LABELS[overview.mode] || overview.mode}模式`;
-  const modeExitLabel = overview.mode === "direct"
-    ? "直接连接"
-    : overview.mode === "global"
-      ? "PROXY 选择组"
-      : "按规则动态选择";
-  const exitLabel = activeNode?.name || (usesConfiguredMode ? modeExitLabel : "暂无可用节点");
+  const attentionItems = buildOverviewAttention(overview, traffic, aliveCount, exit);
+  const routeSummary = overview.mode === "rule"
+    ? `流量按「规则」模式匹配；未命中规则的流量由默认出口「${exitLabel}」转发。`
+    : `流量按「${modeLabel}」模式处理；默认出口仅在规则模式生效。`;
 
   return (
     <section className="overview-shell">
@@ -155,24 +131,18 @@ export function ProxyOverviewPage({
           <div><span>主代理入口</span><h1 id="policy-pane-title">主入口策略</h1></div>
           <Button aria-label="打开代理设置" size="icon" variant="outline" type="button" onClick={() => onNavigate("proxy/settings")}><Settings size={17} aria-hidden="true" /></Button>
         </header>
-        <div className="policy-options" role="list" aria-label="主入口策略选项">
-          <PolicyOption active={policy === "rule"} detail={`当前为${MODE_LABELS[overview.mode] || overview.mode}模式`} icon={ListFilter} label="规则分流" tone="blue" onClick={() => onPolicy("rule")} />
-          <PolicyOption active={policy === "auto"} detail="自动选择延迟最低节点" icon={Sparkles} label="自动最快" tone="teal" onClick={() => onPolicy("auto")} />
-          <PolicyOption active={policy === "fixed"} detail={overview.main_node ? (activeNode?.name || "点击选择可用节点") : "点击选择固定节点"} icon={Target} label="固定节点" tone="indigo" onClick={openNodePicker} />
+        <div className="policy-options" role="list" aria-label="默认出口">
+          <PolicyOption active detail={exitDetail} icon={exitIcon(exit)} label="默认出口" tone="indigo" onClick={openNodePicker} />
         </div>
         <section className="policy-mode">
-          <PanelTitle title="规则模式" detail="仅在规则分流策略下生效" />
+          <PanelTitle title="规则模式" detail="全局与直连模式不使用默认出口" />
           <SegmentedControl ariaLabel="流量处理模式" className="policy-mode-control" onValueChange={onMode} options={Object.entries(MODE_LABELS).map(([value, label]) => ({ value, label }))} value={overview.mode} />
-          <div className={classNames("policy-mode-note", modeInactive && "inactive")}>
+          <div className="policy-mode-note">
             <CircleHelp size={16} aria-hidden="true" />
             <div>
               <strong>{modeHelp.title}</strong>
               <p>{modeHelp.detail}</p>
-              <small>
-                {modeInactive
-                  ? `当前主入口使用“${policy === "auto" ? "自动最快" : "固定节点"}”，该模式已保存但暂不参与主端口选路。`
-                  : "仅影响主代理入口；节点端口、自动选优端口和策略分组端口不受影响。"}
-              </small>
+              <small>仅影响主代理入口；节点端口、自动选优端口和策略分组端口不受影响。默认出口仅规则模式生效，TUN 与网关流量同样走该出口。</small>
             </div>
           </div>
         </section>
@@ -192,7 +162,7 @@ export function ProxyOverviewPage({
           <div className="overview-hero-copy">
             <span className="overview-mobile-heading"><Button className="mobile-only" size="icon" variant="outline" type="button" onClick={onMenu} aria-label="打开导航"><Menu size={18} aria-hidden="true" /></Button>运行概览</span>
             <h2>{ready ? (takenOver ? "代理已接管" : "代理入口已就绪") : "代理服务需要检查"}</h2>
-            <p>{ready ? `当前主入口策略：${policyLabel}` : "当前没有健康节点，请同步订阅或检查节点配置"}</p>
+            <p>{ready ? (overview.mode === "rule" ? `当前主入口按规则匹配，未命中规则的流量走默认出口「${exitLabel}」` : `当前主入口为${modeLabel}模式`) : "当前没有健康节点，请同步订阅或检查节点配置"}</p>
             <div className="hero-badges">
               <Badge variant={ready ? "success" : "destructive"}>{ready ? "当前生效" : "需要处理"}</Badge>
               {overview.tun?.enabled && <Badge variant="outline">TUN 已开启</Badge>}
@@ -218,23 +188,23 @@ export function ProxyOverviewPage({
             <ArrowRight className="route-arrow" size={20} aria-hidden="true" />
             <RouteStep detail={`127.0.0.1:${overview.mixed_port}`} icon={Shield} label="主代理入口" tone="blue" />
             <ArrowRight className="route-arrow" size={20} aria-hidden="true" />
-            <RouteStep detail={policyLabel} icon={ListFilter} label="匹配策略" tone="indigo" />
+            <RouteStep detail={`${modeLabel}模式`} icon={ListFilter} label="匹配策略" tone="indigo" />
             <ArrowRight className="route-arrow" size={20} aria-hidden="true" />
             <RouteStep detail={exitLabel} icon={Globe2} label="实际出口" tone="teal" />
           </div>
-          <p className="route-summary">当前流量经由主入口进入 {policyLabel}；{activeNode ? `可确认的出口为“${activeNode.name}”。` : "具体出口会根据命中规则和目标地址动态变化。"}</p>
+          <p className="route-summary">{routeSummary}</p>
         </section>
 
         <div className="overview-lower-grid">
           <section className="exit-summary" aria-labelledby="exit-summary-title">
-            <div className="section-heading-row compact"><div><span>主入口</span><h2 id="exit-summary-title">实际出口</h2></div><div className="exit-summary-actions"><StatusBadge ok={Boolean(activeNode || usesConfiguredMode)} text={activeNode ? "可用" : usesConfiguredMode ? "由模式决定" : "不可用"} />{policy === "fixed" && <Button size="sm" variant="outline" onClick={openNodePicker}><ArrowRightLeft size={14} aria-hidden="true" />切换节点</Button>}</div></div>
+            <div className="section-heading-row compact"><div><span>规则模式</span><h2 id="exit-summary-title">默认出口</h2></div><div className="exit-summary-actions"><StatusBadge ok={exitOk} text={exitStatus} /><Button size="sm" variant="outline" onClick={openNodePicker}><ArrowRightLeft size={14} aria-hidden="true" />切换出口</Button></div></div>
             <div className="exit-node">
               <div className="exit-node-icon"><Globe2 size={24} aria-hidden="true" /></div>
-              <div><strong>{exitLabel}</strong><small>{activeNode?.subscription === "manual" ? "手动节点" : activeNode?.subscription || "由访问规则决定"}</small></div>
-              {activeNode && <span className={delayClass(activeNode)}>{formatDelay(activeNode)}</span>}
+              <div><strong>{exitLabel}</strong><small>{exit.node?.subscription === "manual" ? "手动节点" : exit.node?.subscription || (exit.kind === "direct" ? "不走代理" : "规则未命中时的兜底出口")}</small></div>
+              {exit.node && <span className={delayClass(exit.node)}>{formatDelay(exit.node)}</span>}
             </div>
             <dl className="exit-facts">
-              <div><dt>策略</dt><dd>{policyLabel}</dd></div>
+              <div><dt>模式</dt><dd>{modeLabel}</dd></div>
               <div><dt>主端口</dt><dd>{overview.mixed_port}</dd></div>
               <div><dt>候选节点</dt><dd>{aliveCount} 个可用</dd></div>
             </dl>
@@ -251,65 +221,63 @@ export function ProxyOverviewPage({
           <button type="button" onClick={() => onNavigate("ports")}>查看全部代理入口 <ArrowRight size={15} aria-hidden="true" /></button>
         </section>
       </div>
-      {nodePickerOpen && <FixedNodeDialog nodes={overview.nodes} currentNode={overview.main_node} active={policy === "fixed"} triggerElement={nodePickerTrigger.current} onSelect={onSelectNode} onClose={() => setNodePickerOpen(false)} />}
+      {nodePickerOpen && <FixedNodeDialog nodes={overview.nodes} currentNode={exit.selected} canAuto={canAuto} triggerElement={nodePickerTrigger.current} onSelect={onSelectNode} onClose={() => setNodePickerOpen(false)} />}
     </section>
   );
 }
 
-/**
- * resolveMainPolicy 计算当前真正生效的主入口策略。
- *
- * 参数说明：
- * - overview: object，包含 main_auto 与 main_node 的概览响应。
- *
- * 返回值说明：
- * 返回 "auto"、"fixed" 或 "rule"，顺序与后端优先级保持一致。
- *
- * 可能的异常/错误情况：
- * overview 字段缺失时安全回退为规则策略，不抛出异常。
- */
-function resolveMainPolicy(overview) {
-  /*
-   * 必须先判断 main_auto。后端将其定义为最高优先级，即使配置文件中还残留
-   * main_node，实际主入口也会使用自动测速结果。把 main_node 放在前面会让界面
-   * 显示固定节点，却与运行时生成的 mihomo 配置不一致。
-   */
-  if (overview?.main_auto) return "auto";
-  /*
-   * main_auto 关闭后，非空 main_node 表示持久化的固定节点意图。此处不检查节点
-   * 是否健康，因为健康状态只决定是否运行时回退，不应悄悄改写用户选择。
-   */
-  if (overview?.main_node) return "fixed";
-  /*
-   * 两个覆盖字段都未启用时才进入规则策略；此时 rule/global/direct 决定主端口
-   * 流量是按规则匹配、统一代理还是全部直连。
-   */
-  return "rule";
+/** exitIcon 按默认出口类型返回候选入口图标；exit 为 resolveDefaultExit 结果，返回 lucide 组件。 */
+function exitIcon(exit) {
+  if (exit.kind === "auto") return Sparkles;
+  if (exit.kind === "direct") return Globe2;
+  return Target;
 }
 
 /**
- * resolveActiveNode 为可确定出口的策略找到节点模型。
+ * resolveDefaultExit 解析内置 PROXY 组当前的默认出口。
+ *
+ * 功能说明：
+ * 选中值来自内置 PROXY 组的 selected 字段（节点名 / "AUTO" / "DIRECT"）。选中节点
+ * 已失效时生成层会忽略该值并回退成员首位，因此这里把有效出口落到首个可用节点并
+ * 标记 fallback，避免界面把失效选择误报为真实出口；未持久化选择时同样落成员首位。
  *
  * 参数说明：
- * - overview: object，包含 nodes、main_node 与 main_node_up 的概览响应。
- * - policy: "rule" | "auto" | "fixed"，已解析的主入口策略。
+ * - overview: object，/api/overview 响应（含 groups 与 nodes）。
  *
  * 返回值说明：
- * 固定节点可用时返回对应节点；自动最快返回延迟最低的健康节点；规则策略返回 null。
+ * 返回 { kind, label, node, fallback, ok, selected }；kind 为 node/auto/direct/default。
  *
  * 可能的异常/错误情况：
- * 节点列表为空、固定节点失效或延迟字段非法时返回 null，避免界面虚构实际出口。
+ * 缺失字段安全回退为空选择与 null 节点，不抛出异常。
  */
-function resolveActiveNode(overview, policy) {
-  const nodes = (overview?.nodes || []).filter((node) => node.alive);
-  if (policy === "fixed") {
-    if (!overview?.main_node_up) return null;
-    return nodes.find((node) => node.key === overview.main_node) || null;
+function resolveDefaultExit(overview) {
+  const nodes = overview?.nodes || [];
+  const alive = nodes.filter((node) => node.alive);
+  const group = (overview?.groups || []).find((item) => item.name === "PROXY") || null;
+  const selected = group?.selected || "";
+  if (selected === "AUTO") {
+    const fastest = [...alive].sort((left, right) => (left.delay || Number.POSITIVE_INFINITY) - (right.delay || Number.POSITIVE_INFINITY))[0] || null;
+    return { kind: "auto", label: fastest ? `自动最快 · ${fastest.name}` : "自动最快", node: fastest, fallback: false, ok: Boolean(fastest), selected };
   }
-  if (policy === "auto") {
-    return [...nodes].sort((left, right) => (left.delay || Number.POSITIVE_INFINITY) - (right.delay || Number.POSITIVE_INFINITY))[0] || null;
+  if (selected === "DIRECT") {
+    return { kind: "direct", label: "直连（DIRECT）", node: null, fallback: false, ok: true, selected };
   }
-  return null;
+  if (selected) {
+    const node = alive.find((item) => item.name === selected) || null;
+    if (node) return { kind: "node", label: node.name, node, fallback: false, ok: true, selected };
+    return { kind: "node", label: selected, node: alive[0] || null, fallback: true, ok: false, selected };
+  }
+  const first = alive[0] || null;
+  return { kind: "default", label: first ? `成员首位 · ${first.name}` : "暂无可用节点", node: first, fallback: false, ok: Boolean(first), selected: "" };
+}
+
+/** describeExit 生成默认出口入口的副标题文案；exit 为 resolveDefaultExit 结果，返回 string。 */
+function describeExit(exit) {
+  if (exit.kind === "auto") return exit.node ? `自动选择延迟最低的节点 · 当前 ${exit.node.name}` : "自动选择延迟最低的节点";
+  if (exit.kind === "direct") return "直接连接目标，不经过任何节点";
+  if (exit.fallback) return `${exit.selected}（不可用，已回退成员首位）`;
+  if (exit.node) return `${exit.node.name} · ${formatDelay(exit.node)}`;
+  return "暂无可用节点";
 }
 
 /**
@@ -319,6 +287,7 @@ function resolveActiveNode(overview, policy) {
  * - overview: object，完整概览响应。
  * - traffic: object，实时流量连接状态。
  * - aliveCount: number，健康节点数量。
+ * - exit: object，resolveDefaultExit 解析出的默认出口。
  *
  * 返回值说明：
  * 返回 Array<{text: string, view: string}>；数组为空表示没有需要主动提醒的状态。
@@ -326,10 +295,10 @@ function resolveActiveNode(overview, policy) {
  * 可能的异常/错误情况：
  * 缺失的可选字段会被忽略；函数只生成展示模型，不修改任何配置。
  */
-function buildOverviewAttention(overview, traffic, aliveCount) {
+function buildOverviewAttention(overview, traffic, aliveCount, exit) {
   const items = [];
   if (aliveCount === 0) items.push({ text: "当前没有健康节点，请检查订阅或手动节点。", view: "nodes" });
-  if (overview.main_node && !overview.main_node_up && !overview.main_auto) items.push({ text: `固定节点当前不可用，主入口已经临时回退到${MODE_LABELS[overview.mode] || overview.mode}模式。`, view: "nodes" });
+  if (exit?.fallback) items.push({ text: `默认出口「${exit.selected}」当前不可用，已回退到 PROXY 组成员首位。`, view: "nodes" });
   if (overview.tun?.enabled && !overview.tun?.active) items.push({ text: "TUN 已配置但没有实际生效，请检查权限与运行日志。", view: "logs" });
   if (!overview.dns_custom && overview.tun?.enabled && overview.dns_preset === "off") items.push({ text: "TUN 已开启但 DNS 预设关闭，建议评估 Fake IP。", view: "proxy/settings" });
   if (!overview.port_mapping_enabled) items.push({ text: "节点一对一端口当前未监听，稳定分配仍然保留。", view: "ports" });
@@ -338,14 +307,14 @@ function buildOverviewAttention(overview, traffic, aliveCount) {
 }
 
 /**
- * PolicyOption 渲染一个可切换的主入口策略。
+ * PolicyOption 渲染默认出口的入口按钮。
  *
  * 参数说明：
- * - active: boolean，是否为当前策略。
- * - detail/label: string，策略说明与名称。
+ * - active: boolean，是否处于强调态。
+ * - detail/label: string，出口说明与名称。
  * - icon: React.ComponentType，来自现有图标库的线性图标组件。
- * - tone: string，蓝色、青色或靛蓝语义色。
- * - onClick: Function，切换策略的回调。
+ * - tone: string，语义色。
+ * - onClick: Function，打开出口选择弹窗的回调。
  *
  * 返回值说明：
  * 返回具有按下状态语义的按钮元素。
