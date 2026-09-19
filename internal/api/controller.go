@@ -97,8 +97,8 @@ func (s *Server) handleTraffic(w http.ResponseWriter, r *http.Request) {
 //   - external-controller 缺失或 URL 非法时返回 500，明确区分为本地配置错误。
 //   - 上游不可达、返回非 2xx、响应体中途断开、超过大小上限或 JSON 非法时返回稳定 502，
 //     不泄漏 secret、上游正文或底层网络细节。
-//   - 内存来自后台 watcher 缓存（mihomo `/memory` 是一秒一跳的常驻流，不能同步拉取），
-//     尚未采集到时省略该字段。
+//   - 内存是本进程的物理占用（见 Server.processMemory），读取失败时省略该字段，
+//     不影响连接列表主请求。
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.doControllerRequest(r.Context(), http.MethodGet, "/connections", r.URL.Query())
 	if err != nil {
@@ -135,7 +135,7 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "connections upstream response invalid", http.StatusBadGateway)
 		return
 	}
-	out := enrichConnectionsWithMemory(body, s.memoryBytes.Load())
+	out := enrichConnectionsWithMemory(body, s.processMemory())
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
@@ -152,7 +152,7 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 //
 // 参数：
 //   - body: []byte，mihomo `/connections` 的原始 JSON。
-//   - memory: uint64，mihomo `/memory` 返回的 inuse 字节数；0 表示不可用。
+//   - memory: uint64，本进程物理内存占用字节数；0 表示不可用。
 //
 // 返回值：
 //   - []byte：注入 `memory` 字段后的 JSON；解析失败或 memory 为 0 时原样返回。

@@ -307,7 +307,7 @@ export function ConnectionsPage({
               value={summary.downloadBytes}
             />
             <Metric
-              detail="内核运行占用"
+              detail="进程物理占用（含 mihomo）"
               format={memoryFormatter}
               label="内存"
               value={memoryValue}
