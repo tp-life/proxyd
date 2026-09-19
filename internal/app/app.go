@@ -125,6 +125,13 @@ type App struct {
 	// mihomo 所有（关闭 TUN/停用时由 mihomo 关闭），见 proxy_tunhelper.go。
 	tunFD int
 
+	// appliedConfig 是最近一次成功热更新到 mihomo 的配置字节（自检与 GEO 降级后的
+	// 最终字节）。后台健康检查每轮都会重新生成配置，但节点可用性没有变化时生成结果
+	// 与之逐字节一致；据此跳过热更新可以避免周期性重建整棵 tunnel 与重复加载 geo /
+	// 规则集，这是进程 RSS 高水位和周期性 CPU 尖峰的主要来源。
+	// 仅在 mu 内访问；mihomo 运行态被停用、替换或热更新可能只应用了一半时必须清空。
+	appliedConfig []byte
+
 	updateChecker          ReleaseChecker
 	versionStatus          VersionCheckStatus
 	versionCheckGeneration uint64
@@ -560,6 +567,7 @@ func (a *App) Run(ctx context.Context) error {
 			a.stopDesktop()
 			a.stopRemote()
 			a.stopGateway()
+			a.clearAppliedConfig()
 			a.runner.Shutdown()
 			return fmt.Errorf("TUN 未能启动，服务已停止以避免流量绕过代理: %w", startupErr)
 		}
@@ -591,6 +599,8 @@ func (a *App) Shutdown() {
 	a.stopDesktop()
 	a.stopRemote()
 	a.stopGateway()
+	// 核心关闭后运行态不再对应任何配置；清空记录避免重复 Shutdown/再次启动时误判配置未变。
+	a.clearAppliedConfig()
 	a.runner.Shutdown()
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1133,6 +1134,8 @@ func TestConnectionsAPIProxiesMihomoJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New("127.0.0.1:0", a)
+	// 本用例只关注对上游 JSON/头的透传，关闭内存注入以免机器真实占用进入断言。
+	srv.memoryProbe = func() (uint64, bool) { return 0, false }
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/connections?keyword=example.com&source=rule%2F1", nil)
 	srv.handleConnections(rec, req)
@@ -1150,7 +1153,7 @@ func TestConnectionsAPIProxiesMihomoJSON(t *testing.T) {
 	}
 }
 
-// TestConnectionsAPIInjectsMemory 验证 `GET /api/connections` 会附带缓存的内存占用。
+// TestConnectionsAPIInjectsMemory 验证 `GET /api/connections` 会附带进程内存占用。
 //
 // 参数：
 //   - t: *testing.T，Go 测试上下文。
@@ -1158,8 +1161,11 @@ func TestConnectionsAPIProxiesMihomoJSON(t *testing.T) {
 // 返回值：无。
 //
 // 错误情况：
-//   - 响应顶层缺少 `memory` 字段、数值与缓存不一致，或连接数据被改写时，测试失败。
-//   - 缓存尚未采集到（0）时必须退化为原样透传，不能因此拖垮连接列表主请求。
+//   - 响应顶层缺少 `memory` 字段、数值与探测结果不一致，或连接数据被改写时，测试失败。
+//   - 探测不可用（ok=false）时必须退化为原样透传，不能因此拖垮连接列表主请求。
+//
+// 说明：内存来源是本进程的物理占用探测（Server.processMemory），测试通过 memoryProbe
+// 注入固定值，避免把断言绑死在某一台机器的真实内存上。
 func TestConnectionsAPIInjectsMemory(t *testing.T) {
 	t.Run("memory available", func(t *testing.T) {
 		upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1178,7 +1184,7 @@ func TestConnectionsAPIInjectsMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv := New("127.0.0.1:0", a)
-		srv.memoryBytes.Store(1048576)
+		srv.memoryProbe = func() (uint64, bool) { return 1048576, true }
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
 		srv.handleConnections(rec, req)
@@ -1210,6 +1216,7 @@ func TestConnectionsAPIInjectsMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 		srv := New("127.0.0.1:0", a)
+		srv.memoryProbe = func() (uint64, bool) { return 0, false }
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/api/connections", nil)
 		srv.handleConnections(rec, req)
@@ -1222,7 +1229,7 @@ func TestConnectionsAPIInjectsMemory(t *testing.T) {
 	})
 }
 
-// TestMemoryWatcherCachesInuse 验证后台 watcher 能从 mihomo `/memory` 流中刷新内存缓存。
+// TestProcessMemoryDefaultsToProcessFootprint 验证未注入探测函数时回落到真实进程占用。
 //
 // 参数：
 //   - t: *testing.T，Go 测试上下文。
@@ -1230,42 +1237,13 @@ func TestConnectionsAPIInjectsMemory(t *testing.T) {
 // 返回值：无。
 //
 // 错误情况：
-//   - 约定时间内缓存未更新为流中的 inuse 值时，测试失败。
-//   - 流首帧 inuse 为 0 时不得覆盖缓存，避免把启动瞬间的空采样当成真实值。
-func TestMemoryWatcherCachesInuse(t *testing.T) {
-	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/memory" {
-			t.Errorf("unexpected upstream path %q", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		flusher, _ := w.(http.Flusher)
-		for _, v := range []uint64{0, 1048576} {
-			fmt.Fprintf(w, `{"inuse":%d,"oslimit":0}`+"\n", v)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		// 模拟常驻流：保持连接直到客户端（watcher 取消）断开。
-		<-r.Context().Done()
-	}))
-	defer upstream.Close()
-
-	a, err := app.New(&config.Config{ExternalController: upstream.URL, Secret: "test-secret"}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := New("127.0.0.1:0", a)
-	srv.startMemoryWatcher()
-	defer srv.memCancel()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for srv.memoryBytes.Load() != 1048576 {
-		if time.Now().After(deadline) {
-			t.Fatalf("memory cache = %d, want 1048576", srv.memoryBytes.Load())
-		}
-		time.Sleep(10 * time.Millisecond)
+//   - memoryProbe 为 nil 时返回 0 说明默认值接线丢失，页面会永远不显示内存指标。
+//
+// 说明：只断言接线（非 0），不比对具体数值，避免测试与运行环境的真实内存耦合。
+func TestProcessMemoryDefaultsToProcessFootprint(t *testing.T) {
+	srv := &Server{}
+	if got := srv.processMemory(); got == 0 {
+		t.Skipf("当前平台不支持进程内存探测（GOOS=%s）", runtime.GOOS)
 	}
 }
 

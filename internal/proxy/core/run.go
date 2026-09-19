@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -27,6 +28,9 @@ type Runner struct {
 	tailscaleEnrollment tailscaleEnrollmentTracker
 	tailscaleTriggerMu  sync.Mutex
 	tailscaleTriggers   map[string]*tailscaleEnrollmentTrigger
+	// reloads 统计成功交给 hub.Parse 的配置次数（首次启动也计入）。周期性健康检查在
+	// 配置没有变化时应当完全跳过热更新，这个计数器是验证该行为与排查异常重建的依据。
+	reloads atomic.Uint64
 }
 
 // NewRunner 创建 Runner。stateDir 作为 mihomo 的 home 目录（存 cache.db / geo 文件），
@@ -91,7 +95,19 @@ func (r *Runner) Start(cfgYAML []byte) error {
 		return fmt.Errorf("应用 mihomo 配置: %w", err)
 	}
 	r.started = true
+	r.reloads.Add(1)
 	return nil
+}
+
+// Reloads 返回成功应用配置的累计次数（含首次启动），用于诊断周期性热更新是否被跳过。
+//
+// 参数：无。
+//
+// 返回值：uint64，单调递增的成功应用次数。
+//
+// 错误情况：无；只读原子计数，可在任意协程调用。
+func (r *Runner) Reloads() uint64 {
+	return r.reloads.Load()
 }
 
 // Reload 热更新配置：hub.Parse 内部已 ApplyConfig（重建 REST API 与所有 listener）。

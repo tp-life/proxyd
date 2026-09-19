@@ -986,7 +986,7 @@
   }
 
   .traffic-line {
-    @apply text-info;
+    @apply text-primary;
     stroke: currentColor;
     stroke-linecap: round;
     stroke-linejoin: round;
@@ -998,7 +998,7 @@
   }
 
   .traffic-line.upload {
-    @apply text-primary;
+    @apply text-info;
   }
 
   .traffic-chart > span {
@@ -1010,11 +1010,11 @@
   }
 
   .traffic-chart > span > i {
-    @apply size-2 rounded-full bg-info;
+    @apply size-2 rounded-full bg-primary;
   }
 
   .traffic-chart > span > i.upload {
-    @apply bg-primary;
+    @apply bg-info;
   }
 
   .update-notice {

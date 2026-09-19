@@ -3,6 +3,7 @@ package app
 // 代理域：订阅刷新流水线（拉取/健康检测/端口分配/热更新）与启动快照恢复。
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -17,6 +18,47 @@ import (
 	"proxyd/internal/proxy/ruleurl"
 	"proxyd/internal/proxy/subscribe"
 )
+
+// configApplied 报告生成的配置字节是否与当前已热更新生效的一致。
+//
+// 参数：
+//   - candidate: []byte，本次生成（或自检降级后）的配置字节。
+//
+// 返回值：bool，逐字节等于最近一次成功生效的配置时返回 true。
+//
+// 错误情况：无；从未成功应用过配置时返回 false，保证启动与恢复流程不会被跳过。
+func (a *App) configApplied(candidate []byte) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.appliedConfig) > 0 && bytes.Equal(a.appliedConfig, candidate)
+}
+
+// markConfigApplied 记录一份已经成功热更新到 mihomo 的配置字节。
+//
+// 参数：
+//   - applied: []byte，自检通过并成功 Reload 的最终配置字节。
+//
+// 返回值：无。
+//
+// 错误情况：无；调用方必须确保 mihomo 已经生效，否则后续刷新会错误地跳过重试。
+func (a *App) markConfigApplied(applied []byte) {
+	a.mu.Lock()
+	a.appliedConfig = applied
+	a.mu.Unlock()
+}
+
+// clearAppliedConfig 丢弃已生效配置记录，使下一次生成必定重新自检并热更新。
+//
+// 参数：无。
+//
+// 返回值：无。
+//
+// 错误情况：无；mihomo 被停用、被替换或热更新可能只应用了一半时都必须调用。
+func (a *App) clearAppliedConfig() {
+	a.mu.Lock()
+	a.appliedConfig = nil
+	a.mu.Unlock()
+}
 
 // Regenerate 仅按当前 cfg + 当前 assignments 重新生成并热应用 mihomo 配置
 // （不拉订阅、不测速）。用于 auto-port/rules/groups 等变更后的热更新。
@@ -87,6 +129,9 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 		// Suspend 会关闭 TUN listener，helper 注入的 fd 随 mihomo 一并关闭，
 		// 这里只清状态，恢复代理时重新申请。
 		a.releaseTUNFDLocked(false)
+		// 核心被停用后运行态不再对应任何配置；不清空记录会让恢复代理时误判为
+		// “配置没变”而跳过热更新，留下已停用的空核心。
+		a.clearAppliedConfig()
 		return a.runner.Suspend()
 	}
 	// darwin 普通用户模式下经 tun-helper 申请 utun fd 并注入生成配置；
@@ -108,12 +153,37 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	if err != nil {
 		log.Printf("[groupstate] %v (ignored)", err)
 	}
-	cfgYAML, err := core.GenerateWithState(cfg, assigns, a.Nodes(), imported, selected)
+	// 稳态快路径：后台健康检查每轮都会走到这里，但节点可用性没有变化时生成结果与
+	// 当前运行态逐字节一致。此时跳过 mihomo 自检与整棵 tunnel 的热更新：自检会加载
+	// geo 数据与规则集，热更新会重建全部出站与 listener，二者是这一轮唯一的可观开销，
+	// 也是进程 RSS 高水位的主要来源。
+	// 字节比较是可靠的：配置由固定结构的 map 序列化，yaml.v3 对 map 键排序，相同输入
+	// 必然得到相同输出（见 core.BuildWithState 的文档契约）。
+	built, err := core.BuildWithState(cfg, assigns, a.Nodes(), imported, selected)
 	if err != nil {
 		releaseOnError()
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
+	if a.configApplied(built.YAML()) {
+		releaseOnError()
+		return nil
+	}
+	cfgYAML, err := built.Validate()
+	if err != nil {
+		releaseOnError()
+		return fmt.Errorf("generate mihomo config: %w", err)
+	}
+	// GEO 数据不可用时会降级成剔除 GEO 规则的配置，其字节与 built 不同；再比一次，
+	// 避免每个健康检查周期都把同一份降级配置重复热更新。降级期间仍会走一遍自检，
+	// 这样 geo 数据恢复可用后下一轮就能自动回到含 GEO 规则的配置。
+	if a.configApplied(cfgYAML) {
+		releaseOnError()
+		return nil
+	}
 	if err := a.runner.Reload(cfgYAML); err != nil {
+		// 热更新失败时 mihomo 可能只应用了一半，运行态不再对应该配置；清空记录让下一轮
+		// 重新自检并重试，而不是把失败状态误当成“已生效、无需再试”。
+		a.clearAppliedConfig()
 		releaseOnError()
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
@@ -121,9 +191,11 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	// 因此必须在 Reload 返回后读取 listener 实际状态，否则可能把 enable:true 持久化，
 	// 但运行时 TUN 已关闭。状态不一致作为应用失败返回，上层会恢复旧配置。
 	if active := a.runner.TUNEnabled(); active != cfg.TUN.Enable {
+		a.clearAppliedConfig()
 		releaseOnError()
 		return fmt.Errorf("mihomo TUN 实际状态与请求不一致（期望 enable=%t，实际 active=%t）；请检查 TUN 日志、stack 与系统权限", cfg.TUN.Enable, active)
 	}
+	a.markConfigApplied(cfgYAML)
 	if !cfg.TUN.Enable {
 		// TUN 已随本次应用关闭，fd 由 mihomo 关闭（所有权已移交），只清持有状态。
 		a.releaseTUNFDLocked(false)
@@ -421,7 +493,9 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	// 被外部清除的规则（如 helper 看门狗）也在此收敛。
 	a.reconcileGatewayLocked()
 	a.ensureInteractiveTailscaleEnrollments(nodes)
-	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped", len(nodes), len(alive), len(assigns))
+	// reloads 是进程累计的成功热更新次数：稳态下它应当每轮保持不变，只有节点可用性
+	// 或配置真的变化时才增长。排查周期性重建与 RSS 高水位时先看这个数字。
+	log.Printf("[refresh] done: %d nodes, %d alive, %d ports mapped, %d reloads", len(nodes), len(alive), len(assigns), a.runner.Reloads())
 	return nil
 }
 

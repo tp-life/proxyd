@@ -44,7 +44,7 @@ const (
 // mihomo 热更新（PatchInboundListeners）先 Listen 新 listener、后关闭旧 listener，
 // 同端口改名会 bind 冲突把端口打挂；同名但配置不同才会按 关闭→监听 的正确顺序处理。
 func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]byte, error) {
-	return generate(cfg, assigns, nil, imported, nil)
+	return GenerateWithState(cfg, assigns, nil, imported, nil)
 }
 
 // GenerateWithNodes 生成 mihomo 配置，并把未分配本地端口但仍被链路或分组引用的
@@ -63,7 +63,7 @@ func Generate(cfg *config.Config, assigns []Assignment, imported []string) ([]by
 // 错误情况：额外节点只注册出站，不占用本地端口，也不自动进入 PROXY/AUTO；这样
 // 端口容量限制不会截断链式代理依赖，同时保持用户可见端口集合的既有语义。
 func GenerateWithNodes(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string) ([]byte, error) {
-	return generate(cfg, assigns, nodes, imported, nil)
+	return GenerateWithState(cfg, assigns, nodes, imported, nil)
 }
 
 // GenerateWithState 在 GenerateWithNodes 基础上接受 select 分组的持久化选中项。
@@ -77,10 +77,80 @@ func GenerateWithNodes(cfg *config.Config, assigns []Assignment, nodes []*node.N
 // 回退到组成员首位。选择 default-selected 而非 external-controller 恢复，是因为它在
 // 配置加载期生效，无需等 mihomo 启动后再发 API 请求，路径更短且无并发时序问题。
 func GenerateWithState(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) ([]byte, error) {
+	built, err := BuildWithState(cfg, assigns, nodes, imported, selected)
+	if err != nil {
+		return nil, err
+	}
+	return built.Validate()
+}
+
+// BuildWithState 生成配置字节，但不执行 mihomo 解析自检。
+//
+// 拆出自检的目的是让调用方先把生成结果与当前已生效配置按字节比较：完全一致时
+// 可以直接跳过自检和热更新。自检会加载 geo 数据与规则集，热更新会重建全部出站与
+// listener，二者都是周期性刷新里唯一可观的开销；稳态下每轮重做一遍既浪费 CPU，
+// 也会把进程 RSS 顶到没有必要的高水位（见 internal/app 的 applyConfigLocked）。
+//
+// 参数与 GenerateWithState 相同。
+//
+// 返回值：
+//   - *Generated，可直接取 YAML 比较，或在决定应用时调用 Validate 完成自检。
+//   - error，assignment 缺节点或 YAML 序列化失败时返回。
+//
+// 错误情况：调用方必须在真正交给 mihomo 之前调用一次 Validate；跳过 Validate 只允许
+// 发生在配置字节与上一次成功生效的完全一致时。
+func BuildWithState(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) (*Generated, error) {
 	return generate(cfg, assigns, nodes, imported, selected)
 }
 
-// generate 实现 Generate 与 GenerateWithNodes 共用的配置翻译和 mihomo 自检流程。
+// Generated 是完成配置翻译与序列化、但尚未经过 mihomo 解析自检的配置产物。
+type Generated struct {
+	// config 是序列化前的完整配置映射；GEO 数据不可用时靠它重写 rules 后再序列化。
+	config map[string]any
+	// yaml 是 config 的稳定序列化结果（yaml.v3 对 map 键排序，同样输入必然逐字节一致）。
+	yaml []byte
+	// rules 是最终写入的规则列表，用于判断自检失败能否走 GEO 降级。
+	rules []string
+}
+
+// YAML 返回未经自检的配置字节，供调用方与上一次生效的配置做等值比较。
+func (g *Generated) YAML() []byte { return g.yaml }
+
+// Validate 执行 mihomo 解析自检，返回最终可交给 hub.Parse 的配置字节。
+//
+// 返回值：
+//   - []byte，自检通过的配置；GEO 数据不可用时为剔除 GEO 规则后的降级配置。
+//   - error，自检失败且无法降级时返回，调用方必须放弃本次热更新以保留旧运行态。
+//
+// 错误情况：GEO 降级只在原规则含 GEOIP/GEOSITE 时可用；降级后的配置仍需自检通过。
+func (g *Generated) Validate() ([]byte, error) {
+	// 自检：ParseWithBytes 只是 config.Parse（UnmarshalRawConfig + ParseRawConfig），
+	// 不启动 listener、不创建目录；解析期间对 general 的临时全局改动会随
+	// temporaryUpdateGeneral 的 rollback 复原（见 mihomo config/config.go ParseRawConfig）。
+	// 唯一注意点：若 rules 含 GEOIP/GEOSITE，解析时会尝试加载 geo 数据文件，
+	// 依赖调用方在此之前通过 C.SetHomeDir 设置好目录（NewRunner 已保证）。
+	_, parseErr := executor.ParseWithBytes(g.yaml)
+	if parseErr == nil {
+		return g.yaml, nil
+	}
+	// geo 数据需要从 GitHub 下载；网络受限时会卡住/失败。
+	// 降级：剔除 GEO 规则后重试一次，保证代理本体可用（此时 GEO 规则语义退化为 MATCH 兜底）。
+	if !hasGeoRules(g.rules) {
+		return nil, fmt.Errorf("mihomo 配置自检失败: %w", parseErr)
+	}
+	log.Printf("[core] geo 数据不可用（%v），本轮降级为不含 GEO 规则运行；可配置 geox-url 镜像后恢复", firstLine(parseErr.Error()))
+	g.config["rules"] = stripGeoRules(g.rules)
+	buf, err := yaml.Marshal(g.config)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 mihomo 配置: %w", err)
+	}
+	if _, err := executor.ParseWithBytes(buf); err != nil {
+		return nil, fmt.Errorf("mihomo 配置自检失败（已剔除 GEO 规则）: %w", err)
+	}
+	return buf, nil
+}
+
+// generate 实现 BuildWithState 的配置翻译与序列化流程。
 //
 // 参数：
 //   - cfg: *config.Config，proxyd 运行配置。
@@ -89,11 +159,11 @@ func GenerateWithState(cfg *config.Config, assigns []Assignment, nodes []*node.N
 //   - imported: []string，已经清洗、去重的远程规则。
 //   - selected: map[string]string，select 分组的持久化选中项（分组名 -> 节点名）。
 //
-// 返回值：生成后的 YAML 字节与错误。
+// 返回值：未经自检的配置产物与错误。
 //
-// 错误情况：assignment 缺节点、YAML 序列化或 mihomo 自检失败时返回错误；GEO 数据
-// 不可用时沿用既有降级逻辑，移除 GEO 规则后再自检一次。
-func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) ([]byte, error) {
+// 错误情况：assignment 缺节点、保留规则集名冲突或 YAML 序列化失败时返回错误；
+// mihomo 语义自检不在这里执行，由调用方按需调用 Generated.Validate。
+func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) (*Generated, error) {
 	m := map[string]any{
 		"mode":                cfg.Mode,
 		"log-level":           cfg.LogLevel,
@@ -304,29 +374,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	if err != nil {
 		return nil, fmt.Errorf("序列化 mihomo 配置: %w", err)
 	}
-
-	// 自检：ParseWithBytes 只是 config.Parse（UnmarshalRawConfig + ParseRawConfig），
-	// 不启动 listener、不创建目录；解析期间对 general 的临时全局改动会随
-	// temporaryUpdateGeneral 的 rollback 复原（见 mihomo config/config.go ParseRawConfig）。
-	// 唯一注意点：若 rules 含 GEOIP/GEOSITE，解析时会尝试加载 geo 数据文件，
-	// 依赖调用方在此之前通过 C.SetHomeDir 设置好目录（NewRunner 已保证）。
-	if _, err := executor.ParseWithBytes(buf); err != nil {
-		// geo 数据需要从 GitHub 下载；网络受限时会卡住/失败。
-		// 降级：剔除 GEO 规则后重试一次，保证代理本体可用（此时 GEO 规则语义退化为 MATCH 兜底）。
-		if !hasGeoRules(rules) {
-			return nil, fmt.Errorf("mihomo 配置自检失败: %w", err)
-		}
-		log.Printf("[core] geo 数据不可用（%v），本轮降级为不含 GEO 规则运行；可配置 geox-url 镜像后恢复", firstLine(err.Error()))
-		m["rules"] = stripGeoRules(rules)
-		buf, err = yaml.Marshal(m)
-		if err != nil {
-			return nil, fmt.Errorf("序列化 mihomo 配置: %w", err)
-		}
-		if _, err := executor.ParseWithBytes(buf); err != nil {
-			return nil, fmt.Errorf("mihomo 配置自检失败（已剔除 GEO 规则）: %w", err)
-		}
-	}
-	return buf, nil
+	return &Generated{config: m, yaml: buf, rules: rules}, nil
 }
 
 // gatewayActive 判断 gateway 数据面是否应参与本次生成：模块未停用、代理数据面

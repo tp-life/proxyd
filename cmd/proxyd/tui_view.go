@@ -771,7 +771,7 @@ func (m tuiModel) renderConnectionsPage(width int) (string, int) {
 		{Value: fmt.Sprintf("%d 条", len(connections)), Detail: "活动连接", Accent: tuiCyan},
 		{Value: "↑ " + formatBytes(m.connections.UploadTotal), Detail: "累计上传", Accent: tuiBlue},
 		{Value: "↓ " + formatBytes(m.connections.DownloadTotal), Detail: "累计下载", Accent: tuiPurple},
-		{Value: formatBytes(int64(m.connections.Memory)), Detail: "内核内存", Accent: tuiAmber},
+		{Value: formatBytes(int64(m.connections.Memory)), Detail: "进程内存", Accent: tuiAmber},
 	}
 
 	rows := make([][]string, 0, len(connections))

@@ -9,7 +9,6 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -22,6 +21,7 @@ import (
 
 	"proxyd/internal/app"
 	"proxyd/internal/config"
+	"proxyd/internal/processmem"
 )
 
 // webDistFS 是前端构建产物的内嵌文件系统。
@@ -55,10 +55,11 @@ type Server struct {
 	pendingTest    bool
 	runRefresh     func(context.Context, bool) error
 
-	// memoryBytes 缓存 mihomo `/memory` 流推送的最新 inuse 值；0 表示尚未拿到。
-	// `/memory` 是一秒一跳的常驻流，不能在请求路径上同步解码，否则每次轮询都会被阻塞一拍。
-	memoryBytes atomic.Uint64
-	memCancel   context.CancelFunc
+	// memoryProbe 读取当前进程的物理内存占用（来自内嵌 mihomo 的同进程数据面）。
+	// 为 nil 时使用 processmem.Footprint；测试注入固定值时替换该字段。
+	// 这里不用 mihomo `/memory`：它上报 resident_size，在 darwin 上包含 Go 已归还但
+	// 仍驻留的空闲页与全机共享的 dyld 缓存页，展示会明显高估真实占用。
+	memoryProbe func() (uint64, bool)
 
 	// restartFn 由进程入口注入，负责派生重启子进程；nil 表示当前运行方式不支持 API 重启。
 	restartFn func() error
@@ -151,7 +152,6 @@ func (s *Server) Start() error {
 		IdleTimeout:       apiIdleTimeout,
 	}
 	go func() { _ = s.srv.Serve(ln) }()
-	s.startMemoryWatcher()
 	return nil
 }
 
@@ -206,9 +206,6 @@ func (s *Server) Addr() string {
 // 因为应用层事务可能正在等待自身锁；worker 数量固定为一个，不会继续累积资源。
 func (s *Server) Shutdown(ctx context.Context) {
 	s.stopTriggerWorker()
-	if s.memCancel != nil {
-		s.memCancel()
-	}
 	if s.srv == nil {
 		return
 	}
@@ -361,72 +358,30 @@ func (s *Server) stopTriggerWorker() {
 	}
 }
 
-// startMemoryWatcher 启动后台 goroutine 订阅 mihomo `/memory` 流。
+// processMemory 返回要注入连接列表响应的物理内存占用（字节）；不可用时返回 0。
 //
-// 参数：无；接收者 `s` 提供 external-controller 配置与缓存字段。
+// 功能说明：
+// 数据面 mihomo 以库方式内嵌在同一个进程里，因此这里直接读取本进程的物理内存，
+// 不再向 mihomo `/memory` 取数。两者是两个口径：`/memory` 上报 resident_size，
+// 在 darwin 上含 Go 已归还但仍驻留的空闲页与全机共享的 dyld 缓存页；本函数走
+// processmem，返回与「活动监视器」一致的 phys_footprint。
 //
-// 返回值：无；watcher 生命周期由 Shutdown 通过 memCancel 结束。
-//
-// 错误情况：
-//   - mihomo `/memory` 是常驻 NDJSON 式流（每秒推送一次 inuse），同步拉取会阻塞请求路径，
-//     因此只能在后台持续消费并把最新值写入缓存；连接断开或上游不可达时延迟重试。
-func (s *Server) startMemoryWatcher() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.memCancel = cancel
-	go s.watchMemory(ctx)
-}
-
-// watchMemory 持续消费 mihomo `/memory` 流并刷新内存缓存。
-//
-// 参数：
-//   - ctx: context.Context，Shutdown 时取消，正在解码的流会随连接关闭而退出。
-//
-// 返回值：无；只有 ctx 取消后才会返回。
-//
-// 错误情况：
-//   - 建连失败、非 2xx 或流中断都进入 2 秒退避重试，不写日志，避免上游长期不可用时刷日志。
-func (s *Server) watchMemory(ctx context.Context) {
-	for ctx.Err() == nil {
-		_ = s.streamMemory(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// streamMemory 建立一次 `/memory` 流连接并逐条消费，直到流出错或被取消。
-//
-// 参数：
-//   - ctx: context.Context，控制这次流的生命周期。
+// 参数：无；接收者 `s` 可提供测试注入的 memoryProbe。
 //
 // 返回值：
-//   - error：建连失败、非 2xx 或流解码失败时返回；ctx 取消导致的错误同样返回，由调用方判断。
+//   - uint64：物理内存占用字节数；探测失败时为 0，调用方据此省略该字段。
 //
-// 错误情况：
-//   - 上游推送的 inuse 为 0 时忽略该帧，保留上一次有效值，避免启动瞬间的空采样把缓存清零。
-func (s *Server) streamMemory(ctx context.Context) error {
-	resp, err := s.doControllerRequest(ctx, http.MethodGet, "/memory", nil)
-	if err != nil {
-		return err
+// 错误情况：无；底层 syscall / 文件读取失败只表现为返回 0，不影响连接列表主请求。
+func (s *Server) processMemory() uint64 {
+	probe := s.memoryProbe
+	if probe == nil {
+		probe = processmem.Footprint
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("memory stream returned status %d", resp.StatusCode)
+	used, ok := probe()
+	if !ok {
+		return 0
 	}
-	decoder := json.NewDecoder(io.LimitReader(resp.Body, 16<<20))
-	for {
-		var payload struct {
-			Inuse uint64 `json:"inuse"`
-		}
-		if err := decoder.Decode(&payload); err != nil {
-			return err
-		}
-		if payload.Inuse > 0 {
-			s.memoryBytes.Store(payload.Inuse)
-		}
-	}
+	return used
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
