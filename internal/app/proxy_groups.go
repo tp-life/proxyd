@@ -11,7 +11,13 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
 )
+
+// builtinProxyGroupName 是 mihomo 规则模式兜底 MATCH,PROXY 落入的内置 select 组：
+// 生成层恒创建（成员 = 全部可用节点 + AUTO + DIRECT），其选中项即「默认出口」，
+// 与自定义 select 分组共用 groupstate 持久化（键 "PROXY"）。
+const builtinProxyGroupName = "PROXY"
 
 // Groups 返回节点分组快照（供 API 展示）。
 func (a *App) Groups() []config.NodeGroup {
@@ -205,10 +211,11 @@ func (a *App) RemoveGroup(name string) error {
 // SetGroupSelected 修改 select 类型分组的手动选中节点，并以「落盘 → 热更新 → 失败回滚」
 // 的顺序提交。选中项持久化到 state-dir/group-selected.json，配置生成时写入 mihomo 的
 // default-selected 字段，因此重启与订阅刷新后仍保持；mihomo 侧选中节点消失时按其原生
-// 语义回退组成员首位。
+// 语义回退组成员首位。分组名 "PROXY" 特指内置组（默认出口）：选中值须为当前可用节点名
+// （含隧道类）、"AUTO"（需存在可用节点）或 "DIRECT"。
 //
 // 参数：
-//   - groupName: string，目标分组名；必须是已配置的 select 类型分组。
+//   - groupName: string，目标分组名；必须是已配置的 select 类型分组或内置 "PROXY"。
 //   - nodeName: string，选中节点名；必须在分组当前可用成员中（隧道类节点允许）。
 //
 // 返回值：error，分组不存在/类型不符/节点不在成员中、状态落盘失败或热更新失败时返回。
@@ -232,20 +239,28 @@ func (a *App) SetGroupSelected(groupName, nodeName string) error {
 	}
 	nodes := make([]*node.Node, len(a.nodes))
 	copy(nodes, a.nodes)
+	assigns := make([]pool.Assignment, len(a.assigns))
+	copy(assigns, a.assigns)
 	a.mu.RUnlock()
 
-	if !found {
-		return fmt.Errorf("分组 %q 不存在", groupName)
-	}
-	groupType := group.Type
-	if groupType == "" {
-		groupType = config.GroupTypeURLTest
-	}
-	if groupType != config.GroupTypeSelect {
-		return fmt.Errorf("分组 %q 类型为 %s，仅 select 分组支持手动选中", groupName, groupType)
-	}
-	if !groupMemberAlive(group, nodes, nodeName) {
-		return fmt.Errorf("节点 %q 不在分组 %q 当前可用成员中", nodeName, groupName)
+	if groupName == builtinProxyGroupName {
+		if err := checkBuiltinProxySelection(nodeName, nodes, assigns); err != nil {
+			return err
+		}
+	} else {
+		if !found {
+			return fmt.Errorf("分组 %q 不存在", groupName)
+		}
+		groupType := group.Type
+		if groupType == "" {
+			groupType = config.GroupTypeURLTest
+		}
+		if groupType != config.GroupTypeSelect {
+			return fmt.Errorf("分组 %q 类型为 %s，仅 select 分组支持手动选中", groupName, groupType)
+		}
+		if !groupMemberAlive(group, nodes, nodeName) {
+			return fmt.Errorf("节点 %q 不在分组 %q 当前可用成员中", nodeName, groupName)
+		}
 	}
 
 	path := a.groupSelectedPath()
@@ -273,6 +288,29 @@ func (a *App) SetGroupSelected(groupName, nodeName string) error {
 		return joined
 	}
 	return nil
+}
+
+// checkBuiltinProxySelection 校验内置 PROXY 组（默认出口）的选中值：
+// DIRECT 恒可选；AUTO 需要存在可用节点（生成层有可用节点才创建 AUTO 组）；
+// 节点名须为当前可用节点（含隧道类，与生成层的 PROXY 组成员集合一致）。
+func checkBuiltinProxySelection(nodeName string, nodes []*node.Node, assigns []pool.Assignment) error {
+	switch nodeName {
+	case "DIRECT":
+		return nil
+	case "AUTO":
+		for _, as := range assigns {
+			if as.Node != nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("当前无可用节点，AUTO 不可选")
+	}
+	for _, n := range nodes {
+		if n != nil && n.Alive && n.Name == nodeName {
+			return nil
+		}
+	}
+	return fmt.Errorf("节点 %q 不在内置 PROXY 组当前可用成员中", nodeName)
 }
 
 // groupMemberAlive 判断节点是否在分组当前可用成员中，与 core 生成时的成员交集规则一致。

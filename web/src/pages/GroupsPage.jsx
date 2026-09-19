@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { ChevronDown, Copy, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { ArrowRightLeft, ChevronDown, Copy, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { Field } from "@/components/Field";
+import { EXIT_SPECIALS, FixedNodeDialog } from "@/components/FixedNodeDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { PanelTitle } from "@/components/PanelTitle";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -23,6 +25,14 @@ const GROUP_TYPE_LABELS = {
   "load-balance": "负载均衡",
   "select": "手动选择",
 };
+
+/** selectExitLabel 把分组出口取值转换为按钮文案；value 为 string，返回 string，无异常。 */
+function selectExitLabel(value) {
+  if (value === "AUTO") return "自动最快（AUTO）";
+  if (value === "DIRECT") return "直连（DIRECT）";
+  return value || "选择出口节点";
+}
+
 
 /**
  * GroupsPage 渲染节点分组页。
@@ -46,6 +56,8 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
   const [editingName, setEditingName] = useState("");
   const [nodeQuery, setNodeQuery] = useState("");
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
+  const [pickerGroup, setPickerGroup] = useState(null);
+  const pickerTrigger = useRef(null);
   const nodes = groupSort === "delay" ? sortByDelay(overview.nodes, "delay") : overview.nodes;
   const sourceOptions = useMemo(() => {
     const names = (overview.subscriptions || []).filter((subscription) => subscription.enabled).map((subscription) => subscription.name);
@@ -63,6 +75,35 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
     });
     return result;
   }, [overview.groups]);
+
+  /**
+   * groupMemberNames 计算分组当前的成员节点名。
+   *
+   * 功能说明：
+   * 内置 PROXY 组（规则模式默认出口）成员是全部可用节点；订阅来源分组随订阅动态变化；
+   * 手动分组则使用固定成员。列表渲染与出口弹窗共用这一份口径，避免两处判断漂移。
+   *
+   * 参数说明：
+   * - group: object，overview 中的完整策略分组。
+   *
+   * 返回值说明：返回 string[] 成员节点名。
+   *
+   * 可能的异常/错误情况：无；分组字段缺失时按空成员处理。
+   */
+  function groupMemberNames(group) {
+    if (group.builtin) return overview.nodes.filter((node) => node.alive).map((node) => node.name);
+    if (group.subscription) return overview.nodes.filter((node) => node.subscription === group.subscription).map((node) => node.name);
+    return group.nodes || [];
+  }
+
+  /*
+   * 出口弹窗的候选只保留该分组当前存活的成员（与后端 groupMemberAlive 校验同口径），
+   * 内置 PROXY 组额外提供 AUTO / DIRECT 两个保留出口。
+   */
+  const pickerNodes = pickerGroup
+    ? groupMemberNames(pickerGroup).map((name) => overview.nodes.find((node) => node.name === name)).filter((node) => node?.alive)
+    : [];
+  const canAuto = overview.nodes.some((node) => node.alive && !node.tunnel);
 
   const normalizedQuery = nodeQuery.trim().toLowerCase();
   const filteredNodes = normalizedQuery
@@ -210,25 +251,42 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
   }
 
   /**
+   * openGroupPicker 打开某个 select 分组的出口选择弹窗。
+   *
+   * 参数说明：
+   * - event: React.MouseEvent，触发按钮事件，用于记录焦点归还入口。
+   * - group: object，overview 中的完整策略分组（select 类型）。
+   *
+   * 返回值说明：无。
+   *
+   * 可能的异常/错误情况：无；分组在弹窗打开期间被删除时后端会拒绝提交并提示。
+   */
+  function openGroupPicker(event, group) {
+    pickerTrigger.current = event.currentTarget;
+    setPickerGroup(group);
+  }
+
+  /**
    * selectGroupNode 切换 select 分组的手动出口节点。
    *
    * 功能说明：
-   * 后端要求目标节点在分组当前可用成员中（存活且属于该组），因此下拉只列出存活成员；
+   * 后端要求目标节点在分组当前可用成员中（存活且属于该组），因此弹窗只列出存活成员；
    * 切换立即热更新并持久化到 state-dir，重启后保持。
    *
    * 参数说明：
    * - group: object，overview 中的完整策略分组（select 类型）。
    * - nodeName: string，目标出口节点名。
    *
-   * 返回值说明：返回 Promise<void>。
+   * 返回值说明：返回 Promise<boolean>；成功返回 true，失败返回 false 以便弹窗保留选择并提示重试。
    *
    * 可能的异常/错误情况：
    * 分组非 select 类型、节点恰好失效或热更新失败时由 onPost 展示后端错误，分组保持原出口。
    */
   async function selectGroupNode(group, nodeName) {
-    if (!nodeName || nodeName === group.selected) return;
-    await onPost(`/api/groups/${encodeURIComponent(group.name)}/select`, { node: nodeName }, `分组 ${group.name} 出口已切换到「${nodeName}」`);
+    if (!group || !nodeName || nodeName === group.selected) return true;
+    return onPost(`/api/groups/${encodeURIComponent(group.name)}/select`, { node: nodeName }, `分组 ${group.name} 出口已切换到「${selectExitLabel(nodeName)}」`);
   }
+
 
   return (
     <div className="stack">
@@ -236,19 +294,20 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
         <Button type="button" onClick={openCreateDialog}><Plus size={16} aria-hidden="true" />新建分组</Button>
       </PageHeader>
       <section className="panel">
-        <PanelTitle title="已有策略分组" detail="分组提供独立代理入口，并按选定策略选择节点" />
+        <PanelTitle title="已有策略分组" detail="首个内置分组是规则模式的默认出口；其余分组提供独立代理入口" />
         <ul className="item-list">
           {(overview.groups || []).map((group) => {
             const isExpanded = expandedGroups.has(group.name);
-            // 订阅来源的分组成员随订阅节点动态变化；手动分组则展示固定成员。
-            const memberNames = group.subscription
-              ? overview.nodes.filter((node) => node.subscription === group.subscription).map((node) => node.name)
-              : group.nodes || [];
-            const staleNames = group.subscription
+            const isBuiltin = Boolean(group.builtin);
+            // 内置 PROXY 组（规则模式默认出口）成员是全部可用节点；订阅来源分组随订阅
+            // 动态变化；手动分组则展示固定成员（口径见 groupMemberNames）。
+            const memberNames = groupMemberNames(group);
+            const staleNames = group.subscription || isBuiltin
               ? []
               : memberNames.filter((name) => !overview.nodes.some((node) => node.name === name));
             // select 分组的可切换出口：后端只接受当前存活成员（见 groupMemberAlive），
-            // 这里用同一口径过滤，避免列出注定被 400 拒绝的选项。
+            // 这里用同一口径过滤，避免列出注定被 400 拒绝的选项；内置 PROXY 组额外提供
+            // AUTO（有可用节点时）与 DIRECT。
             const aliveMembers = memberNames.filter((name) => overview.nodes.some((node) => node.name === name && node.alive));
             return (
             <li className="group-item" key={group.name}>
@@ -256,36 +315,44 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
                 <button aria-expanded={isExpanded} aria-label={`查看分组 ${group.name} 的节点`} className="group-toggle" type="button" onClick={() => toggleGroupExpanded(group.name)}>
                   <ChevronDown size={15} aria-hidden="true" />
                   <b>{group.name}</b>
+                  {isBuiltin && <Badge variant="secondary">内置</Badge>}
                 </button>
-                <button className="copy-link" type="button" onClick={() => onCopy(group.port)}>:{group.port}<Copy size={14} /></button>
+                {isBuiltin ? <span className="delay-muted">主端口</span> : <button className="copy-link" type="button" onClick={() => onCopy(group.port)}>:{group.port}<Copy size={14} /></button>}
                 <span>{GROUP_TYPE_LABELS[group.type] || group.type || "自动测速"}</span>
-                <span>{group.subscription ? `来源：${group.subscription}` : `${(group.nodes || []).length} 个固定节点`}</span>
+                <span>{isBuiltin ? "规则模式默认出口" : group.subscription ? `来源：${group.subscription}` : `${(group.nodes || []).length} 个固定节点`}</span>
                 <StatusBadge
-                  ok={group.subscription
-                    ? overview.subscriptions.some((subscription) => subscription.name === group.subscription && subscription.enabled && subscription.alive > 0)
-                    : (group.nodes || []).some((name) => overview.nodes.some((node) => node.name === name && node.alive))}
-                  text={group.subscription
-                    ? `${overview.subscriptions.find((subscription) => subscription.name === group.subscription)?.alive || 0} 个可用`
-                    : `${(group.nodes || []).filter((name) => overview.nodes.some((node) => node.name === name && node.alive)).length}/${(group.nodes || []).length} 可用`}
+                  ok={isBuiltin
+                    ? aliveMembers.length > 0
+                    : group.subscription
+                      ? overview.subscriptions.some((subscription) => subscription.name === group.subscription && subscription.enabled && subscription.alive > 0)
+                      : (group.nodes || []).some((name) => overview.nodes.some((node) => node.name === name && node.alive))}
+                  text={isBuiltin
+                    ? `${aliveMembers.length} 个可用`
+                    : group.subscription
+                      ? `${overview.subscriptions.find((subscription) => subscription.name === group.subscription)?.alive || 0} 个可用`
+                      : `${(group.nodes || []).filter((name) => overview.nodes.some((node) => node.name === name && node.alive)).length}/${(group.nodes || []).length} 可用`}
                 />
                 {group.type === "select" && (
                   <div className="group-select">
-                    <span className="group-select-label">当前出口</span>
-                    <Select
-                      ariaLabel={`选择分组 ${group.name} 的出口节点`}
-                      disabled={aliveMembers.length === 0}
-                      placeholder={aliveMembers.length === 0 ? "暂无可用成员" : "选择出口节点"}
-                      triggerClassName="group-select-trigger"
-                      value={aliveMembers.includes(group.selected) ? group.selected : ""}
-                      onValueChange={(nodeName) => selectGroupNode(group, nodeName)}
-                      options={aliveMembers.map((name) => ({ value: name, label: name }))}
-                    />
+                    <span className="group-select-label">{isBuiltin ? "默认出口" : "当前出口"}</span>
+                    <button
+                      aria-haspopup="dialog"
+                      aria-label={isBuiltin ? "选择规则模式默认出口" : `选择分组 ${group.name} 的出口节点`}
+                      className="group-select-trigger"
+                      disabled={!isBuiltin && aliveMembers.length === 0}
+                      title={selectExitLabel(group.selected)}
+                      type="button"
+                      onClick={(event) => openGroupPicker(event, group)}
+                    >
+                      <span>{selectExitLabel(group.selected)}</span>
+                      <ArrowRightLeft size={13} aria-hidden="true" />
+                    </button>
                   </div>
                 )}
-                <Button aria-label={`编辑策略分组 ${group.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditDialog(group)}><Pencil size={15} aria-hidden="true" /></Button>
-                <Button aria-label={`删除策略分组 ${group.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/groups/${encodeURIComponent(group.name)}`, "分组已删除", `策略分组 ${group.name}`)}>
+                {!isBuiltin && <Button aria-label={`编辑策略分组 ${group.name}`} size="icon" variant="ghost" type="button" onClick={() => openEditDialog(group)}><Pencil size={15} aria-hidden="true" /></Button>}
+                {!isBuiltin && <Button aria-label={`删除策略分组 ${group.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/groups/${encodeURIComponent(group.name)}`, "分组已删除", `策略分组 ${group.name}`)}>
                   <Trash2 size={16} aria-hidden="true" />
-                </Button>
+                </Button>}
               </div>
               {isExpanded && (
                 <ul className="group-node-list">
@@ -407,6 +474,25 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
         <DialogFooter><Button variant="outline" type="button" onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" onClick={submitGroupDialog}>{editingName ? <Pencil size={16} aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}{editingName ? "保存修改" : "创建分组"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+      {/*
+       * 分组出口弹窗：内置 PROXY 组沿用默认出口文案并附 AUTO / DIRECT 保留出口，其余
+       * select 分组只列出该分组当前存活的成员。
+       */}
+      {pickerGroup && (
+        <FixedNodeDialog
+          canAuto={canAuto}
+          currentBadge={pickerGroup.builtin ? "当前默认出口" : "当前出口"}
+          currentNode={pickerGroup.selected}
+          description={pickerGroup.builtin ? undefined : `分组 ${pickerGroup.name} 的固定出口；切换后立即热更新并保持到重启之后。`}
+          invalidHint="请选择该分组中当前可用的成员节点。"
+          nodes={pickerNodes}
+          specials={pickerGroup.builtin ? EXIT_SPECIALS : []}
+          title={pickerGroup.builtin ? "选择默认出口" : `选择分组出口 · ${pickerGroup.name}`}
+          triggerElement={pickerTrigger.current}
+          onClose={() => setPickerGroup(null)}
+          onSelect={(value) => selectGroupNode(pickerGroup, value)}
+        />
+      )}
     </div>
   );
 }

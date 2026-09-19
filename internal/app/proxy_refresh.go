@@ -45,36 +45,9 @@ func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 }
 
 // regenerateWithLocked 用指定配置生成并热应用；调用方须已持有 refreshing 锁。
-// cfg 为运行时副本（不与 a.cfg 同步修改），供两阶段热更新等场景使用。
-//
-// 主端口形态转换保护：mihomo 热更新先 PatchInboundListeners（监听新 listener）
-// 后 ReCreateMixed（关闭旧 mixed-port），主端口从顶层 mixed-port 直接换成同端口
-// listener 会 bind 冲突把端口打挂。因此当目标配置的主端口是 listener 形态
-// （main-auto/main-node 生效）而上次应用的不是时，先应用一版"主端口入口完全关闭"
-// 的配置释放端口，再应用目标配置。反向（listener → mixed-port）以及
-// listener 同名仅换 proxy 目标（main-auto ↔ main-node）由 mihomo 安全处理。
+// cfg 为运行时副本（不与 a.cfg 同步修改），供启动快照恢复等场景使用。
 func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
-	willListener := core.MainInboundIsListener(cfg, assigns, a.Nodes())
-	a.mu.RLock()
-	wasListener := a.mainListenerOn
-	a.mu.RUnlock()
-	if willListener && !wasListener {
-		phase := *cfg // 浅拷贝：Generate 只读
-		phase.MainAuto = false
-		phase.MainNode = ""
-		phase.MixedPort = 0 // 生成 mixed-port: 0（mihomo 视为关闭该入口）
-		if err := a.applyConfigLocked(&phase, assigns, imported); err != nil {
-			// 释放失败不致命：继续尝试直接应用目标配置
-			log.Printf("[app] 主端口形态切换：释放旧入口失败（继续应用目标配置）: %v", err)
-		}
-	}
-	if err := a.applyConfigLocked(cfg, assigns, imported); err != nil {
-		return err
-	}
-	a.mu.Lock()
-	a.mainListenerOn = willListener
-	a.mu.Unlock()
-	return nil
+	return a.applyConfigLocked(cfg, assigns, imported)
 }
 
 // applyConfigLocked 生成并热应用一版 mihomo 配置。

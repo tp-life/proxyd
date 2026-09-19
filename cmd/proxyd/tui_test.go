@@ -623,15 +623,15 @@ func TestTUISubscriptionTogglePutsFullBody(t *testing.T) {
 	}
 }
 
-// TestTUIMainExitRunsMainNodeThenDisablesAuto 验证主出口动作的两步顺序调用。
+// TestTUIMainExitSelectsBuiltinProxyGroup 验证默认出口动作单次调用内置 PROXY 组 select。
 //
 // 参数说明：
 //   - t: *testing.T，Go 测试上下文。
 //
 // 返回值说明：无。
 //
-// 错误情况：调用顺序、节点 key 或 main-auto 关闭值不符时测试失败。
-func TestTUIMainExitRunsMainNodeThenDisablesAuto(t *testing.T) {
+// 错误情况：请求次数、路径或选中节点名不符时测试失败。
+func TestTUIMainExitSelectsBuiltinProxyGroup(t *testing.T) {
 	recorded := installTUIRecorder(t)
 	model := newTUITestModel()
 	model.page = tuiPageNodes
@@ -642,24 +642,20 @@ func TestTUIMainExitRunsMainNodeThenDisablesAuto(t *testing.T) {
 	_, command := pressTUIKey(t, model, tea.KeyEnter, "")
 	result, ok := command().(tuiActionResultMsg)
 	if !ok || result.Err != nil {
-		t.Fatalf("设置主出口执行失败: %#v", result)
+		t.Fatalf("设置默认出口执行失败: %#v", result)
 	}
-	posts := make([]tuiRecordedRequest, 0, 2)
+	posts := make([]tuiRecordedRequest, 0, 1)
 	for _, request := range *recorded {
 		if request.Method == http.MethodPost {
 			posts = append(posts, request)
 		}
 	}
-	if len(posts) != 2 || posts[0].Path != "/api/main-node" || posts[1].Path != "/api/main-auto" {
-		t.Fatalf("主出口应先 main-node 再 main-auto: %#v", posts)
+	if len(posts) != 1 || posts[0].Path != "/api/groups/PROXY/select" {
+		t.Fatalf("默认出口应单次调用 /api/groups/PROXY/select: %#v", posts)
 	}
-	var mainNode map[string]string
-	if err := json.Unmarshal([]byte(posts[0].Body), &mainNode); err != nil || mainNode["node"] != "node-key" {
-		t.Fatalf("main-node 正文错误: %q", posts[0].Body)
-	}
-	var mainAuto map[string]bool
-	if err := json.Unmarshal([]byte(posts[1].Body), &mainAuto); err != nil || mainAuto["enabled"] != false {
-		t.Fatalf("main-auto 应显式关闭: %q", posts[1].Body)
+	var body map[string]string
+	if err := json.Unmarshal([]byte(posts[0].Body), &body); err != nil || body["node"] != "香港 01" {
+		t.Fatalf("select 正文应传节点名: %q", posts[0].Body)
 	}
 }
 

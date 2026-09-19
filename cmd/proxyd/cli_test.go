@@ -3,11 +3,9 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
-	"proxyd/internal/api"
 	"proxyd/internal/app"
 )
 
@@ -94,31 +92,6 @@ func TestParseCFlag(t *testing.T) {
 	// 普通位置参数不受影响
 	if _, rest, err := parseCFlag("t", []string{"add", "u"}); err != nil || len(rest) != 2 {
 		t.Errorf("rest=%v err=%v", rest, err)
-	}
-}
-
-func TestResolveNodeKey(t *testing.T) {
-	ov := &api.Overview{Nodes: []api.NodeEntry{
-		{Name: "香港 01", Key: "key-a", Subscription: "sub1", Port: 42001},
-		{Name: "香港 01", Key: "key-b", Subscription: "sub2", Port: 42002},
-		{Name: "日本 01", Key: "key-c", Subscription: "sub1", Port: 42003},
-	}}
-	// key 精确匹配优先
-	if key, err := resolveNodeKey(ov, "key-b"); err != nil || key != "key-b" {
-		t.Errorf("by key: %q, %v", key, err)
-	}
-	// 名称唯一时按名称解析
-	if key, err := resolveNodeKey(ov, "日本 01"); err != nil || key != "key-c" {
-		t.Errorf("by name: %q, %v", key, err)
-	}
-	// 重名时报错并列出候选 key
-	if _, err := resolveNodeKey(ov, "香港 01"); err == nil ||
-		!strings.Contains(err.Error(), "key-a") || !strings.Contains(err.Error(), "key-b") {
-		t.Errorf("重名应报错并列出候选: %v", err)
-	}
-	// 不存在
-	if _, err := resolveNodeKey(ov, "美国 01"); err == nil {
-		t.Error("不存在节点应报错")
 	}
 }
 

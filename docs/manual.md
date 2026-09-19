@@ -28,7 +28,7 @@ proxyd 是一个多节点端口映射代理工具：把订阅里的**每个可�
 
 - 流量转发由内嵌的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash.Meta）核心完成，**无需单独安装 mihomo**。
 - 多节点同时代理的原理：每个映射端口是 mihomo 的一个 `mixed` listener，带 `proxy: <节点名>` 字段，该端口的所有流量固定走对应节点出口，绕过规则匹配。
-- 主端口默认是普通 mixed 端口，走完整的规则匹配，行为与 Clash 一致；开启 `main-auto` 后改由 listener 固定走 AUTO 选优组（同端口，规则被跳过）；设置 `main-node` 后改由 listener 固定直达指定节点（同端口，规则被跳过）。
+- 主端口恒为普通 mixed 端口，走完整的规则匹配，行为与 Clash 一致；规则未命中的流量落到内置 `PROXY` 选择组，其选中项即「默认出口」——某个可用节点、`AUTO`（自动最快）或 `DIRECT`（直连）。默认出口可在 Web 概览页/代理设置页、`POST /api/groups/PROXY/select` 或 `proxyd groups select PROXY <节点名|AUTO|DIRECT>` 修改，并持久化到 state-dir。
 
 ## 二、支持的订阅格式与协议
 
@@ -150,13 +150,11 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
 | `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组（list 含类型与 select 组的当前选中项；type 支持 `url-test\|fallback\|load-balance\|select`） |
 | `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
-| `proxyd groups select <组名> <节点名>` | 选择 select 分组的手动出口节点（持久化到 state-dir，重启/刷新后保持） |
+| `proxyd groups select <组名> <节点名>` | 选择 select 分组的手动出口节点（持久化到 state-dir，重启/刷新后保持）；组名填内置 `PROXY` 即设置规则模式默认出口，节点名可填 `AUTO` 或 `DIRECT` |
 | `proxyd logs [--tail N] [--level debug\|info\|warning\|error]` | 查看运行中实例的内存日志尾部 |
 | `proxyd port-mapping [on\|off\|status]` | 热开关或查看逐节点端口映射；关闭时保留稳定端口分配，不启动对应监听。单个订阅可用 `subs set --mapping on\|off` 单独开关（只影响该订阅节点） |
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
 | `proxyd auto-port <端口\|off>` | 设置/关闭自动选优端口；无参查看 |
-| `proxyd main-auto [on\|off]` | 开关「主端口使用最优节点」（跳过规则）；无参查看 |
-| `proxyd main-node [节点名\|key\|off]` | 设置主端口固定节点（跳过规则、直达该节点）；可直接给节点名（重名时按提示改用 key）；无参查看，`off` 清除 |
 | `proxyd main-port <端口>` | 修改主端口（热更新；系统代理开启时自动重绑）；无参查看 |
 | `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令（macOS 为 `proxyd helper install`） |
 | `proxyd dns-preset [off\|fake-ip\|redir-host]` | 查看/切换 DNS 预设；配置文件存在手写 `dns` 段时会提示预设不生效 |
@@ -213,7 +211,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 浏览器打开 **http://127.0.0.1:19091/**，React 控制台使用按任务分组的侧边栏信息架构（窄屏自动收起，数据表在手机上转换为带字段标签的纵向条目）：
 
 - **概览**：实时上下行速率条 + 状态摘要（主端口/auto-port/节点/映射统计）+ 入口端口 chip（主端口、auto-port、分组端口、节点映射区间）+ 规则 / 全局 / 直连 模式切换 + 系统代理快捷开关；发现新版时显示 GitHub Release 链接
-- **代理节点**：全局搜索并按来源、协议、状态筛选节点；表格展示名称、来源、协议、稳定分配端口、延迟与失败原因，可添加/删除手动节点并设置主端口固定节点
+- **代理节点**：全局搜索并按来源、协议、状态筛选节点；表格展示名称、来源、协议、稳定分配端口、延迟与失败原因，可添加/删除手动节点并把节点设为默认出口
 - **订阅管理**：以卡片管理订阅的新增、编辑、启停、单独同步与测速；新增、编辑和重新启用只保存设置，不访问远端；点击“同步”后直接拉取、检测并热更新，无确认弹窗，完成或失败均显示通知
 - **代理入口**：集中展示主端口、自动选优端口、分组端口与逐节点稳定分配；支持一键复制地址，并独立热开关 `port-mapping`
 - **策略分组**：展示健康摘要、复制分组端口、新增/编辑/删除分组；可选择类型（url-test/fallback/load-balance）并按手选节点或订阅来源配置成员
@@ -222,7 +220,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 - **活动连接**：仅在页面打开且未暂停时每 2 秒读取 mihomo 连接快照；按域名/IP/进程/出口链搜索，查看入口端口、累计流量与开始时间，并可关闭单条或全部连接
 - **远程连接**：管理 tailcat 服务端身份、SSH、客户端白名单、远端 token 和通用 TCP 转发；“服务端 / 客户端”页签只处理隧道与 SSH，不再混放桌面配置
 - **远程桌面**：独立的“服务端 / 客户端”页签；服务端检测 RDP/VNC 是否在本机真实监听并控制隧道开放，客户端保存不含密码的连接档案、建立临时回环转发并打开系统客户端
-- **代理 → 代理设置**：管理主端口、`main-auto`、`main-node`、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN 与系统代理
+- **代理 → 代理设置**：管理主端口、默认出口（内置 PROXY 组选择）、节点映射端口区间、`auto-port`、`port-mapping`、DNS 预设、TUN 与系统代理
 - **系统 → 通用设置**：管理开机自启、版本检查、配置备份、带差异预览的配置导入与进程重启；代理禁用时仍可使用
 - 页面每 60 秒自动刷新数据；`⌘K` / `Ctrl+K` 命令面板支持跳页、刷新、测速和模式切换
 
@@ -241,7 +239,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/overview` | 总览：模式、主端口/main_auto、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因；隧道类节点带 `tunnel: true` 且 port 恒为 0）、自定义规则、节点分组（含 type 与 select 组的 selected）、TUN 权限、系统代理与开机自启状态 |
+| `GET /api/overview` | 总览：模式、主端口、默认出口（groups 内置 PROXY 项的 selected）、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因；隧道类节点带 `tunnel: true` 且 port 恒为 0）、自定义规则、节点分组（含 type 与 select 组的 selected）、TUN 权限、系统代理与开机自启状态 |
 | `GET /api/traffic` | 代理 mihomo `/traffic` 流，返回 NDJSON 实时速率；后端自动附加 `secret` 鉴权 |
 | `GET /api/connections` | 代理 mihomo `/connections` 快照，返回活动连接、累计上下行和内存占用；后端自动附加 `secret` 鉴权 |
 | `DELETE /api/connections/{id}` | 关闭指定活动连接；连接 ID 作为单个安全路径段转发 |
@@ -272,8 +270,6 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/port-mapping` `{"enabled":false}` | 热开关逐节点端口映射；关闭时保留稳定分配，核心不再生成对应 listener |
 | `POST /api/port-range` `{"range":"43000-43200"}` | 修改节点映射端口区间（同步：重新分配端口 + 热更新，不重新测速） |
 | `POST /api/auto-port` `{"port":41998}` | 开启自动选优端口；`{"port":0}` 关闭（持久化 + 热更新） |
-| `POST /api/main-auto` `{"enabled":true}` | 开关「主端口使用最优节点」（主端口跳过规则、固定走 AUTO 组；持久化 + 热更新） |
-| `POST /api/main-node` `{"node":"<节点key>"}` | 设置主端口固定节点（跳过规则、直达该节点；空串清除；持久化 + 热更新） |
 | `POST /api/main-port` `{"port":42999}` | 修改主端口（校验 1-65535 且不与 api 端口/节点区间/分组/auto-port 冲突；持久化 + 热更新；系统代理开启时自动重绑） |
 | `POST /api/system-proxy` `{"enabled":true}` | 开关系统代理（指向主端口，持久化） |
 | `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限、修复指引，以及 macOS 的统一特权助手安装/可达状态（`helper` 字段） |
@@ -351,18 +347,18 @@ tun:
 | 模式 | 行为 |
 |---|---|
 | `rule`（默认） | 按 `rules` 规则匹配；内置默认规则：私网直连 → 国内（GEOSITE/GEOIP cn）直连 → 其余走代理 |
-| `global` | 全部走 PROXY 选择组（可用 mihomo 面板切换组内节点） |
+| `global` | 全部走 mihomo 内置 GLOBAL 选择组（可用 mihomo 面板切换组内节点） |
 | `direct` | 全部直连 |
 
 切换方式：Web 控制台按钮 / `POST /api/mode` / mihomo 面板 `PUT /configs`，轻量热切换并持久化。映射端口、分组端口、auto-port 不受模式影响——它们永远固定走自己的出口。
 
-**主端口的三种状态**（同端口，热切换；自定义规则与内置规则只对第一种生效）：
+**主端口与默认出口**（主端口恒为顶层 mixed-port，走完整规则匹配）：
 
-1. **规则模式**（默认）：顶层 mixed-port，走完整规则匹配，行为与 Clash 一致。
-2. **固定节点**（`main-node`，默认空）：主端口切换为同端口的 mixed listener，`proxy` 固定指向指定节点——跳过规则、直达该节点。配置里存节点 **Key**（协议+地址+凭据），重命名/重名时仍稳定；Web 概览页主端口卡片的「固定节点」下拉（列出全部当前可用节点，格式 `节点名 (端口)`）或 `proxyd main-node <节点名|key|off>` 设置（CLI 可直接给节点名，重名时会列出候选要求改用 key），选择即保存。节点当前不可用（失效/订阅刷新后消失）时本轮自动回退规则模式并打日志，**配置保留不删**，节点恢复后自动再生效（Web 上下拉旁会提示"当前节点不可用，已回退规则模式"）。
-3. **自动优选**（`main-auto`，默认关闭）：主端口 listener 固定走 `AUTO` url-test 组——全部可用节点中自动选延迟最低者。与独立的 auto-port 可并存（共用 AUTO 组、各占端口）。无可用节点时本轮跳过该设置（主端口回退规则模式，日志有提示）。
+- 规则模式（默认）：主端口按 `rules` 匹配；未命中任何规则的流量落到内置 `PROXY` 选择组，即「默认出口」。
+- 全局模式：跳过访问规则，统一进入 mihomo 内置 `GLOBAL` 选择组。
+- 直连模式：全部直接连接。
 
-优先级：**`main-auto` 开启时 `main-node` 被忽略**（auto 优先，日志提示一句）。从规则模式切换到 listener 形态（开 main-auto / 设 main-node / 失效节点恢复后自动再生效）时内部统一做两阶段热更新（先短暂关闭主端口入口再切换形态），避免 mihomo 先监听后释放导致的同端口 bind 冲突；listener 之间互切（main-auto ↔ main-node）同名 `L<port>` 仅换 proxy 目标，由 mihomo 按 关闭→监听 顺序安全处理。节点映射端口、分组端口、auto-port 完全不受影响。
+**默认出口**（内置 `PROXY` 组选中项，未选择时落成员首位——第一可用节点）：可设为某个可用节点（含隧道类）、`AUTO`（url-test 组自动选延迟最低者）或 `DIRECT`（直连）。修改入口：Web 概览页的「默认出口」/代理设置页下拉、`POST /api/groups/PROXY/select`（`{"node":"节点名|AUTO|DIRECT"}`）、`proxyd groups select PROXY <节点名|AUTO|DIRECT>`。选择持久化在 `state-dir/group-selected.json`，生成配置时写入 `default-selected`，重启与订阅刷新后保持。规则优先级高于默认出口：命中 `REJECT`/`DIRECT`/指定节点的流量不会进入 PROXY 组，因此广告拦截等规则对该出口依然生效；选中节点失效或消失时 mihomo 按原生语义回退成员首位，Web 概览会提示已回退；`AUTO` 需要至少一个可用节点。节点映射端口、分组端口、auto-port 完全不受默认出口影响。
 
 **主端口在线修改**（Web 概览页 / `POST /api/main-port` / `proxyd main-port <端口>`）：校验 1-65535 且不与 api 端口、节点区间、分组端口、auto-port 冲突；保存后持久化 + 热更新；系统代理当前已开启时自动重新绑定到新端口。
 
@@ -376,6 +372,8 @@ tun:
 - gfwlist / AutoProxy（base64 编码）：`||domain` → `DOMAIN-SUFFIX,domain,PROXY`；`@@||domain` → `DOMAIN-SUFFIX,domain,DIRECT`；`!` 注释、`[AutoProxy]` 段头、含 `*`/`/` 的复杂条目跳过
 
 合并顺序：custom-rules 最前 → 规则 URL 导入规则 → 内置规则。全部来源合并去重后上限 10000 条，超出截断打日志。
+
+**广告拦截**（`adblock`，默认关闭）：Web 控制台「规则管理」页顶部的开关，或配置文件 `adblock.enable: true`；API 为 `GET/PUT /api/adblock`（PUT 体 `{"enable": true, "rule_url": "可选，空=保持原值"}`）。开启后生成配置注入一个名为 `adblock` 的 mihomo rule-provider（`type: http`，下载/缓存/每 24 小时刷新全部由 mihomo 负责）和一条 `RULE-SET,adblock,REJECT` 规则，排在 custom-rules 与规则 URL 导入之后、内置规则之前——因此想放行某个被误拦的域名，在自定义规则里加一条 `DOMAIN-SUFFIX,example.com,DIRECT` 即可。默认规则集是 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 reject 域名集（约 19 万条广告/跟踪域名，走 jsDelivr CDN，国内直连可用）；`adblock.rule-url` 可换成其它地址，但必须是 **domain 行为的 YAML payload 格式**（`payload: - '+.example.com'`）。`rule-providers` 里 `adblock` 是保留键名，手写占用会导致开启报错。主端口恒为规则模式，开启后对主端口、TUN 与网关流量一致生效（GET /api/adblock 的 `effective` 字段反映这一点）。
 
 **节点分组端口**（`groups`）：把若干节点聚合成一个 mihomo proxy-group 并绑定到指定端口，该端口固定走该组；`type` 可选 `url-test`（自动测速择优）、`fallback`（按顺序故障转移）、`load-balance`（负载均衡）、`select`（手动选择出口）。旧配置没有 `type` 时默认迁移为 `url-test`，新 UI 默认推荐 `fallback`：
 
@@ -401,7 +399,7 @@ groups:
 - **不参与逐节点端口映射**：不占用 `port-range` 区间，overview/节点列表中带 `tunnel: true` 标识且 `port` 恒为 0；使用方式是配置一个分组（`subscription: manual` 或 `nodes: [...]`），把应用指向该分组绑定的固定端口。
 - **故障断流（kill switch）**：组内无可用成员时该分组本轮不生成监听端口，连接直接被拒，**不会**回退到 DIRECT 或规则模式——VPN 出口失效时不会明文漏流。
 - **mihomo 统一管理 Tailscale**：proxyd 不直接调用 Tailscale SDK，也不在预检查阶段启动第二个 tsnet。预检查只验证 mihomo 能否解析出站；配置了 `exit-node` 时，正式加载后再通过 mihomo 代理表访问 `health-url`，未配置 Exit Node 的 Tailnet/子网路由出站不使用公网目标判死，由 mihomo 在首次匹配流量时懒启动。其它需要网络探测的隧道节点仍把超时放宽为 `health-timeout` 的 3 倍。
-- **main-node 不禁止引用** VPN 节点（高级用户兼容路径），但主端口常被系统代理指向，误选会把整机流量送进隧道，默认请走分组。
+- **默认出口可以直接选择** VPN 节点（高级用户兼容路径），但主端口常被系统代理指向，误选会把整机流量送进隧道，默认请走分组。
 - **录入方式**：Web 的 Tailscale 与 OpenVPN 页面都提供一体化向导，以单个事务创建出站、单成员 `select` 分组、固定代理入口和可选 TUN 规则；任何一步失败都会恢复旧配置与运行态。OpenVPN 可直接上传 inline `.ovpn`，也可继续手工填写 `server`/`port`/`ca`；高级用户仍可通过 `proxyd nodes add --proxy '<出站JSON>'`、API 的 `POST /api/manual-nodes`（`proxy` 字段）或直接在 `manual-nodes` 写 YAML 映射。Tailscale 的 `auth-key` 可省略；省略时 mihomo/tsnet 生成注册链接，控制台显示后交给 Headscale 管理员批准。
 - **tailscale 状态目录固定**：tsnet 出站的 `state-dir` 由 proxyd 统一改写为 `state-dir/tsnet/<安全节点名>-<身份哈希>/`，按节点隔离，防止重启后重新认证与节点身份漂移；若节点映射里显式设置了 `state-dir`，以用户值为准并打警告日志。
 - **凭据打码**：`auth-key`、私钥、证书材料等纳入与 remote 模块相同的打码清单——节点/手动节点列表、状态接口与默认配置导出中显示为 `***`，完整值只经完整备份导出返回。
@@ -505,7 +503,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 |---|---|
 | 订阅列表 | `subscriptions` |
 | 手动节点（自有代理 URL/分享链接/结构化 VPN 出站映射） | `manual-nodes` |
-| 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `main-auto` / `main-node` / `auto-port` / `groups` |
+| 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
 | 系统代理开关、节点正则过滤、健康检测周期等 | `system-proxy` / `include` / `exclude` / `health-interval` / ... |
 | 远程连接（隧道开关、暴露端口、远端与转发） | `remote`（token 属凭据，导出默认打码） |
@@ -517,7 +515,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 |---|---|
 | `nodes.json` | 最近一次合并后的节点快照（完整 proxy 配置 + 来源 + 测速结果），启动时立即恢复 |
 | `mapping.json` | 节点 → 端口的稳定映射快照 |
-| `group-selected.json` | select 分组的持久化选中项（分组名 → 节点名） |
+| `group-selected.json` | select 分组的持久化选中项（分组名 → 节点名；内置 `PROXY` 即默认出口） |
 | `tsnet/<节点>-<哈希>/` | tailscale 出站按节点隔离的 tsnet 状态目录（配置历史不备份这些文件） |
 | `cache/<订阅名>.cache` | 各订阅的原始响应缓存（拉取失败时降级用） |
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
@@ -543,11 +541,14 @@ manual-nodes:             # 手动节点（自有代理），CLI/Web 添加的�
     auth-key: tskey-auth-...
 
 listen: 127.0.0.1         # 映射端口监听地址；改成 0.0.0.0 可共享给局域网
+                          # （也可用 Web 代理设置页「局域网共享」开关或 POST /api/lan-share
+                          # 热切换：开→0.0.0.0、关→重置回 127.0.0.1，热生效无需重启；
+                          # listen 已是自定义非回环地址时开启为 no-op，不覆盖该地址；
+                          # 数据面无认证，仅在可信网络开启）
 port-range: [42000, 42100]
 mixed-port: 41999         # 主端口（规则模式），Web/CLI 可在线修改
-# main-auto: false        # true 时主端口跳过规则、固定走最优节点
-# main-node: ""           # 主端口固定节点（节点 Key，见 overview/API）；空=跟随规则；
-                          # main-auto 开启时被忽略；节点失效自动回退规则模式
+# 默认出口：规则未命中的流量落到内置 PROXY 选择组，可在 Web 概览/设置页选择
+# 节点名、AUTO（自动最快）或 DIRECT；选择存 state-dir/group-selected.json（不写回本文件）
 # auto-port: 41998        # 自动选优端口（固定走延迟最低节点），0=关闭
 # system-proxy: false     # serve 启动时把系统代理指向主端口
 refresh-interval: 24h  # 兼容旧配置保留，当前不再驱动自动订阅同步

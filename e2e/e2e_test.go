@@ -853,7 +853,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("删除规则源后 imported.invalid 仍走 node-b")
 	}
 
-	// ---- main-auto：主端口固定走最优节点（跳过规则），与 auto-port 并存互不影响 ----
+	// ---- 内置 PROXY 组选择（默认出口）：规则保持生效，未命中流量走所选出口 ----
 	// 差分验证：先加一条指向 REJECT 的自定义规则，规则模式下主端口访问该域名被 502 拦截
 	//（mihomo REJECT 对 HTTP 代理请求返回 502 空响应，不断连）
 	viaStatus := func(port int, target string) (int, string) {
@@ -871,7 +871,7 @@ func TestEndToEnd(t *testing.T) {
 		return resp.StatusCode, string(body)
 	}
 	resp, err = http.Post(base+"/api/rules", "application/json",
-		strings.NewReader(`{"rule":"DOMAIN-SUFFIX,mainauto-test.invalid,REJECT"}`))
+		strings.NewReader(`{"rule":"DOMAIN-SUFFIX,exit-test.invalid,REJECT"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,26 +879,100 @@ func TestEndToEnd(t *testing.T) {
 	if resp.StatusCode != 201 {
 		t.Fatalf("add reject rule: status=%d", resp.StatusCode)
 	}
-	if st, body := viaStatus(cfg.MixedPort, "http://mainauto-test.invalid/"); st != http.StatusBadGateway || body != "" {
+	if st, body := viaStatus(cfg.MixedPort, "http://exit-test.invalid/"); st != http.StatusBadGateway || body != "" {
 		t.Fatalf("规则模式下 REJECT 未生效: status=%d body=%q（want 502 空响应）", st, body)
 	}
-	// 开启 main-auto：主端口跳过规则，REJECT 不再生效
-	resp, err = http.Post(base+"/api/main-auto", "application/json", strings.NewReader(`{"enabled":true}`))
+	// 选定 node-b 为默认出口：规则仍生效（REJECT 依旧 502），未命中流量固定走 node-b
+	resp, err = http.Post(base+"/api/groups/PROXY/select", "application/json",
+		strings.NewReader(`{"node":"node-b"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("main-auto on: status=%d", resp.StatusCode)
+		t.Fatalf("PROXY select node-b: status=%d", resp.StatusCode)
 	}
-	if st, body := viaStatus(cfg.MixedPort, "http://mainauto-test.invalid/"); st != 200 || (body != "via-A" && body != "via-B") {
-		t.Errorf("main-auto 开启后主端口 status=%d body=%q（规则应被跳过）", st, body)
+	if st, _ := viaStatus(cfg.MixedPort, "http://exit-test.invalid/"); st != http.StatusBadGateway {
+		t.Errorf("选定默认出口后 REJECT 规则未保持生效: status=%d（want 502）", st)
 	}
-	// 节点映射端口不受影响（固定出口，不经规则）
-	if got := getVia(newPortOf["node-b"], "http://mainauto-test.invalid/"); got != "via-B" {
-		t.Errorf("main-auto 开启后映射端口 %d got %q, want via-B", newPortOf["node-b"], got)
+	if got := getVia(cfg.MixedPort, "http://example.invalid/"); got != "via-B" {
+		t.Errorf("选定 node-b 后未命中流量 got %q, want via-B", got)
 	}
-	// 与 auto-port 并存：同时开启互不干扰
+	// 非法成员被拒绝；main-node / main-auto 端点已移除
+	resp, _ = http.Post(base+"/api/groups/PROXY/select", "application/json",
+		strings.NewReader(`{"node":"不存在的节点"}`))
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Errorf("PROXY 选非法成员应被拒绝: status=%d", resp.StatusCode)
+	}
+	// 端点已移除：真实服务器里未匹配的非 GET 请求会落到 SPA 兜底并返回 405，
+	// 纯 API mux 的单元测试则返回 404；两者都说明没有对应 handler。
+	for _, removed := range []string{"/api/main-node", "/api/main-auto"} {
+		resp, _ = http.Post(base+removed, "application/json", strings.NewReader(`{}`))
+		resp.Body.Close()
+		if resp.StatusCode != 404 && resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("%s 端点应已移除: status=%d, want 404/405", removed, resp.StatusCode)
+		}
+	}
+	// 节点映射端口不受影响（固定出口，不经规则与 PROXY 组）
+	if got := getVia(newPortOf["node-b"], "http://exit-test.invalid/"); got != "via-B" {
+		t.Errorf("PROXY 选择后映射端口 %d got %q, want via-B", newPortOf["node-b"], got)
+	}
+	// overview 暴露内置 PROXY 项及其选中
+	{
+		r, err := http.Get(base + "/api/overview")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ov struct {
+			Groups []struct {
+				Name     string `json:"name"`
+				Selected string `json:"selected"`
+				Builtin  bool   `json:"builtin"`
+			} `json:"groups"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&ov)
+		r.Body.Close()
+		if len(ov.Groups) == 0 || ov.Groups[0].Name != "PROXY" || !ov.Groups[0].Builtin || ov.Groups[0].Selected != "node-b" {
+			t.Errorf("overview 内置 PROXY 项异常: %+v", ov.Groups)
+		}
+	}
+	// 选中持久化到 state-dir/group-selected.json（键 "PROXY"，值为节点名）
+	{
+		raw, err := os.ReadFile(filepath.Join(stateDir, "group-selected.json"))
+		if err != nil {
+			t.Fatalf("读取选中状态文件失败: %v", err)
+		}
+		// 状态文件外层包裹 selected 字段（见 internal/proxy/groupstate）。
+		var state struct {
+			Selected map[string]string `json:"selected"`
+		}
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatalf("解析选中状态文件失败: %v", err)
+		}
+		if state.Selected["PROXY"] != "node-b" {
+			t.Errorf("PROXY 选中未持久化: %v", state.Selected)
+		}
+	}
+	// AUTO：未命中流量走任一最优节点，规则仍生效
+	resp, _ = http.Post(base+"/api/groups/PROXY/select", "application/json", strings.NewReader(`{"node":"AUTO"}`))
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("PROXY select AUTO: status=%d", resp.StatusCode)
+	}
+	if got := getVia(cfg.MixedPort, "http://example.invalid/"); got != "via-A" && got != "via-B" {
+		t.Errorf("PROXY=AUTO 后主端口 got %q", got)
+	}
+	if st, _ := viaStatus(cfg.MixedPort, "http://exit-test.invalid/"); st != http.StatusBadGateway {
+		t.Errorf("PROXY=AUTO 后 REJECT 规则未保持生效: status=%d（want 502）", st)
+	}
+	// DIRECT 恒可选（只验接口与持久化，不发直连流量）
+	resp, _ = http.Post(base+"/api/groups/PROXY/select", "application/json", strings.NewReader(`{"node":"DIRECT"}`))
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("PROXY select DIRECT: status=%d", resp.StatusCode)
+	}
+	// 与 auto-port 并存：PROXY=DIRECT 期间 auto-port（AUTO 组入口）不受影响
 	autoPort2 := freePort(t)
 	for autoPort2 >= newLo && autoPort2 <= newLo+1 || autoPort2 == cfg.MixedPort {
 		autoPort2 = freePort(t)
@@ -910,161 +984,16 @@ func TestEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("main-auto 下开启 auto-port: status=%d", resp.StatusCode)
+		t.Fatalf("开启 auto-port: status=%d", resp.StatusCode)
 	}
 	if got := getVia(autoPort2, "http://example.invalid/"); got != "via-A" && got != "via-B" {
 		t.Errorf("并存时 auto-port %d got %q", autoPort2, got)
 	}
-	if st, _ := viaStatus(cfg.MixedPort, "http://mainauto-test.invalid/"); st != 200 {
-		t.Errorf("并存时主端口 status=%d（应仍跳过规则）", st)
-	}
-	// overview 字段 + 持久化
-	{
-		r, err := http.Get(base + "/api/overview")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var ov struct {
-			MainAuto bool `json:"main_auto"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&ov)
-		r.Body.Close()
-		if !ov.MainAuto {
-			t.Error("overview.main_auto 应为 true")
-		}
-	}
-	saved, _ = config.Load(cfgPath)
-	if !saved.MainAuto {
-		t.Error("main-auto 未持久化")
-	}
-	// 关闭 main-auto：规则恢复生效，主端口再次被 REJECT 拦截；auto-port 独立可用
-	resp, _ = http.Post(base+"/api/main-auto", "application/json", strings.NewReader(`{"enabled":false}`))
+	// 清理：恢复默认出口 AUTO、关 auto-port、删 REJECT 规则
+	resp, _ = http.Post(base+"/api/groups/PROXY/select", "application/json", strings.NewReader(`{"node":"AUTO"}`))
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("main-auto off: status=%d", resp.StatusCode)
-	}
-	if st, _ := viaStatus(cfg.MixedPort, "http://mainauto-test.invalid/"); st != http.StatusBadGateway {
-		t.Errorf("main-auto 关闭后规则未恢复: status=%d（want 502）", st)
-	}
-	if got := getVia(autoPort2, "http://example.invalid/"); got != "via-A" && got != "via-B" {
-		t.Errorf("main-auto 关闭后 auto-port got %q（应不受影响）", got)
-	}
-	saved, _ = config.Load(cfgPath)
-	if saved.MainAuto {
-		t.Error("main-auto 关闭未持久化")
-	}
-	// 清理：关 auto-port、删 REJECT 规则
 	resp, _ = http.Post(base+"/api/auto-port", "application/json", strings.NewReader(`{"port":0}`))
 	resp.Body.Close()
-	req, _ = http.NewRequest("DELETE", base+"/api/rules/0", nil)
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	// ---- main-node：主端口固定走指定节点（跳过规则），与 main-auto 的优先级 ----
-	// 取 node-b 的稳定 key（overview.nodes[].key）
-	var ovNodes struct {
-		Nodes []struct {
-			Name string `json:"name"`
-			Key  string `json:"key"`
-		} `json:"nodes"`
-		MainNode   string `json:"main_node"`
-		MainNodeUp bool   `json:"main_node_up"`
-	}
-	{
-		r, err := http.Get(base + "/api/overview")
-		if err != nil {
-			t.Fatal(err)
-		}
-		_ = json.NewDecoder(r.Body).Decode(&ovNodes)
-		r.Body.Close()
-	}
-	keyB := ""
-	for _, n := range ovNodes.Nodes {
-		if n.Name == "node-b" {
-			keyB = n.Key
-		}
-	}
-	if keyB == "" {
-		t.Fatal("overview 中找不到 node-b 的 key")
-	}
-	// 差分验证：规则模式下主端口访问该域名被 REJECT（502）
-	resp, err = http.Post(base+"/api/rules", "application/json",
-		strings.NewReader(`{"rule":"DOMAIN-SUFFIX,mainnode-test.invalid,REJECT"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 201 {
-		t.Fatalf("add reject rule: status=%d", resp.StatusCode)
-	}
-	if st, _ := viaStatus(cfg.MixedPort, "http://mainnode-test.invalid/"); st != http.StatusBadGateway {
-		t.Fatalf("规则模式下 REJECT 未生效: status=%d（want 502）", st)
-	}
-	// 固定到 node-b：跳过规则且直达 node-b（区别于 main-auto 的"任一最优"）
-	resp, err = http.Post(base+"/api/main-node", "application/json",
-		strings.NewReader(fmt.Sprintf(`{"node":%q}`, keyB)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("main-node set: status=%d", resp.StatusCode)
-	}
-	if st, body := viaStatus(cfg.MixedPort, "http://mainnode-test.invalid/"); st != 200 || body != "via-B" {
-		t.Errorf("main-node 后主端口 status=%d body=%q（应跳过规则直达 via-B）", st, body)
-	}
-	{
-		r, _ := http.Get(base + "/api/overview")
-		_ = json.NewDecoder(r.Body).Decode(&ovNodes)
-		r.Body.Close()
-		if ovNodes.MainNode != keyB || !ovNodes.MainNodeUp {
-			t.Errorf("overview main_node=%q up=%v（want keyB, true）", ovNodes.MainNode, ovNodes.MainNodeUp)
-		}
-	}
-	saved, _ = config.Load(cfgPath)
-	if saved.MainNode != keyB {
-		t.Error("main-node 未持久化")
-	}
-	// main-auto 优先：开启后主端口走 AUTO（via-A/via-B 均可），同名 listener 换目标热更新
-	resp, _ = http.Post(base+"/api/main-auto", "application/json", strings.NewReader(`{"enabled":true}`))
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("main-node 下开启 main-auto: status=%d", resp.StatusCode)
-	}
-	if st, body := viaStatus(cfg.MixedPort, "http://mainnode-test.invalid/"); st != 200 || (body != "via-A" && body != "via-B") {
-		t.Errorf("main-auto 开启后主端口 status=%d body=%q（应走 AUTO）", st, body)
-	}
-	{
-		r, _ := http.Get(base + "/api/overview")
-		_ = json.NewDecoder(r.Body).Decode(&ovNodes)
-		r.Body.Close()
-		if ovNodes.MainNodeUp {
-			t.Error("main-auto 开启时 main_node_up 应为 false（被忽略）")
-		}
-	}
-	// 关闭 main-auto：main-node 恢复生效（listener 同名 L<port> 仅换 proxy 目标）
-	resp, _ = http.Post(base+"/api/main-auto", "application/json", strings.NewReader(`{"enabled":false}`))
-	resp.Body.Close()
-	if st, body := viaStatus(cfg.MixedPort, "http://mainnode-test.invalid/"); st != 200 || body != "via-B" {
-		t.Errorf("main-auto 关闭后主端口 status=%d body=%q（应恢复直达 via-B）", st, body)
-	}
-	// 清除 main-node：规则恢复生效（502）
-	resp, _ = http.Post(base+"/api/main-node", "application/json", strings.NewReader(`{"node":""}`))
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("main-node off: status=%d", resp.StatusCode)
-	}
-	if st, _ := viaStatus(cfg.MixedPort, "http://mainnode-test.invalid/"); st != http.StatusBadGateway {
-		t.Errorf("main-node 清除后规则未恢复: status=%d（want 502）", st)
-	}
-	saved, _ = config.Load(cfgPath)
-	if saved.MainNode != "" {
-		t.Error("main-node 清除未持久化")
-	}
-	// 清理：删 REJECT 规则
 	req, _ = http.NewRequest("DELETE", base+"/api/rules/0", nil)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -1263,32 +1192,21 @@ func TestEndToEnd(t *testing.T) {
 	if out, err := runCLI("rule-urls", "list"); err != nil || !strings.Contains(out, "gfw") {
 		t.Errorf("cli rule-urls list: %v %q", err, out)
 	}
-	// main-auto / main-port 子命令
-	if out, err := runCLI("main-auto"); err != nil || !strings.Contains(out, "关闭") {
-		t.Errorf("cli main-auto view: %v %q", err, out)
+	// groups 子命令：内置 PROXY 组（默认出口）的选择
+	if out, err := runCLI("groups", "list"); err != nil || !strings.Contains(out, "PROXY") {
+		t.Errorf("cli groups list 应含内置 PROXY 组: %v %q", err, out)
 	}
-	if _, err := runCLI("main-auto", "on"); err != nil {
-		t.Errorf("cli main-auto on: %v", err)
+	if _, err := runCLI("groups", "select", "PROXY", "node-b"); err != nil {
+		t.Errorf("cli groups select PROXY node-b: %v", err)
 	}
-	{
-		r, err := http.Get(base + "/api/overview")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var ov struct {
-			MainAuto bool `json:"main_auto"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&ov)
-		r.Body.Close()
-		if !ov.MainAuto {
-			t.Error("cli main-auto on 未生效")
-		}
+	if got := getVia(cfg.MixedPort, "http://example.invalid/"); got != "via-B" {
+		t.Errorf("cli 选定 node-b 为默认出口后主端口 got %q, want via-B", got)
+	}
+	if _, err := runCLI("groups", "select", "PROXY", "AUTO"); err != nil {
+		t.Errorf("cli groups select PROXY AUTO: %v", err)
 	}
 	if got := getVia(cfg.MixedPort, "http://example.invalid/"); got != "via-A" && got != "via-B" {
-		t.Errorf("cli main-auto on 后主端口 got %q", got)
-	}
-	if _, err := runCLI("main-auto", "off"); err != nil {
-		t.Errorf("cli main-auto off: %v", err)
+		t.Errorf("cli 选 AUTO 后主端口 got %q", got)
 	}
 	cliMain := freePort(t)
 	for cliMain >= newLo && cliMain <= newLo+1 || cliMain == cfg.MixedPort {
@@ -1303,24 +1221,9 @@ func TestEndToEnd(t *testing.T) {
 	if out, err := runCLI("main-port"); err != nil || !strings.Contains(out, fmt.Sprintf("%d", cliMain)) {
 		t.Errorf("cli main-port view: %v %q", err, out)
 	}
-	// main-node 子命令（keyB 在前文 main-node 段落已取到）
-	if out, err := runCLI("main-node"); err != nil || !strings.Contains(out, "未设置") {
-		t.Errorf("cli main-node view: %v %q", err, out)
-	}
-	if _, err := runCLI("main-node", keyB); err != nil {
-		t.Errorf("cli main-node set: %v", err)
-	}
-	if got := getVia(cliMain, "http://example.invalid/"); got != "via-B" {
-		t.Errorf("cli main-node 后主端口应直达 via-B, got %q", got)
-	}
-	if out, err := runCLI("main-node"); err != nil || !strings.Contains(out, "node-b") {
-		t.Errorf("cli main-node view 应显示节点名: %v %q", err, out)
-	}
-	if _, err := runCLI("main-node", "off"); err != nil {
-		t.Errorf("cli main-node off: %v", err)
-	}
-	if got := getVia(cliMain, "http://example.invalid/"); got != "via-A" && got != "via-B" {
-		t.Errorf("cli main-node off 后主端口 got %q", got)
+	// main-node 子命令已移除：应报用法错误
+	if out, err := runCLI("main-node"); err == nil {
+		t.Errorf("cli main-node 应已移除: %q", out)
 	}
 
 	// 系统代理会修改宿主机全局状态，因此由平台测试文件决定是否执行并负责恢复。

@@ -10,8 +10,8 @@ import (
 
 // 隧道类（VPN 语义）出站类型集合。这些出站代表整网隧道出口而非普通代理五元组：
 // 首次拨号慢（tsnet 需 DERP 协商、openvpn 需 TLS 握手）、延迟天然偏高、故障时用户
-// 预期是断流而非明文回退。因此它们不参与每节点端口映射，仅通过分组出口或
-// main-node 引用暴露（见 docs/adr/0002-vpn-outbounds-single-binary.md）。
+// 预期是断流而非明文回退。因此它们不参与每节点端口映射，仅通过分组出口或内置
+// PROXY 组的默认出口暴露（见 docs/adr/0002-vpn-outbounds-single-binary.md）。
 const (
 	// TunnelTypeTailscale 是 mihomo 内置的 tsnet 出站（需 with_gvisor 构建标签）。
 	TunnelTypeTailscale = "tailscale"

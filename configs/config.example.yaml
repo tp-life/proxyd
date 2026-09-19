@@ -19,15 +19,15 @@ subscriptions:
 #                                # 凭据在列表接口与默认配置导出中打码；隧道节点不占端口映射，
 #                                # 经下方 groups 的分组端口使用（见手册「隧道类（VPN）出站」）
 
-listen: 127.0.0.1              # 映射端口监听地址
+listen: 127.0.0.1              # 映射端口监听地址；改 0.0.0.0 可共享给局域网，
+                               # 也可用 Web 代理设置页的「局域网共享」开关热切换（POST /api/lan-share，
+                               # 热生效无需重启；关闭会重置回 127.0.0.1；数据面无认证，仅在可信网络开启）
 port-range: [42000, 42100]     # 每个可用节点占一个端口（闭区间）
 # port-mapping: true           # 是否启动逐节点端口监听；关闭后保留稳定分配关系，但不再暴露这些监听端口
 mixed-port: 41999              # 主端口：走全局规则模式（rule/global/direct），默认区间前一位
-# main-auto: false             # true 时主端口跳过规则、固定走最优节点（AUTO url-test 组）；
-                               # 与 auto-port 并存互不影响；无可用节点时回退规则模式
-# main-node: ""                # 主端口固定节点（存节点 Key：协议|地址|端口|凭据，Web/CLI 设置时自动填）；
-                               # 空=跟随规则；main-auto 开启时被忽略（auto 优先）；
-                               # 节点失效/消失时回退规则模式，配置保留，恢复后自动再生效
+# 默认出口：规则模式未命中规则的流量落到内置 PROXY 选择组，其选中项可在 Web 概览页/
+# 代理设置页选择，或 proxyd groups select PROXY <节点名|AUTO|DIRECT>；选择持久化在
+# state-dir/group-selected.json（不写回本文件），选中节点失效时回退成员首位
 # auto-port: 41998             # 自动选优端口：固定走全部可用节点中延迟最低者（url-test）；0/不填=关闭
 # system-proxy: false          # true 时 serve 启动后把系统代理指向主端口，退出时自动恢复
 
@@ -62,6 +62,14 @@ api-listen: 127.0.0.1:19091            # proxyd 自有 API + 内嵌 React Web �
 # rule-urls:                   # 远程规则源：跟随订阅刷新拉取，内容缓存在 state-dir（不写回此文件）
 #   - name: gfwlist            # 支持 mihomo 规则文本（每行 类型,内容,策略）
 #     url: https://example.com/gfwlist.txt   # 和 gfwlist/AutoProxy（base64）两种格式，自动识别
+
+# adblock:                     # 广告拦截：注入 adblock rule-provider + RULE-SET,adblock,REJECT 规则
+#   enable: false              # （排在 custom-rules/rule-urls 之后、内置 rules 之前，可用自定义规则加白）；
+                              # 下载/缓存/每 24h 刷新由 mihomo 负责；主端口恒为规则模式，
+                              # 开启后对主端口、TUN 与网关流量一致生效
+#   rule-url: ""               # 规则集地址，空=默认 Loyalsoldier clash-rules reject 域名集
+                              #（jsDelivr CDN）；自定义地址须为 domain 行为 YAML payload 格式
+                              #（payload: - '+.example.com'）
 
 # groups:                      # 节点分组端口，也可作为订阅节点 dialer-proxy 的上游目标
 #   - name: hk                 # 组名（不能与节点名/AUTO/PROXY 等保留名冲突）

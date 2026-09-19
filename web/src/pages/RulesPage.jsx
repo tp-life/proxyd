@@ -1,5 +1,13 @@
 import { useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +20,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch as UISwitch } from "@/components/ui/switch";
 import { Field } from "@/components/Field";
 import { PageHeader } from "@/components/PageHeader";
 import { PanelTitle } from "@/components/PanelTitle";
@@ -21,6 +30,7 @@ import { PanelTitle } from "@/components/PanelTitle";
  *
  * 参数说明：
  * - forms/ruleContent/ruleUrls/overview: object，页面数据。
+ * - adblock: object，广告拦截状态（enable/rule_url/effective）；加载失败时为 null。
  * - onDelete/onForm/onPost/onViewContent: Function，操作回调。
  *
  * 返回值说明：
@@ -29,14 +39,26 @@ import { PanelTitle } from "@/components/PanelTitle";
  * 可能的异常/错误情况：
  * 表单缺失本地拦截；API 失败由父组件展示。
  */
-export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, onForm, onPost, onViewContent }) {
+export function RulesPage({
+  forms,
+  ruleContent,
+  ruleUrls,
+  overview,
+  adblock,
+  onDelete,
+  onForm,
+  onPost,
+  onViewContent,
+}) {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const visibleRules = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return (overview.custom_rules || [])
       .map((rule, index) => ({ rule, index }))
-      .filter((item) => !normalized || item.rule.toLowerCase().includes(normalized));
+      .filter(
+        (item) => !normalized || item.rule.toLowerCase().includes(normalized),
+      );
   }, [overview.custom_rules, query]);
 
   /**
@@ -53,7 +75,12 @@ export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, on
   async function saveEditedRule(event) {
     event.preventDefault();
     if (!editing?.rule.trim()) return;
-    const saved = await onPost(`/api/rules/${editing.index}`, { rule: editing.rule.trim() }, "规则已更新", "PUT");
+    const saved = await onPost(
+      `/api/rules/${editing.index}`,
+      { rule: editing.rule.trim() },
+      "规则已更新",
+      "PUT",
+    );
     if (saved) setEditing(null);
   }
 
@@ -75,37 +102,113 @@ export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, on
 
   return (
     <div className="stack">
-      <PageHeader eyebrow="访问策略" title="规则管理" detail="维护自定义访问规则与远程规则源，列表顺序即匹配优先级。" />
+      <PageHeader
+        eyebrow="访问策略"
+        title="规则管理"
+        detail="维护自定义访问规则与远程规则源，列表顺序即匹配优先级。"
+      />
       <section className="panel">
-        <PanelTitle title="自定义访问规则" detail="规则按从上到下的顺序匹配，新增规则会写入当前配置" />
+        <PanelTitle
+          title="自定义访问规则"
+          detail="规则按从上到下的顺序匹配，新增规则会写入当前配置"
+        />
         <form
           className="form-grid rule-form"
           onSubmit={async (event) => {
             event.preventDefault();
             if (!forms.rule.trim()) return;
-            if (await onPost("/api/rules", { rule: forms.rule.trim() }, "规则已添加")) onForm("rule", "");
+            if (
+              await onPost(
+                "/api/rules",
+                { rule: forms.rule.trim() },
+                "规则已添加",
+              )
+            )
+              onForm("rule", "");
           }}
         >
           <Field label="规则内容">
-            <input aria-label="自定义规则内容" className="mono-input" value={forms.rule} onChange={(event) => onForm("rule", event.target.value)} placeholder="DOMAIN-SUFFIX,example.com,DIRECT" />
+            <input
+              aria-label="自定义规则内容"
+              className="mono-input"
+              value={forms.rule}
+              onChange={(event) => onForm("rule", event.target.value)}
+              placeholder="DOMAIN-SUFFIX,example.com,DIRECT"
+            />
           </Field>
-          <Button className="form-submit" type="submit"><Plus size={16} aria-hidden="true" /><span>添加规则</span></Button>
-          <small className="rule-form-hint">格式由规则类型、匹配值和目标策略组成</small>
+          <Button className="form-submit" type="submit">
+            <Plus size={16} aria-hidden="true" />
+            <span>添加规则</span>
+          </Button>
+          <small className="rule-form-hint">
+            格式由规则类型、匹配值和目标策略组成
+          </small>
         </form>
         <div className="toolbar rule-toolbar">
-          <Field compact label="搜索自定义规则"><div className="input-with-icon"><Search size={15} aria-hidden="true" /><Input className="h-9" value={query} placeholder="类型、域名或策略" onChange={(event) => setQuery(event.target.value)} /></div></Field>
-          <Badge variant="outline">{visibleRules.length}/{(overview.custom_rules || []).length} 条</Badge>
+          <Field compact label="搜索自定义规则">
+            <div className="input-with-icon">
+              <Search size={15} aria-hidden="true" />
+              <Input
+                className="h-9"
+                value={query}
+                placeholder="类型、域名或策略"
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </div>
+          </Field>
+          <Badge variant="outline">
+            {visibleRules.length}/{(overview.custom_rules || []).length} 条
+          </Badge>
         </div>
         <ul className="item-list rule-list">
           {visibleRules.map(({ rule, index }) => (
             <li key={`${rule}:${index}`}>
-              <span className="rule-index">{index + 1}</span><code>{rule}</code>
+              <span className="rule-index">{index + 1}</span>
+              <code>{rule}</code>
               <div className="row-actions">
-                <Button aria-label={`上移规则 ${rule}`} disabled={index === 0} size="icon" variant="ghost" type="button" onClick={() => moveRule(index, index - 1)}><ArrowUp size={15} aria-hidden="true" /></Button>
-                <Button aria-label={`下移规则 ${rule}`} disabled={index === overview.custom_rules.length - 1} size="icon" variant="ghost" type="button" onClick={() => moveRule(index, index + 1)}><ArrowDown size={15} aria-hidden="true" /></Button>
-                <Button aria-label={`编辑规则 ${rule}`} size="icon" variant="ghost" type="button" onClick={() => setEditing({ index, rule })}><Pencil size={15} aria-hidden="true" /></Button>
-                <Button aria-label={`删除规则 ${rule}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/rules/${index}`, "规则已删除", `规则 ${rule}`)}>
-                <Trash2 size={16} aria-hidden="true" />
+                <Button
+                  aria-label={`上移规则 ${rule}`}
+                  disabled={index === 0}
+                  size="icon"
+                  variant="ghost"
+                  type="button"
+                  onClick={() => moveRule(index, index - 1)}
+                >
+                  <ArrowUp size={15} aria-hidden="true" />
+                </Button>
+                <Button
+                  aria-label={`下移规则 ${rule}`}
+                  disabled={index === overview.custom_rules.length - 1}
+                  size="icon"
+                  variant="ghost"
+                  type="button"
+                  onClick={() => moveRule(index, index + 1)}
+                >
+                  <ArrowDown size={15} aria-hidden="true" />
+                </Button>
+                <Button
+                  aria-label={`编辑规则 ${rule}`}
+                  size="icon"
+                  variant="ghost"
+                  type="button"
+                  onClick={() => setEditing({ index, rule })}
+                >
+                  <Pencil size={15} aria-hidden="true" />
+                </Button>
+                <Button
+                  aria-label={`删除规则 ${rule}`}
+                  size="icon"
+                  variant="destructive-ghost"
+                  type="button"
+                  onClick={() =>
+                    onDelete(
+                      `/api/rules/${index}`,
+                      "规则已删除",
+                      `规则 ${rule}`,
+                    )
+                  }
+                >
+                  <Trash2 size={16} aria-hidden="true" />
                 </Button>
               </div>
             </li>
@@ -113,21 +216,95 @@ export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, on
         </ul>
       </section>
       <section className="panel">
-        <PanelTitle title="远程规则源" detail="远程内容只读；需要改动时请更新源文件或重新配置 URL" />
+        <PanelTitle
+          title="广告拦截"
+          detail="命中远程广告域名规则集的连接会被直接拒绝；规则集由 mihomo 自动下载并每 24 小时刷新"
+        />
+        <UISwitch
+          checked={Boolean(adblock?.enable)}
+          label="拦截广告与跟踪域名"
+          onCheckedChange={(enabled) =>
+            onPost(
+              "/api/adblock",
+              { enable: enabled, rule_url: "" },
+              enabled ? "广告拦截已开启" : "广告拦截已关闭",
+              "PUT",
+            )
+          }
+        />
+        <form
+          className="form-grid rule-form mt-4"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            const url = forms.adblockURL.trim();
+            if (!url) return;
+            await onPost(
+              "/api/adblock",
+              { enable: Boolean(adblock?.enable), rule_url: url },
+              "广告规则集地址已更新",
+              "PUT",
+            );
+          }}
+        >
+          <Field label="规则集地址">
+            <input
+              className="mono-input"
+              value={forms.adblockURL}
+              onChange={(event) => onForm("adblockURL", event.target.value)}
+              placeholder="https://…/reject.txt"
+            />
+          </Field>
+          <Button className="form-submit" type="submit">
+            <span>保存地址</span>
+          </Button>
+          <small className="rule-form-hint">
+            默认使用 Loyalsoldier clash-rules 的 reject 域名集（jsDelivr
+            CDN）；自定义地址须为 domain 行为的 YAML payload
+            格式。需要放行某个域名时，在上方自定义规则中添加如
+            DOMAIN-SUFFIX,example.com,DIRECT（优先级高于广告拦截）。
+          </small>
+        </form>
+      </section>
+      <section className="panel">
+        <PanelTitle
+          title="远程规则源"
+          detail="远程内容只读；需要改动时请更新源文件或重新配置 URL"
+        />
         <form
           className="form-grid rule-source-form"
           onSubmit={async (event) => {
             event.preventDefault();
             if (!forms.ruleURLName.trim() || !forms.ruleURL.trim()) return;
-            if (await onPost("/api/rule-urls", { name: forms.ruleURLName.trim(), url: forms.ruleURL.trim() }, "规则 URL 已添加")) {
+            if (
+              await onPost(
+                "/api/rule-urls",
+                { name: forms.ruleURLName.trim(), url: forms.ruleURL.trim() },
+                "规则 URL 已添加",
+              )
+            ) {
               onForm("ruleURLName", "");
               onForm("ruleURL", "");
             }
           }}
         >
-          <Field label="规则源名称"><input value={forms.ruleURLName} onChange={(event) => onForm("ruleURLName", event.target.value)} placeholder="例如：局域网直连" /></Field>
-          <Field label="规则源地址"><input value={forms.ruleURL} onChange={(event) => onForm("ruleURL", event.target.value)} placeholder="https://example.com/rules.txt" /></Field>
-          <Button className="form-submit" type="submit"><Plus size={16} aria-hidden="true" /><span>添加规则源</span></Button>
+          <Field label="规则源名称">
+            <input
+              value={forms.ruleURLName}
+              onChange={(event) => onForm("ruleURLName", event.target.value)}
+              placeholder="例如：局域网直连"
+            />
+          </Field>
+          <Field label="规则源地址">
+            <input
+              value={forms.ruleURL}
+              onChange={(event) => onForm("ruleURL", event.target.value)}
+              placeholder="https://example.com/rules.txt"
+            />
+          </Field>
+          <Button className="form-submit" type="submit">
+            <Plus size={16} aria-hidden="true" />
+            <span>添加规则源</span>
+          </Button>
         </form>
         <div className="rule-url-list">
           {ruleUrls.map((ruleURL) => (
@@ -136,23 +313,84 @@ export function RulesPage({ forms, ruleContent, ruleUrls, overview, onDelete, on
                 <b>{ruleURL.name}</b>
                 <code>{ruleURL.url}</code>
               </div>
-              <span>{ruleURL.error ? "拉取失败" : `${ruleURL.count} 条${ruleURL.warn ? "（缓存）" : ""}`}</span>
-              <Button size="sm" variant="outline" type="button" onClick={() => onViewContent(ruleURL.name)}>{ruleContent[ruleURL.name]?.open ? "收起内容" : "查看内容"}</Button>
-              <Button aria-label={`删除规则源 ${ruleURL.name}`} size="icon" variant="destructive-ghost" type="button" onClick={() => onDelete(`/api/rule-urls/${encodeURIComponent(ruleURL.name)}`, "规则 URL 已删除", `规则源 ${ruleURL.name}`)}>
+              <span>
+                {ruleURL.error
+                  ? "拉取失败"
+                  : `${ruleURL.count} 条${ruleURL.warn ? "（缓存）" : ""}`}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                type="button"
+                onClick={() => onViewContent(ruleURL.name)}
+              >
+                {ruleContent[ruleURL.name]?.open ? "收起内容" : "查看内容"}
+              </Button>
+              <Button
+                aria-label={`删除规则源 ${ruleURL.name}`}
+                size="icon"
+                variant="destructive-ghost"
+                type="button"
+                onClick={() =>
+                  onDelete(
+                    `/api/rule-urls/${encodeURIComponent(ruleURL.name)}`,
+                    "规则 URL 已删除",
+                    `规则源 ${ruleURL.name}`,
+                  )
+                }
+              >
                 <Trash2 size={16} aria-hidden="true" />
               </Button>
-              {ruleContent[ruleURL.name]?.open && <pre>{ruleContent[ruleURL.name].text}</pre>}
+              {ruleContent[ruleURL.name]?.open && (
+                <pre>{ruleContent[ruleURL.name].text}</pre>
+              )}
             </article>
           ))}
         </div>
       </section>
-      <Dialog open={Boolean(editing)} onOpenChange={(open) => { if (!open) setEditing(null); }}>
+      <Dialog
+        open={Boolean(editing)}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+      >
         <DialogContent>
-          <DialogClose className="dialog-close" aria-label="关闭规则编辑对话框"><X size={16} aria-hidden="true" /></DialogClose>
+          <DialogClose className="dialog-close" aria-label="关闭规则编辑对话框">
+            <X size={16} aria-hidden="true" />
+          </DialogClose>
           <form onSubmit={saveEditedRule}>
-            <DialogHeader><DialogTitle>编辑自定义规则</DialogTitle><DialogDescription>规则会保留当前优先级位置，并在保存前完成配置校验。</DialogDescription></DialogHeader>
-            <div className="dialog-form"><Field label="规则内容"><Input className="mono-input" value={editing?.rule || ""} onChange={(event) => setEditing((current) => ({ ...current, rule: event.target.value }))} /></Field></div>
-            <DialogFooter><Button variant="outline" type="button" onClick={() => setEditing(null)}>取消</Button><Button disabled={!editing?.rule.trim()} type="submit">保存规则</Button></DialogFooter>
+            <DialogHeader>
+              <DialogTitle>编辑自定义规则</DialogTitle>
+              <DialogDescription>
+                规则会保留当前优先级位置，并在保存前完成配置校验。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="dialog-form">
+              <Field label="规则内容">
+                <Input
+                  className="mono-input"
+                  value={editing?.rule || ""}
+                  onChange={(event) =>
+                    setEditing((current) => ({
+                      ...current,
+                      rule: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setEditing(null)}
+              >
+                取消
+              </Button>
+              <Button disabled={!editing?.rule.trim()} type="submit">
+                保存规则
+              </Button>
+            </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>

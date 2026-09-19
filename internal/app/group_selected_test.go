@@ -7,6 +7,7 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
 )
 
 // selectGroupTestApp 构造带一个 select 分组和一个存活节点的测试应用。
@@ -89,5 +90,70 @@ func TestSetGroupSelectedValidates(t *testing.T) {
 	application2, _ := selectGroupTestApp(t, config.GroupTypeFallback)
 	if err := application2.SetGroupSelected("vpn", "self"); err == nil {
 		t.Error("fallback 分组不应支持手动选中")
+	}
+}
+
+// TestSetGroupSelectedBuiltinProxy 验证内置 PROXY 组（默认出口）的选中语义：
+// 存活节点、DIRECT 恒可选；无 assigns（无可用节点分配）时 AUTO 拒绝；
+// 补齐 assigns 后 AUTO 可选；未知节点名拒绝。选中项以节点名持久化到
+// group-selected.json 的 "PROXY" 键。
+func TestSetGroupSelectedBuiltinProxy(t *testing.T) {
+	application, _ := selectGroupTestApp(t, config.GroupTypeSelect)
+
+	for _, target := range []string{"self", "DIRECT"} {
+		if err := application.SetGroupSelected("PROXY", target); err != nil {
+			t.Fatalf("PROXY 选 %q 失败: %v", target, err)
+		}
+		selected, err := groupstate.Load(application.groupSelectedPath())
+		if err != nil {
+			t.Fatalf("读取选中状态失败: %v", err)
+		}
+		if selected["PROXY"] != target {
+			t.Fatalf("PROXY 选中状态 = %v, 期望 %q", selected, target)
+		}
+	}
+
+	if err := application.SetGroupSelected("PROXY", "AUTO"); err == nil {
+		t.Error("无可用节点分配时 AUTO 应不可选")
+	}
+	application.assigns = []pool.Assignment{{Port: 42000, Node: application.nodes[0]}}
+	if err := application.SetGroupSelected("PROXY", "AUTO"); err != nil {
+		t.Fatalf("有可用节点后 AUTO 应可选: %v", err)
+	}
+	if got := application.GroupSelected()["PROXY"]; got != "AUTO" {
+		t.Fatalf("PROXY 选中项 = %q, 期望 AUTO", got)
+	}
+
+	if err := application.SetGroupSelected("PROXY", "不存在节点"); err == nil {
+		t.Error("未知节点名应报错")
+	}
+	application.nodes[0].Alive = false
+	if err := application.SetGroupSelected("PROXY", "self"); err == nil {
+		t.Error("失效节点应不可选为默认出口")
+	}
+}
+
+// TestSetGroupSelectedBuiltinProxyRollback 验证 PROXY 选择热更新失败时状态文件
+// 回滚到修改前内容：通过注入一个 mihomo 无法识别的存活节点使生成自检失败，
+// 旧选中值（DIRECT）必须原样保留。
+func TestSetGroupSelectedBuiltinProxyRollback(t *testing.T) {
+	application, _ := selectGroupTestApp(t, config.GroupTypeSelect)
+	if err := application.SetGroupSelected("PROXY", "DIRECT"); err != nil {
+		t.Fatalf("PROXY 选 DIRECT 失败: %v", err)
+	}
+
+	application.nodes = append(application.nodes, &node.Node{
+		Name: "无效节点", Subscription: "manual", Alive: true,
+		Mapping: map[string]any{"name": "无效节点", "type": "not-a-real-proxy", "server": "127.0.0.1", "port": 1080},
+	})
+	if err := application.SetGroupSelected("PROXY", "self"); err == nil {
+		t.Fatal("无效节点应触发热更新失败")
+	}
+	selected, err := groupstate.Load(application.groupSelectedPath())
+	if err != nil {
+		t.Fatalf("读取选中状态失败: %v", err)
+	}
+	if selected["PROXY"] != "DIRECT" {
+		t.Fatalf("热更失败后选中状态未回滚: %v, 期望 PROXY->DIRECT", selected)
 	}
 }

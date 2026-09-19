@@ -286,15 +286,15 @@ func (m tuiModel) buildModuleAction(key string) (tuiAction, bool) {
 	}
 }
 
-// buildNodeAction 构造节点页的主出口、自动选优与删除手动节点动作。
+// buildNodeAction 构造节点页的默认出口、自动最快与删除手动节点动作。
 //
 // 参数说明：
-//   - key: string，enter 设主出口（光标须在节点表），a 自动选优开关，d 删手动节点（光标须在手动表）。
+//   - key: string，enter 设默认出口（光标须在节点表），a 默认出口设为 AUTO，d 删手动节点（光标须在手动表）。
 //
 // 返回值说明：tuiAction 与 bool，键未绑定或光标不在对应表时 ok 为 false。
 //
-// 错误情况：无；删除手动节点带确认文案；主出口动作在一次 Run 内顺序调用
-// main-node 再关闭 main-auto，与 Web 控制台两步操作保持一致。
+// 错误情况：无；删除手动节点带确认文案；默认出口动作单次调用内置 PROXY 组的
+// select 接口（选中项为节点名，与 Web 控制台一致）。
 func (m tuiModel) buildNodeAction(key string) (tuiAction, bool) {
 	nodes := sortedTUINodes(m.overview.Nodes)
 	nodeCount := len(nodes)
@@ -305,26 +305,22 @@ func (m tuiModel) buildNodeAction(key string) (tuiAction, bool) {
 		}
 		node := nodes[m.cursor]
 		return tuiAction{
-			Label: "设置主出口",
+			Label: "设为默认出口",
 			Run: func(c *apiClient) (string, error) {
-				if err := c.do(http.MethodPost, "/api/main-node", map[string]string{"node": node.Key}, nil); err != nil {
+				if err := c.do(http.MethodPost, "/api/groups/PROXY/select", map[string]string{"node": node.Name}, nil); err != nil {
 					return "", err
 				}
-				if err := c.do(http.MethodPost, "/api/main-auto", map[string]bool{"enabled": false}, nil); err != nil {
-					return "", err
-				}
-				return "主出口 → " + node.Name, nil
+				return "默认出口 → " + node.Name, nil
 			},
 		}, true
 	case "a":
-		enable := !m.overview.MainAuto
 		return tuiAction{
-			Label: "自动选优开关",
+			Label: "默认出口 → AUTO 自动最快",
 			Run: func(c *apiClient) (string, error) {
-				if err := c.do(http.MethodPost, "/api/main-auto", map[string]bool{"enabled": enable}, nil); err != nil {
+				if err := c.do(http.MethodPost, "/api/groups/PROXY/select", map[string]string{"node": "AUTO"}, nil); err != nil {
 					return "", err
 				}
-				return "自动选优" + tuiActionOnOff(enable), nil
+				return "默认出口 → AUTO", nil
 			},
 		}, true
 	case "d":

@@ -287,16 +287,16 @@ func printOverviewSummary(c *apiClient) {
 	if ov.AutoPort > 0 {
 		fmt.Printf("自动选优端口: %d\n", ov.AutoPort)
 	}
-	main := "规则模式"
-	switch {
-	case ov.MainAuto:
-		main = "固定走最优节点（main-auto）"
-	case ov.MainNode != "" && ov.MainNodeUp:
-		main = "固定节点（main-node，生效中）"
-	case ov.MainNode != "":
-		main = "固定节点（main-node，节点暂不可用，已回退规则模式）"
+	exit := "未选择（落成员首位）"
+	for _, g := range ov.Groups {
+		if g.Name == "PROXY" && g.Builtin {
+			if g.Selected != "" {
+				exit = g.Selected
+			}
+			break
+		}
 	}
-	fmt.Printf("主端口: %s\n", main)
+	fmt.Printf("默认出口: %s\n", exit)
 	fmt.Printf("系统代理: %s；TUN: %s；DNS 预设: %s；开机自启: %s\n",
 		onOffText(ov.SystemProxy), onOffText(ov.TUN.Enabled), ov.DNSPreset, onOffText(ov.Autostart))
 	if ov.Version.Enabled && ov.Version.Latest != "" && ov.Version.Latest != ov.Version.Current {

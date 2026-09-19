@@ -24,14 +24,21 @@ func (s *Server) registerProxyGroupRoutes(mux *http.ServeMux) {
 type GroupEntry struct {
 	config.NodeGroup
 	Selected string `json:"selected,omitempty"` // select 分组当前选中的节点名；非 select 组或未选择时为空
+	Builtin  bool   `json:"builtin,omitempty"`  // true 表示内置 PROXY 组（默认出口），不可编辑/删除
 }
 
 // groupEntries 合并分组配置与 select 选中状态；空 type 归一化为默认的 url-test，
-// 让列表响应始终暴露生效中的分组类型。
+// 让列表响应始终暴露生效中的分组类型。列表头部合成内置 PROXY 项（默认出口：
+// 规则模式 MATCH,PROXY 的落点，生成层恒创建的 select 组），供控制台展示与选择。
 func (s *Server) groupEntries() []GroupEntry {
 	groups := s.app.Groups()
 	selected := s.app.GroupSelected()
-	out := make([]GroupEntry, 0, len(groups))
+	out := make([]GroupEntry, 0, len(groups)+1)
+	out = append(out, GroupEntry{
+		NodeGroup: config.NodeGroup{Name: "PROXY", Type: config.GroupTypeSelect},
+		Selected:  selected["PROXY"],
+		Builtin:   true,
+	})
 	for _, g := range groups {
 		if g.Type == "" {
 			g.Type = config.GroupTypeURLTest

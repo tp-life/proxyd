@@ -1554,3 +1554,143 @@ func TestRestartEndpointWithoutRestarter(t *testing.T) {
 		t.Fatalf("未注入 restarter 时应返回 503，得到 %d", resp.StatusCode)
 	}
 }
+
+// TestAdBlockAPI 验证广告拦截开关可通过 API 热切换，并在 GET /api/adblock 与
+// overview 中暴露当前状态，供规则页与概览轮询共享同一事实来源。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建隔离应用并报告 HTTP/JSON 断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：请求体无效、热更新失败、响应不是 200，或状态与 overview 未反映
+// 最新开关值时测试失败。
+func TestAdBlockAPI(t *testing.T) {
+	a, err := app.New(&config.Config{
+		Listen:   "127.0.0.1",
+		Mode:     "rule",
+		LogLevel: "silent",
+		StateDir: t.TempDir(),
+		Rules:    []string{"MATCH,PROXY"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:0", a)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/adblock", strings.NewReader(`{"enable":true}`))
+	srv.handleSetAdBlock(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var state struct {
+		Enable    bool   `json:"enable"`
+		RuleURL   string `json:"rule_url"`
+		Effective bool   `json:"effective"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if !state.Enable || !state.Effective {
+		t.Errorf("开启后应报告 enable+effective: %+v", state)
+	}
+	if state.RuleURL != config.DefaultAdBlockRuleURL {
+		t.Errorf("rule_url 应为默认规则集地址, got %q", state.RuleURL)
+	}
+
+	get := httptest.NewRecorder()
+	srv.handleGetAdBlock(get, httptest.NewRequest(http.MethodGet, "/api/adblock", nil))
+	if err := json.Unmarshal(get.Body.Bytes(), &state); err != nil {
+		t.Fatalf("解析 GET 响应失败: %v", err)
+	}
+	if !state.Enable {
+		t.Error("GET /api/adblock 未反映开启状态")
+	}
+
+	overview := httptest.NewRecorder()
+	srv.handleOverview(overview, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	var payload struct {
+		Enabled bool `json:"adblock_enabled"`
+	}
+	if err := json.Unmarshal(overview.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 overview 失败: %v", err)
+	}
+	if !payload.Enabled {
+		t.Error("开启后 overview 未报告 adblock_enabled")
+	}
+
+	off := httptest.NewRecorder()
+	srv.handleSetAdBlock(off, httptest.NewRequest(http.MethodPut, "/api/adblock", strings.NewReader(`{"enable":false}`)))
+	if off.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", off.Code, off.Body.String())
+	}
+	if a.AdBlock().Enable {
+		t.Error("关闭后应用层仍报告广告拦截已开启")
+	}
+}
+
+// TestLANShareAPI 验证局域网共享开关可通过 API 热切换 listen 绑址，并在 overview 中
+// 暴露最新值，供代理设置页开关与概览轮询共享同一事实来源。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用于创建隔离应用并报告 HTTP/JSON 断言失败。
+//
+// 返回值：无。
+//
+// 错误情况：请求体无效、热更新失败、响应不是 200，或 overview 的 listen 未随开关
+// 在 127.0.0.1 与 0.0.0.0 间变化时测试失败。
+func TestLANShareAPI(t *testing.T) {
+	a, err := app.New(&config.Config{
+		Listen:   "127.0.0.1",
+		Mode:     "rule",
+		LogLevel: "silent",
+		StateDir: t.TempDir(),
+		Rules:    []string{"MATCH,PROXY"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:0", a)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/lan-share", strings.NewReader(`{"enabled":true}`))
+	srv.handleSetLANShare(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var state struct {
+		Enabled bool   `json:"enabled"`
+		Listen  string `json:"listen"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if !state.Enabled || state.Listen != "0.0.0.0" {
+		t.Errorf("开启后应返回 enabled=true listen=0.0.0.0: %+v", state)
+	}
+
+	overview := httptest.NewRecorder()
+	srv.handleOverview(overview, httptest.NewRequest(http.MethodGet, "/api/overview", nil))
+	var payload struct {
+		Listen string `json:"listen"`
+	}
+	if err := json.Unmarshal(overview.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 overview 失败: %v", err)
+	}
+	if payload.Listen != "0.0.0.0" {
+		t.Errorf("开启后 overview.listen = %q, want 0.0.0.0", payload.Listen)
+	}
+
+	off := httptest.NewRecorder()
+	srv.handleSetLANShare(off, httptest.NewRequest(http.MethodPost, "/api/lan-share", strings.NewReader(`{"enabled":false}`)))
+	if off.Code != http.StatusOK {
+		t.Fatalf("disable status=%d body=%s", off.Code, off.Body.String())
+	}
+	if err := json.Unmarshal(off.Body.Bytes(), &state); err != nil {
+		t.Fatalf("解析关闭响应失败: %v", err)
+	}
+	if state.Enabled || state.Listen != "127.0.0.1" {
+		t.Errorf("关闭后应返回 enabled=false listen=127.0.0.1: %+v", state)
+	}
+}

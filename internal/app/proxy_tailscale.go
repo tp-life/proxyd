@@ -207,7 +207,6 @@ func (a *App) TerminateTailscaleSetup(ctx context.Context, name string) (Tailsca
 	nextConfig := oldConfig.Clone()
 
 	manualIndex := -1
-	var removedNode *node.Node
 	for index, entry := range nextConfig.ManualNodes {
 		candidate, err := subscribe.ParseManualNode(entry)
 		if err != nil || candidate.Name != name {
@@ -217,7 +216,6 @@ func (a *App) TerminateTailscaleSetup(ctx context.Context, name string) (Tailsca
 			return TailscaleTerminationResult{}, fmt.Errorf("节点 %q 不是 Tailscale 接入", name)
 		}
 		manualIndex = index
-		removedNode = candidate
 		break
 	}
 	if manualIndex < 0 {
@@ -270,9 +268,6 @@ func (a *App) TerminateTailscaleSetup(ctx context.Context, name string) (Tailsca
 		nextRules = append(nextRules, rule)
 	}
 	nextConfig.CustomRules = nextRules
-	if nextConfig.MainNode == removedNode.Key() {
-		nextConfig.MainNode = ""
-	}
 
 	nextNodes := filterNodesByName(oldNodes, name)
 	nextAssignments := filterAssignmentsByNodeName(oldAssignments, name)

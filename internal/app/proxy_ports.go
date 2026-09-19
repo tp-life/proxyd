@@ -43,50 +43,6 @@ func (a *App) SetAutoPort(port int) error {
 	return err
 }
 
-// SetMainAuto 开关「主端口使用最优节点」：开启后主端口跳过规则匹配、
-// 固定走 AUTO url-test 组；关闭恢复规则模式。持久化并热更新。
-// 主端口 mixed-port ↔ listener 形态转换的两阶段释放由 regenerateWithLocked 统一处理。
-func (a *App) SetMainAuto(enabled bool) error {
-	a.mu.Lock()
-	old := a.cfg.MainAuto
-	a.cfg.MainAuto = enabled
-	a.mu.Unlock()
-	if err := a.Regenerate(); err != nil {
-		a.mu.Lock()
-		a.cfg.MainAuto = old
-		a.mu.Unlock()
-		_ = a.Regenerate()
-		return err
-	}
-	a.mu.Lock()
-	err := a.persistLocked()
-	a.mu.Unlock()
-	return err
-}
-
-// SetMainNode 设置主端口固定节点（node Key；空串 = 恢复规则模式），持久化并热更新。
-// main-auto 开启时该设置被忽略（auto 优先），仍可保存。
-// main-auto ↔ main-node（listener 同名 L<port>、仅 proxy 目标变化）
-// 与 listener → mixed-port 方向由 mihomo 按 关闭→监听 顺序处理；
-// mixed-port → listener 方向的过渡释放由 regenerateWithLocked 统一处理。
-func (a *App) SetMainNode(key string) error {
-	a.mu.Lock()
-	old := a.cfg.MainNode
-	a.cfg.MainNode = key
-	a.mu.Unlock()
-	if err := a.Regenerate(); err != nil {
-		a.mu.Lock()
-		a.cfg.MainNode = old
-		a.mu.Unlock()
-		_ = a.Regenerate()
-		return err
-	}
-	a.mu.Lock()
-	err := a.persistLocked()
-	a.mu.Unlock()
-	return err
-}
-
 // SetMainPort 以事务方式修改主端口、mihomo 运行态与系统代理指向。
 //
 // 参数说明：

@@ -120,11 +120,6 @@ type App struct {
 	// 概览接口据此让前端把延迟列显示为「测速中」，而不是容易误读的上轮结果。
 	testing atomic.Bool
 
-	// mainListenerOn 记录最近一次成功应用的配置里主端口是否为固定 listener 形态
-	// （main-auto/main-node 生效）；用于 regenerateWithLocked 判断是否需要
-	// 先释放主端口（mixed-port → 同端口 listener 直接热更新会 bind 冲突）。
-	mainListenerOn bool
-
 	// tunFD 是 tun-helper 创建并注入 mihomo 的 utun 文件描述符（纯运行时状态，
 	// 不落盘），0 表示未持有；仅在 refreshing 锁内访问。fd 随配置成功应用后归
 	// mihomo 所有（关闭 TUN/停用时由 mihomo 关闭），见 proxy_tunhelper.go。

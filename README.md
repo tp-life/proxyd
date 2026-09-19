@@ -15,8 +15,7 @@
 - 节点快照持久化（`state-dir/nodes.json`）：启动即恢复最近一次的可用节点提供服务，断网/订阅挂掉也不丢节点
 - 订阅仅在用户手动点击同步时下载；后台只按 `health-interval` 检测已有节点，死节点自动下端口、恢复后自动补位
 - 主端口完整支持 Clash 规则与三种代理模式（rule / global / direct），可热切换；可在线修改端口号（`POST /api/main-port` / `proxyd main-port`）
-- 可选「主端口使用最优节点」（`main-auto`）：主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
-- 可选「主端口固定节点」（`main-node`）：不开优选时主端口跳过规则、直达指定节点；节点失效自动回退规则模式，恢复后自动再生效
+- 规则模式的默认出口（内置 `PROXY` 组选择）：未命中规则的流量可固定走某个节点（含隧道类）、交给 AUTO 测速组自动选优或 DIRECT 直连；Web/API/CLI 均可修改并持久化，规则（含广告拦截）仍然生效
 - 可选「自动选优端口」（`auto-port`）：独立端口固定走全部可用节点中延迟最低者（url-test 组）
 - 自定义规则（追加式，前置到内置规则之前）+ 规则 URL 导入（mihomo 规则文本 / gfwlist）+ 节点分组端口（支持 url-test / fallback / load-balance，也可按订阅动态生成成员）
 - 链式代理：透传 Clash 节点的 `dialer-proxy`，自动修正订阅合并后的名称引用并执行完整链路测速；支持指向节点或 proxyd 策略组，不再使用 mihomo 已移除的 `relay` 组
@@ -106,8 +105,8 @@ proxyd logs --tail 200 --level error
 proxyd tun status | proxyd tun on | proxyd tun off
 proxyd port-mapping [on|off|status] # 开关/查看逐节点端口映射
 proxyd port-range 43000-43100    proxyd auto-port 41998|off
-proxyd main-auto [on|off]        proxyd main-port 42999   # 主端口最优节点开关 / 改主端口
-proxyd main-node <节点名|key|off>                         # 主端口固定节点（可按名称）/ 清除
+proxyd main-port 42999                                    # 改主端口
+proxyd groups select PROXY <节点名|AUTO|DIRECT>           # 设置规则模式默认出口（持久化）
 proxyd conn list | proxyd conn close <id|all>             # 活动连接查看/关闭
 proxyd traffic                                            # 实时上/下行速率
 proxyd ls                                                 # 打开交互式 TUI（h/l 切页、j/k 移动光标、? 帮助、q 退出）
@@ -164,8 +163,7 @@ PORT   NODE              SUBSCRIPTION   DELAY
 - `manual-nodes`：手动节点（http(s)/socks5 URL 或分享链接），落盘在配置文件，与订阅节点同等待遇
 - `port-range`：节点映射端口区间；`mixed-port`：主端口（默认区间前一位，Web/CLI 可在线修改）
 - `port-mapping`：逐节点端口映射总开关（默认 true）；关闭后不启动映射监听，但稳定端口分配仍保留并可在 Web 查看。订阅上还有同名字段（默认 true）做订阅级开关，只停该订阅节点的监听
-- `main-auto`：主端口使用最优节点（默认 false）——主端口跳过规则、固定走 AUTO 选优组，与 auto-port 并存互不影响
-- `main-node`：主端口固定节点（默认空）——不开优选时主端口跳过规则、直达指定节点（存节点 Key）；`main-auto` 开启时被忽略；节点失效自动回退规则模式、配置保留
+- 默认出口（无配置字段）：规则模式未命中规则的流量落到内置 `PROXY` 选择组，可在 Web 概览/设置页、`POST /api/groups/PROXY/select` 或 `proxyd groups select PROXY <节点名|AUTO|DIRECT>` 修改；选择存 `state-dir/group-selected.json`，节点失效时回退成员首位
 - `auto-port`：自动选优端口（0=关闭），固定走全部可用节点中延迟最低者，与主端口模式互不影响
 - `system-proxy`：true 时 serve 启动即把系统代理指向主端口，退出自动恢复
 - `tun`：完整透传 mihomo TUN 段；默认关闭，`stack: system`、自动路由/出口识别、劫持 `0.0.0.0:53`，可通过 Web 或 `proxyd tun` 热切换

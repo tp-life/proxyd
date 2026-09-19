@@ -1,5 +1,5 @@
 /**
- * 代理概览浏览器回归：真实渲染应用，隔离 API 验证布局与固定节点弹窗，不写用户配置。
+ * 代理概览浏览器回归：真实渲染应用，隔离 API 验证布局与默认出口弹窗，不写用户配置。
  * 运行：PLAYWRIGHT_MODULE=<playwright 模块路径> CHROMIUM_PATH=<浏览器路径> node e2e/proxy-overview-ui.cjs。
  * 可选 PROXYD_WEB_URL 指向已启动的前端；默认自动在随机回环端口启动仓库 Vite。
  */
@@ -19,17 +19,22 @@ async function availablePort() {
   return port;
 }
 
-/** fixture 构造健康、失效和同名节点；无参数，返回 object；不访问外部数据，无错误。 */
+/** proxyGroup 合成内置 PROXY 组；selected 为 string 持久化选中值，返回 object；纯函数。 */
+function proxyGroup(selected) {
+  return { name: 'PROXY', type: 'select', builtin: true, selected };
+}
+
+/** fixture 构造健康、失效、同名节点与内置 PROXY 组；无参数，返回 object；不访问外部数据，无错误。 */
 function fixture() {
   return {
-    mode: 'rule', mixed_port: 7890, main_auto: false, main_node: 'a', main_node_up: true,
+    mode: 'rule', mixed_port: 7890,
     system_proxy: false, tun: {}, nodes: [
       { key: 'a', name: '香港 01', subscription: '测试订阅', type: 'ss', alive: true, delay: 32 },
       { key: 'b', name: '日本 02', subscription: '备用订阅', type: 'ss', alive: true, delay: 65 },
       { key: 'c', name: '失效节点', subscription: 'manual', type: 'ss', alive: false, delay: 0 },
       { key: 'd', name: '日本 02', subscription: '同名订阅', type: 'ss', alive: true, delay: 85 },
     ],
-    subscriptions: [], groups: [], ports: [], port_assignments: [], manual_nodes: [], custom_rules: [], port_range: [20000, 21000],
+    subscriptions: [], groups: [proxyGroup('香港 01')], ports: [], port_assignments: [], manual_nodes: [], custom_rules: [], port_range: [20000, 21000],
   };
 }
 
@@ -68,9 +73,7 @@ async function main() {
         writes.push({ endpoint, body });
         if (slowWrite) await new Promise((resolve) => setTimeout(resolve, 300));
         if (endpoint === failPath) return route.fulfill({ status: 500, body: '测试保存失败' });
-        if (endpoint === '/api/main-node') overview.main_node = body.node;
-        if (endpoint === '/api/main-auto') overview.main_auto = body.enabled;
-        overview.main_node_up = !overview.main_auto && overview.nodes.some((node) => node.key === overview.main_node && node.alive);
+        if (endpoint === '/api/groups/PROXY/select') overview.groups[0].selected = body.node;
         return route.fulfill({ json: {} });
       }
       const data = endpoint === '/api/overview' ? overview
@@ -98,66 +101,73 @@ async function main() {
     }
     await page.setViewportSize({ width: 1366, height: 768 });
     await page.screenshot({ path: path.join(output, 'overview-desktop.png'), animations: 'disabled' });
-    const trigger = page.getByRole('button', { name: '切换节点', exact: true });
-    const dialog = page.getByRole('dialog', { name: '选择固定节点', exact: true });
+    const trigger = page.getByRole('button', { name: '切换出口', exact: true });
+    const dialog = page.getByRole('dialog', { name: '选择默认出口', exact: true });
     await trigger.click();
+    // 默认出口候选固定提供 AUTO 与 DIRECT，失效节点不可选。
+    assert(await dialog.getByRole('button', { name: '自动最快' }).isEnabled());
+    assert(await dialog.getByRole('button', { name: '直连' }).isEnabled());
     assert(await dialog.getByRole('button', { name: /失效节点/ }).isDisabled());
     assert(await dialog.getByRole('button', { name: '当前已使用', exact: true }).isDisabled());
-    await dialog.getByRole('textbox', { name: '搜索节点' }).fill('备用订阅');
+    await dialog.getByRole('textbox', { name: '搜索出口' }).fill('备用订阅');
     assert.equal(await dialog.locator('.fixed-node-card').count(), 1);
     await dialog.locator('.fixed-node-card').click();
     await dialog.getByRole('button', { name: '取消', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' });
     assert.equal(writes.length, 0, '取消不能写配置');
-    assert(await trigger.evaluate((element) => document.activeElement === element), '弹窗关闭后未归还焦点');
+    // Radix 在关闭动画后异步归还焦点，这里轮询等待而不是立即断言。
+    const triggerHandle = await trigger.elementHandle();
+    await page.waitForFunction((element) => document.activeElement === element, triggerHandle);
+    await triggerHandle.dispose();
     await trigger.click();
     await dialog.getByRole('button', { name: /日本 02.*备用订阅/ }).click();
-    failPath = '/api/main-node';
+    failPath = '/api/groups/PROXY/select';
     await dialog.getByRole('button', { name: '确认切换', exact: true }).click();
     await dialog.getByRole('alert').waitFor();
-    assert.equal(overview.main_node, 'a', '失败时旧节点不能被界面改写');
+    assert.equal(overview.groups[0].selected, '香港 01', '失败时旧出口不能被界面改写');
     failPath = ''; slowWrite = true;
     await dialog.getByRole('button', { name: '确认切换', exact: true }).dblclick();
     await dialog.waitFor({ state: 'hidden' });
     assert.equal(writes.length, 2, '连点造成重复提交');
-    assert.equal(overview.main_node, 'b', '同名节点必须按 key 切换');
+    // groupstate 与 mihomo select 组都按节点名引用成员，同名节点因此共享同一个选中值。
+    assert.equal(overview.groups[0].selected, '日本 02', '默认出口必须按节点名切换');
     await page.locator('.exit-node strong').filter({ hasText: '日本 02' }).waitFor();
     slowWrite = false;
     await trigger.click();
-    await dialog.getByRole('textbox', { name: '搜索节点' }).fill('不存在的节点');
-    await dialog.getByText('没有匹配的节点，请调整关键词或来源筛选。').waitFor();
+    await dialog.getByRole('textbox', { name: '搜索出口' }).fill('不存在的节点');
+    await dialog.getByText('没有匹配的出口，请调整关键词。').waitFor();
     await page.keyboard.press('Escape');
     await dialog.waitFor({ state: 'hidden' });
-    // 从规则策略首次选择固定节点时留在概览，通过弹窗确认后才写入。
-    overview = { ...fixture(), main_node: '', main_node_up: false };
+    // 未持久化选择时落成员首位，仍可通过弹窗确认后才写入。
+    overview = { ...fixture(), groups: [proxyGroup('')] };
     await load();
-    await page.locator('.policy-option').filter({ hasText: '固定节点' }).click();
+    await page.locator('.policy-option').filter({ hasText: '默认出口' }).click();
     await dialog.getByRole('button', { name: /香港 01/ }).click();
     await dialog.getByRole('button', { name: '确认切换', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' });
-    assert.equal(overview.main_node, 'a');
+    assert.equal(overview.groups[0].selected, '香港 01');
     assert(page.url().endsWith('#/proxy/overview'));
-    // 自动策略优先级更高：先存节点，再关自动；第二步失败保留弹窗和真实自动策略。
-    overview = { ...fixture(), main_auto: true, main_node_up: false };
-    await load();
-    const beforeAuto = writes.length;
-    await page.locator('.policy-option').filter({ hasText: '固定节点' }).click();
-    await dialog.getByRole('button', { name: /日本 02.*备用订阅/ }).click();
-    failPath = '/api/main-auto';
-    await dialog.getByRole('button', { name: '确认切换', exact: true }).click();
-    await dialog.getByRole('alert').waitFor();
-    assert.equal(overview.main_auto, true);
-    assert.deepEqual(writes.slice(beforeAuto).map((write) => write.endpoint), ['/api/main-node', '/api/main-auto']);
-    failPath = '';
+    // AUTO：交给测速组选择最低延迟节点，出口标签反映当前最快节点。
+    await trigger.click();
+    await dialog.getByRole('button', { name: '自动最快' }).click();
     await dialog.getByRole('button', { name: '确认切换', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' });
-    assert.equal(overview.main_auto, false);
-    assert.equal(overview.main_node, 'b');
-    // 节点订阅消失仍允许从实际出口修复；空列表不产生无效提交。
-    overview = { ...fixture(), main_node: 'missing', main_node_up: false, nodes: [] };
+    assert.equal(overview.groups[0].selected, 'AUTO');
+    await page.locator('.exit-node strong').filter({ hasText: '自动最快 · 香港 01' }).waitFor();
+    // DIRECT：完全绕过节点，规则未命中的流量直连。
+    await trigger.click();
+    await dialog.getByRole('button', { name: '直连' }).click();
+    await dialog.getByRole('button', { name: '确认切换', exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(overview.groups[0].selected, 'DIRECT');
+    await page.locator('.exit-node strong').filter({ hasText: '直连（DIRECT）' }).waitFor();
+    // 节点订阅消失仍允许改为 AUTO / DIRECT；AUTO 无可用节点时禁用，空选择不产生无效提交。
+    overview = { ...fixture(), groups: [proxyGroup('')], nodes: [] };
     await load();
     await trigger.click();
-    await dialog.getByText('暂无节点，请先添加节点或同步订阅。').waitFor();
+    assert(await dialog.getByRole('button', { name: '自动最快' }).isDisabled());
+    // 没有任何节点时仍保留 AUTO/DIRECT 两个保留出口，空选择不产生无效提交。
+    assert.equal(await dialog.locator('.fixed-node-card').count(), 2, '空节点列表应仍提供 AUTO/DIRECT');
     assert(await dialog.getByRole('button', { name: '确认切换', exact: true }).isDisabled());
     await page.keyboard.press('Escape');
     // 手机长列表必须在弹窗中滚动，底部确认可见；长名称不能把页面或卡片横向撑开。
@@ -179,7 +189,7 @@ async function main() {
     await trigger.click();
     await page.screenshot({ path: path.join(output, 'node-picker-desktop.png'), animations: 'disabled' });
     assert.deepEqual(errors, [], '浏览器发生运行错误');
-    console.log(`代理概览布局及节点弹窗回归通过；截图：${output}`);
+    console.log(`代理概览布局及默认出口弹窗回归通过；截图：${output}`);
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }).catch(() => {});
     console.error(`失败截图目录：${output}`);
