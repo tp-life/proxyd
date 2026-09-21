@@ -68,9 +68,13 @@ func normalizeClashProxy(mapping map[string]any) {
 // newNode 用解析出的 mapping 构造节点，并同步 name 键与来源订阅。
 func newNode(m map[string]any, name, subName string) *node.Node {
 	m["name"] = name
-	return &node.Node{
+	n := &node.Node{
 		Name:         name,
 		Subscription: subName,
 		Mapping:      m,
 	}
+	// 展示行必须在节点可能被概览观察之前发布：概览只读展示行，不读会被健康检测
+	// worker 并发写回的结果字段（见 node.Display）。
+	n.PublishResult()
+	return n
 }

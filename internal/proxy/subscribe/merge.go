@@ -35,15 +35,36 @@ func Merge(subs map[string][]*node.Node, excludeRe *regexp.Regexp) []*node.Node 
 //
 // 返回值：
 //   - []*node.Node：按来源名稳定排序、按节点领域去重键去重并保证名称全局唯一的结果。
+//     内容无需改动的节点原样返回（保持指针身份），需要改名或改写 Mapping 的节点以
+//     私有副本返回。
 //
 // 错误情况：无；nil/无 Mapping 的节点会被忽略。相同 DedupKey 只评估稳定排序后
 // 首次出现的节点名称，保持普通节点的历史去重语义，不因后续来源的别名改变过滤结果。
+//
+// 并发契约：本函数**绝不修改输入节点**。输入常常是运行态里被概览、配置生成等
+// 并发读取的已发布对象（见 App.Nodes），原地改写 Name/Subscription/Mapping 会与那些
+// 读取构成数据竞争，其中 Mapping 的并发写入还会直接触发运行时 fatal error 终止进程。
+// 因此所有写入都先经 own() 取一份私有副本（含 Mapping 顶层），只有发生改动时才复制，
+// 未改动的节点保持原指针，不产生额外开销。
 func MergeFiltered(subs map[string][]*node.Node, includeRe, excludeRe *regexp.Regexp) []*node.Node {
 	names := make([]string, 0, len(subs))
 	for name := range subs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
+	// owned 把输入节点与它已经派生的副本都映射到同一份私有副本：两遍改写共用，
+	// 第一遍改过名的节点在第二遍改写引用时不会再复制一层。
+	owned := map[*node.Node]*node.Node{}
+	own := func(n *node.Node) *node.Node {
+		if cloned := owned[n]; cloned != nil {
+			return cloned
+		}
+		cloned := n.CloneWithMapping()
+		owned[n] = cloned
+		owned[cloned] = cloned
+		return cloned
+	}
 
 	seenKey := map[string]*node.Node{}
 	usedName := map[string]bool{}
@@ -78,9 +99,17 @@ func MergeFiltered(subs map[string][]*node.Node, includeRe, excludeRe *regexp.Re
 				continue
 			}
 			originalName := n.Name
-			n.Subscription = subName
-			n.Name = uniqueName(originalName, subName, usedName)
-			n.Mapping["name"] = n.Name
+			// uniqueName 必须无条件调用：即使不需要改名，它也要把最终名称登记为已占用。
+			finalName := uniqueName(originalName, subName, usedName)
+			if n.Subscription != subName || n.Name != finalName || mappingName(n.Mapping) != finalName {
+				n = own(n)
+				n.Subscription = subName
+				n.Name = finalName
+				n.Mapping["name"] = finalName
+			}
+			// 别名表必须指向改名后的对象：去重分支会用 retained.Name 作最终名称，
+			// 而改动过的节点是副本，旧的指针会残留改名前的名字。
+			seenKey[key] = n
 			if nameAliases[subName] == nil {
 				nameAliases[subName] = map[string]string{}
 			}
@@ -100,13 +129,27 @@ func MergeFiltered(subs map[string][]*node.Node, includeRe, excludeRe *regexp.Re
 	for _, item := range accepted {
 		n := item.node
 		if raw, ok := n.Mapping["dialer-proxy"].(string); ok {
-			if resolved, exists := nameAliases[n.Subscription][raw]; exists {
+			if resolved, exists := nameAliases[n.Subscription][raw]; exists && resolved != raw {
+				n = own(n)
 				n.Mapping["dialer-proxy"] = resolved
 			}
 		}
 		out = append(out, n)
 	}
 	return out
+}
+
+// mappingName 读取 Mapping 顶层的协议名称，缺失或类型异常时返回空字符串。
+//
+// 参数：
+//   - mapping: map[string]any，mihomo 出站映射。
+//
+// 返回值：string，`name` 键的字符串值；不存在或非字符串时为空。
+//
+// 错误情况：无。用于判断合并结果是否真的需要改写 Mapping，从而避免无谓的复制。
+func mappingName(mapping map[string]any) string {
+	name, _ := mapping["name"].(string)
+	return name
 }
 
 // uniqueName 保证节点名全局唯一：冲突时追加 " (订阅名)"，仍冲突再追加序号。

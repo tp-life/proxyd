@@ -392,3 +392,138 @@ func TestCheckBuildsDialerProxyCandidates(t *testing.T) {
 		t.Fatalf("已配置策略组应允许进入候选: %+v", groupEntry)
 	}
 }
+
+// TestCheckPublishesIncrementalDisplay 验证逐节点测速进度：
+//
+//   - 节点被投递探测前先发布「测速中」展示行，行内保留本轮开始前的存活状态与延迟，
+//     即使权威字段已被 checkOne 清零；
+//   - 排队等待的节点同样是「测速中」，结果落定的节点立即换成最终展示行；
+//   - 读侧并发读取展示行，配合 -race 覆盖概览读取与 worker 写回不产生数据竞争。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文，用闸门把第一个节点保持在探测中。
+//
+// 返回值：无；通过展示行与权威字段的对比断言表达结果。
+//
+// 错误情况：节点被探测前未标记、测速中丢失轮前稳定值、或结束后仍显示「测速中」时失败。
+func TestCheckPublishesIncrementalDisplay(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	started := make(chan struct{}, 1)
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	first := socksNode("first", startSocks5Server(t))
+	// 本轮开始前的稳定值：标记后仍应可读，权威字段则在探测开始时被清零。
+	// 生产路径上节点诞生即发布展示行（见 subscribe.newNode），这里显式补上。
+	first.Alive = true
+	first.Delay = 123
+	first.PublishResult()
+	second := socksNode("second", first.Mapping["port"].(int))
+	second.PublishResult()
+
+	nodes := []*node.Node{first, second}
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if d := first.Display(); d.Testing && (!d.Alive || d.Delay != 123) {
+				t.Errorf("测速中的展示行不再是本轮开始前的稳定值: %+v", d)
+				return
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	// 并发度 1：第二个节点在第一个探测结束前保持排队，应一直是「测速中」。
+	go func() {
+		Check(context.Background(), nodes, httpSrv.URL, 5*time.Second, 1, "")
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("等待探测进入目标服务超时")
+	}
+	if d := first.Display(); !d.Testing || !d.Alive || d.Delay != 123 {
+		t.Fatalf("探测中的节点应发布轮前稳定值 + 测速中: %+v", d)
+	}
+	if first.Alive || first.Delay != 0 {
+		t.Fatalf("权威字段应已按本轮探测清零: alive=%v delay=%d", first.Alive, first.Delay)
+	}
+	if d := second.Display(); !d.Testing {
+		t.Fatalf("排队中的节点应显示「测速中」: %+v", d)
+	}
+
+	unblock()
+	<-done
+	<-readerDone
+	for _, n := range nodes {
+		d := n.Display()
+		if d.Testing {
+			t.Fatalf("测速结束后不应残留「测速中」: %s=%+v", n.Name, d)
+		}
+		// 展示行必须落到最终权威字段（本机探测的延迟可能取整为 0，不比较具体数值）。
+		if d.Alive != n.Alive || d.Delay != n.Delay || d.FailReason != n.FailReason {
+			t.Fatalf("展示行应等于权威字段: %s=%+v node=%+v", n.Name, d, n)
+		}
+	}
+	if d := first.Display(); !d.Alive {
+		t.Fatalf("完成节点应发布最终结果: %+v", d)
+	}
+}
+
+// TestCheckOnResultPerNode 验证结果回调只在单个节点本轮结果落定后触发。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无；通过回调次数、回调时节点状态与链式候选残留标记断言表达结果。
+//
+// 错误情况：回调漏触发、重复触发、在节点仍是「测速中」时触发，或链式候选被当作
+// 已完成结果发布时失败。
+func TestCheckOnResultPerNode(t *testing.T) {
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(httpSrv.Close)
+
+	exit := socksNode("出口", startSocks5Server(t))
+	entry := socksNode("入口", 2)
+	entry.Mapping["dialer-proxy"] = "出口"
+
+	var mu sync.Mutex
+	seen := map[string]int{}
+	CheckWithOptions(context.Background(), []*node.Node{entry, exit}, httpSrv.URL, 5*time.Second, 2, "",
+		CheckOptions{OnResult: func(n *node.Node) {
+			mu.Lock()
+			seen[n.Name]++
+			mu.Unlock()
+			if d := n.Display(); d.Testing {
+				t.Errorf("回调时节点结果应已落定: %s=%+v", n.Name, d)
+			}
+		}})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seen["出口"] != 1 {
+		t.Fatalf("普通节点的结果回调应恰好触发一次: %v", seen)
+	}
+	if seen["入口"] != 0 {
+		t.Fatalf("链式候选不在预检查阶段出结果，不应触发回调: %v", seen)
+	}
+	if d := entry.Display(); !d.Testing {
+		t.Fatalf("链式候选的真实结果由应用层探测，Check 返回后应保持「测速中」: %+v", d)
+	}
+}

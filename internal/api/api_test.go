@@ -19,6 +19,7 @@ import (
 	"proxyd/internal/app"
 	"proxyd/internal/config"
 	"proxyd/internal/logbuf"
+	"proxyd/internal/proxy/node"
 )
 
 // TestTriggerCoalescesBurst 验证 API 短时间收到大量相同刷新请求时，只保留一个正在
@@ -483,6 +484,47 @@ func TestOverviewServerTime(t *testing.T) {
 	_, gotOff := st.Zone()
 	if gotOff != wantOff {
 		t.Errorf("server_time 时区偏移 = %ds, want 本地 %ds", gotOff, wantOff)
+	}
+}
+
+// TestNodeEntryFollowsDisplayRow 验证概览节点记录取自节点发布的展示行。
+//
+// 参数：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值：无；通过稳态与测速中两种记录的字段断言表达结果。
+//
+// 错误情况：测速中的节点把探测过程的中间状态（存活/延迟被清零）暴露给控制台，
+// 或稳态 JSON 多出 testing 字段时失败。
+func TestNodeEntryFollowsDisplayRow(t *testing.T) {
+	n := &node.Node{
+		Name:         "节点",
+		Subscription: "sub",
+		Mapping:      map[string]any{"type": "socks5", "server": "127.0.0.1", "port": 1080},
+		Alive:        true,
+		Delay:        100,
+	}
+	n.PublishResult()
+	entry := newNodeEntry(n, 43000)
+	if entry.Testing || !entry.Alive || entry.Delay != 100 || entry.Port != 43000 {
+		t.Fatalf("稳态记录应反映展示行: %+v", entry)
+	}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "testing") {
+		t.Fatalf("稳态记录不应输出 testing 字段: %s", raw)
+	}
+
+	// 测速中：权威字段已被探测改写，概览仍必须给出轮前稳定值 + testing 标记，
+	// 控制台据此把该节点的延迟列显示为「测速中…」。
+	n.MarkTesting()
+	n.Alive = false
+	n.Delay = 0
+	entry = newNodeEntry(n, 0)
+	if !entry.Testing || !entry.Alive || entry.Delay != 100 {
+		t.Fatalf("测速中的记录应保留轮前稳定值并标记 testing: %+v", entry)
 	}
 }
 

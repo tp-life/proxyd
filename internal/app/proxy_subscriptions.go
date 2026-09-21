@@ -18,6 +18,14 @@ import (
 )
 
 // Nodes 返回当前节点列表快照（含健康状态）。
+//
+// 参数：无；在 a.mu 读锁内复制切片，调用方拿到后不再持有锁。
+//
+// 返回值：[]*node.Node，与运行态同序的节点指针；切片本身独立，节点对象共享。
+//
+// 错误情况：无。返回的节点遵守 node.Node 的并发契约：发布后 Name/Subscription/Mapping
+// 只读（合并与草稿都以副本改写），健康结果经 Display() 原子读取，因此调用方可以放心
+// 并发读取而不必加锁；需要改写的调用方必须先 Clone。
 func (a *App) Nodes() []*node.Node {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -203,9 +211,10 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 			if existing == nil || existing.Subscription != current.Name {
 				continue
 			}
-			cloned := *existing
+			// Node 含原子字段，复制走 Clone（展示行一并继承，改名不影响展示值）。
+			cloned := existing.Clone()
 			cloned.Subscription = next.Name
-			freshNodes = append(freshNodes, &cloned)
+			freshNodes = append(freshNodes, cloned)
 		}
 		// 用量缓存只随同一来源改名迁移；URL/类型变化后旧用量已不再对应新订阅。
 		if info, ok := oldInfos[current.Name]; ok {
@@ -462,9 +471,30 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 		log.Printf("[subscribe] %v", err) // 拉取失败，降级使用缓存节点
 	}
 
+	// 已发布节点中与该订阅同身份的项：pool 只写 fresh 私有对象，展示行必须显式转发，
+	// 控制台才能在测速期间逐个换掉「测速中…」，而不是等提交后整订阅一起刷新。
+	// 只转发展示行：权威字段仍等提交回填，配置生成与端口分配看到的仍是旧值。
+	published := a.nodesByDedupKey()
+	var counterparts []*node.Node
+	for _, n := range fresh {
+		if n == nil {
+			continue
+		}
+		if existing := published[n.DedupKey()]; existing != nil {
+			counterparts = append(counterparts, existing)
+		}
+	}
+	markTesting(counterparts)
+	// 提前返回（订阅已被改动、来源为空）也必须复位展示行，不能留下永久「测速中」。
+	defer settleDisplay(counterparts)
+
 	// fresh 是本次拉取的私有对象（尚未经 Merge 改名/挂接共享状态），合并前测速
 	// 不读写共享节点，因此不需要 refreshing 锁，可与其它订阅的操作并行。
-	a.checkNodes(ctx, fresh, a.dialerTargets()...)
+	a.checkNodes(ctx, fresh, pool.CheckOptions{OnResult: func(checked *node.Node) {
+		if existing := published[checked.DedupKey()]; existing != nil {
+			existing.PublishDisplay(checked.Display())
+		}
+	}}, a.dialerTargets()...)
 
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
@@ -476,7 +506,9 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 
 	// 其它来源沿用最新节点（提交前可能已被并发操作更新），与该订阅的新节点
 	// 重新合并（Merge 按稳定身份去重、保证名称唯一；名称变化不影响端口稳定
-	// 映射，后者按节点 Key 对齐快照）
+	// 映射，后者按节点 Key 对齐快照）。合并不会改写这些共享节点：需要改名或
+	// 改写引用的项以私有副本进入结果（见 subscribe.MergeFiltered 的并发契约），
+	// 因此期间的概览读取不会看到半成品。
 	groups := map[string][]*node.Node{name: fresh}
 	for _, n := range a.Nodes() {
 		if n.Subscription != name {
@@ -527,17 +559,28 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 	// 克隆待测节点：pool.Check 会原地写回 Alive/Delay/FailReason，直接检测共享
 	// 节点会与并发的概览读取、其它订阅提交产生数据竞争。提交时按 Key 回填结果。
 	nodes := a.Nodes()
-	var checkList []*node.Node
+	published := make(map[string]*node.Node, len(nodes))
+	var checkList, counterparts []*node.Node
 	for _, n := range nodes {
-		if n.Subscription == name {
-			cloned := *n
-			checkList = append(checkList, &cloned)
+		published[n.DedupKey()] = n
+		if n.Subscription != name {
+			continue
 		}
+		checkList = append(checkList, n.Clone())
+		counterparts = append(counterparts, n)
 	}
 	if len(checkList) == 0 {
 		return fmt.Errorf("订阅 %s 当前没有节点", name)
 	}
-	a.checkNodes(ctx, checkList, a.dialerTargets()...)
+	// 已发布节点在测速期间显示「测速中…」，每测完一个立即换成它的新延迟（只转发
+	// 展示行，权威字段仍等提交回填）；提前返回或提交后由 settleDisplay 复位。
+	markTesting(counterparts)
+	defer settleDisplay(counterparts)
+	a.checkNodes(ctx, checkList, pool.CheckOptions{OnResult: func(checked *node.Node) {
+		if existing := published[checked.DedupKey()]; existing != nil {
+			existing.PublishDisplay(checked.Display())
+		}
+	}}, a.dialerTargets()...)
 
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
@@ -559,6 +602,26 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 		current.FailReason = checked.FailReason
 	}
 	return a.applyNodes(ctx, latest)
+}
+
+// nodesByDedupKey 按领域身份（DedupKey）索引当前已发布节点。
+//
+// 参数：无；取一次节点快照，不持有后续操作期间的锁。
+//
+// 返回值：map[string]*node.Node，DedupKey 到已发布节点的映射。
+//
+// 错误情况：无。用于把私有节点（克隆或新拉取）的测速结果按身份转发回对应的已发布节点，
+// 让控制台在测速进行中就能逐节点看到新延迟。这里用合并阶段同一个身份口径：没有
+// auth-key 的多个 Tailscale 审批节点共用同一个 Key，只有 DedupKey 能区分它们。
+func (a *App) nodesByDedupKey() map[string]*node.Node {
+	nodes := a.Nodes()
+	published := make(map[string]*node.Node, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			published[n.DedupKey()] = n
+		}
+	}
+	return published
 }
 
 // lockSubOp 获取指定订阅的操作锁，使同一订阅的刷新/测速串行执行。

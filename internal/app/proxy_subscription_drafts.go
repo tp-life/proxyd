@@ -104,7 +104,8 @@ func (a *App) CreateSubscriptionDraft(ctx context.Context, name string) (Subscri
 	if len(fresh) == 0 {
 		return SubscriptionDraftView{}, fmt.Errorf("订阅 %q 没有可预览的节点", name)
 	}
-	a.checkNodes(ctx, fresh, a.dialerTargets()...)
+	// 草稿候选的测速结果只用于预览对比，不转发给已发布节点：预览不得影响运行态展示。
+	a.checkNodes(ctx, fresh, pool.CheckOptions{}, a.dialerTargets()...)
 
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
@@ -112,8 +113,9 @@ func (a *App) CreateSubscriptionDraft(ctx context.Context, name string) (Subscri
 		return SubscriptionDraftView{}, err
 	}
 
-	// MergeFiltered 会原地同步唯一展示名与 Mapping.name。其它来源必须先克隆，
-	// 否则仅仅生成草稿就会修改 a.nodes 指向的共享实体，违反“预览不影响运行态”。
+	// 其它来源先克隆：MergeFiltered 已保证不改写输入（见其并发契约），这里再复制一层
+	// 是为了让草稿长期驻留内存的候选集合与运行态节点彻底解耦——草稿的后续处理、
+	// 对比与丢弃都不会触碰 a.nodes 指向的共享实体，“预览不影响运行态”由此成立。
 	current := a.Nodes()
 	groups := map[string][]*node.Node{name: fresh}
 	for _, existing := range current {
@@ -331,14 +333,14 @@ func cloneSubscriptionDraftNode(source *node.Node) *node.Node {
 	if source == nil {
 		return nil
 	}
-	cloned := *source
+	cloned := source.Clone() // Node 含原子字段，必须逐字段复制而非整结构赋值
 	if source.Mapping != nil {
 		cloned.Mapping = make(map[string]any, len(source.Mapping))
 		for key, value := range source.Mapping {
 			cloned.Mapping[key] = value
 		}
 	}
-	return &cloned
+	return cloned
 }
 
 // cloneSubscriptionDraftNodes 批量克隆草稿候选节点。

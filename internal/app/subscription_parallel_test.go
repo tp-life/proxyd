@@ -15,6 +15,7 @@ import (
 
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
+	"proxyd/internal/proxy/pool"
 )
 
 // TestTestSubscriptionRunsConcurrentlyAcrossSubscriptions 验证不同订阅的测速可以并行：
@@ -109,10 +110,13 @@ func TestTestSubscriptionRunsConcurrentlyAcrossSubscriptions(t *testing.T) {
 	}
 	t.Cleanup(a.Shutdown)
 	// server 分别写 127.0.0.1 与 localhost，保证两节点 Key 不同、不会在回填时互相覆盖。
-	a.nodes = []*node.Node{
-		connectProxyNode("node-a", "a", "127.0.0.1", proxyPort),
-		connectProxyNode("node-b", "b", "localhost", proxyPort),
-	}
+	// node-a 带上轮结果：单订阅测速期间它必须显示「测速中」并保留这组轮前稳定值，
+	// 而不是被探测过程中的中间状态覆盖（生产路径上展示行由解析/快照发布）。
+	nodeA := connectProxyNode("node-a", "a", "127.0.0.1", proxyPort)
+	nodeA.Alive = true
+	nodeA.Delay = 555
+	nodeA.PublishResult()
+	a.nodes = []*node.Node{nodeA, connectProxyNode("node-b", "b", "localhost", proxyPort)}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -130,6 +134,17 @@ func TestTestSubscriptionRunsConcurrentlyAcrossSubscriptions(t *testing.T) {
 	}
 	if !a.Testing() {
 		t.Fatal("测速期间 Testing() 应为 true")
+	}
+	// 单订阅测速在克隆上执行，已发布节点的展示行由编排层逐节点转发；此刻它还没有
+	// 结果，必须仍显示「测速中」并保留轮前延迟，而不是先清空再整批刷出。
+	if d := nodeA.Display(); !d.Testing || !d.Alive || d.Delay != 555 {
+		t.Fatalf("测速期间已发布节点应保留轮前稳定值并标记测速中: %+v", d)
+	}
+	// 另一轮检测结束时不得熄灭 A 仍在进行的标记：全局标志必须是轮次计数而不是
+	// 布尔量，否则前端会提前停止加密轮询并收起「测速中」提示。
+	a.checkNodes(ctx, nil, pool.CheckOptions{})
+	if !a.Testing() {
+		t.Fatal("一轮空检测结束后，仍在进行的订阅测速不应被误判为结束")
 	}
 
 	errB := make(chan error, 1)
@@ -160,6 +175,13 @@ func TestTestSubscriptionRunsConcurrentlyAcrossSubscriptions(t *testing.T) {
 	}
 	if a.Testing() {
 		t.Fatal("测速结束后 Testing() 应为 false")
+	}
+	// 收尾后展示行换成回填后的最终结果：不能残留「测速中」，也不能停在轮前延迟上。
+	if d := nodeA.Display(); d.Testing || !d.Alive || d.Delay == 555 {
+		t.Fatalf("测速结束后展示行应为最终结果: %+v", d)
+	}
+	if d := nodeA.Display(); d.Alive != nodeA.Alive || d.Delay != nodeA.Delay {
+		t.Fatalf("展示行应与回填后的权威字段一致: display=%+v node=%+v", d, nodeA)
 	}
 }
 
