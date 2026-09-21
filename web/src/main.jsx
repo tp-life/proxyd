@@ -165,6 +165,9 @@ function App() {
   const [adblock, setAdblock] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
+  // fastPollUntil 是测速加密轮询的截止时刻（epoch 毫秒）。手动触发后开启，用来覆盖
+  // 后端还没置位 testing 的空窗：同步订阅要先下载数秒才进入健康检测。
+  const [fastPollUntil, setFastPollUntil] = useState(0);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -215,6 +218,43 @@ function App() {
   );
 
   /**
+   * applyOverview 把一份概览响应应用到页面状态。
+   *
+   * 参数说明：nextOverview 为 /api/overview 的响应对象。
+   *
+   * 返回值说明：返回无。
+   *
+   * 可能的异常/错误情况：无；首次填充的表单默认值只在为空时写入，不覆盖用户输入。
+   */
+  const applyOverview = useCallback((nextOverview) => {
+    setOverview(nextOverview);
+    setForms((current) => ({
+      ...current,
+      mainPort: current.mainPort || String(nextOverview.mixed_port || ""),
+      rangeLo: current.rangeLo || String(nextOverview.port_range?.[0] || ""),
+      rangeHi: current.rangeHi || String(nextOverview.port_range?.[1] || ""),
+      autoPort: current.autoPort || String(nextOverview.auto_port || 41998),
+    }));
+  }, []);
+
+  /**
+   * loadOverview 只读取并应用代理概览，供测速期间的高频轮询使用。
+   *
+   * 参数说明：signal 为 AbortSignal，限时取消单次请求。
+   *
+   * 返回值说明：返回 Promise<void>。
+   *
+   * 可能的异常/错误情况：后端不可达或 JSON 解析失败时抛出，由调用方决定是否提示；
+   * 该函数刻意不触碰 loading，顶栏「正在同步状态」与同步图标不会因此反复闪烁。
+   */
+  const loadOverview = useCallback(
+    async (signal) => {
+      applyOverview(await requestJSON("/api/overview", { signal }));
+    },
+    [applyOverview],
+  );
+
+  /**
    * load 独立更新代理概览、模块和规则源，单一来源失败不阻断系统与远程页面。
    *
    * 参数说明：
@@ -246,17 +286,7 @@ function App() {
           setAdblock(nextAdblock);
           setForms((current) => ({ ...current, adblockURL: current.adblockURL || nextAdblock.rule_url || "" }));
         }
-        if (overviewResult.status === "fulfilled") {
-          const nextOverview = overviewResult.value;
-          setOverview(nextOverview);
-          setForms((current) => ({
-            ...current,
-            mainPort: current.mainPort || String(nextOverview.mixed_port || ""),
-            rangeLo: current.rangeLo || String(nextOverview.port_range?.[0] || ""),
-            rangeHi: current.rangeHi || String(nextOverview.port_range?.[1] || ""),
-            autoPort: current.autoPort || String(nextOverview.auto_port || 41998),
-          }));
-        }
+        if (overviewResult.status === "fulfilled") applyOverview(overviewResult.value);
         // 禁用代理时，其明细接口故障不应成为全局总览的待办或阻断远程模块状态。
         const currentModules = modulesResult.status === "fulfilled" ? modulesResult.value || [] : [];
         const proxyVisible = currentModules.some((module) => module.id === "proxy" && module.enabled);
@@ -269,7 +299,7 @@ function App() {
         setLoading(false);
       }
     },
-    [showToast],
+    [applyOverview, showToast],
   );
 
   /**
@@ -585,6 +615,8 @@ function App() {
     async (url, label) => {
       try {
         setBusy(label);
+        // 同步订阅要先下载，测速要等后端取锁与调度；宽限期内先加密轮询，等 testing 接力。
+        setFastPollUntil(Date.now() + 120000);
         await requestJSON(url, { method: "POST" });
         showToast(`${label}已开始`);
         await load(true);
@@ -630,6 +662,34 @@ function App() {
     const timer = window.setInterval(() => load(true), 60000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  // 测速期间加密轮询概览：延迟是逐节点落定的，60s 的常规周期看不到这个过程。
+  // 只读概览、只更新 overview（不动 loading），请求完成后再排下一轮避免请求堆叠。
+  const fastPolling = Boolean(busy) || Boolean(overview?.testing) || fastPollUntil > Date.now();
+  useEffect(() => {
+    if (!fastPolling) return undefined;
+    let stopped = false;
+    let timer;
+    const startedAt = Date.now();
+
+    /** tick 读取一次概览；网络抖动只跳过本轮，不打断正在进行的测速展示。 */
+    async function tick() {
+      try {
+        await loadOverview(AbortSignal.timeout(8000));
+      } catch {
+        // 概览暂时不可读时静默重试，错误提示由常规轮询负责。
+      }
+      // 单次激活最多持续 10 分钟：后端长时间不可达时不会把高频请求一直打下去，
+      // 超时后回落到 60s 常规轮询，测速结束时下一轮响应也会让本效果自行收尾。
+      if (!stopped && Date.now() - startedAt < 600000) timer = window.setTimeout(tick, 1500);
+    }
+
+    timer = window.setTimeout(tick, 1500);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [fastPolling, loadOverview]);
 
   useEffect(() => {
     /**
@@ -1033,6 +1093,8 @@ function App() {
     }
     try {
       setBusy(`${name} ${operation.label}`);
+      // 单订阅接口会等待下载、测速和热更新全部完成，期间保持加密轮询才能逐节点看到延迟。
+      setFastPollUntil(Date.now() + 180000);
       const result = await requestJSON(operation.path, { method: operation.method });
       // 单订阅接口会等待下载、解析、测速和热更新全部完成，因此这里展示的是完成
       // 通知而非仅“已开始”；同步过程中不增加确认对话框，保持一次点击即可执行。

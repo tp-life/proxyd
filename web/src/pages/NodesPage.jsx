@@ -169,9 +169,9 @@ export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete,
     () => new Map((overview.port_assignments || []).map((entry) => [`${entry.subscription}:${entry.node}`, entry.port])),
     [overview.port_assignments],
   );
-  // 手动触发后 busy 立即为「测速」；后台检测期间由 overview.testing 接力，
-  // 避免延迟列在新结果出来前继续展示容易被误读为已完成的上轮延迟。
-  const testing = busy === "测速" || Boolean(overview.testing);
+  // 逐节点展示测速进度：后端给每个节点的 testing 标记，测完一个就换掉一个「测速中…」。
+  // 只有手动触发后的短暂空窗（后端还没开跑、没有节点级标记）由 busy 兜底。
+  const testing = busy === "测速";
   const managedManualNodes = useMemo(
     () => (overview.manual_nodes || []).filter((node) => {
       if (dedicatedTunnel) return node.type === workspace;
@@ -1004,7 +1004,9 @@ function TunnelResources({ groups, manualNodes, overviewNodes, pageMeta, runtime
                     <Badge variant="secondary">隧道节点</Badge>
                   </div>
                   <code>{manualProxySummary(node)}</code>
-                  {runtimeNode && !managedTailscale && <span className={delayClass(runtimeNode)}>{formatDelay(runtimeNode)}</span>}
+                  {runtimeNode && !managedTailscale && (runtimeNode.testing
+                    ? <span className="delay-muted">测速中…</span>
+                    : <span className={delayClass(runtimeNode)}>{formatDelay(runtimeNode)}</span>)}
                   <StatusBadge
                     ok={Boolean(runtimeNode?.alive)}
                     text={runtimeNode ? (managedTailscale ? "mihomo 托管" : runtimeNode.alive ? "可用" : "失效") : "未加载"}
@@ -1093,7 +1095,8 @@ function tunnelGroupMemberNames(group, overviewNodes) {
  * - assignmentMap: Map<string, number>，按来源与节点名索引的稳定端口分配。
  * - defaultExit: string，当前默认出口（节点名 / AUTO / DIRECT）。
  * - mappingEnabled: boolean，节点一对一 listener 是否启用。
- * - testing: boolean，节点健康检测进行中；延迟列显示「测速中…」而不是上一轮结果。
+ * - testing: boolean，手动触发测速后的短暂空窗；此时整列显示「测速中…」。
+ *   常态下按每个节点自己的 node.testing 逐节点显示，测完一个立即换上新延迟。
  * - onSelectExit: Function，设置默认出口回调。
  *
  * 返回值说明：
@@ -1138,7 +1141,7 @@ function NodeTable({ nodes, assignmentMap = new Map(), defaultExit = "", mapping
         header: "延迟",
         sortable: true,
         width: "105px",
-        cell: (node) => testing
+        cell: (node) => (node.testing || testing)
           ? <span className="delay-muted">测速中…</span>
           : isMihomoManagedTailscale(node)
             ? <span className="delay-muted" title="未配置 Exit Node；由 mihomo 在首次匹配流量时启动">按需启动</span>

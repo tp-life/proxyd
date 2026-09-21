@@ -295,6 +295,9 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 		if len(nodes) == 0 {
 			return fmt.Errorf("no nodes available from any subscription")
 		}
+		// 重新解析出来的节点先继承同一身份上一轮的展示值，再发布：控制台在检测期间
+		// 保持稳定状态，不会整列闪成「失效/—」再逐个回填。
+		a.inheritDisplay(nodes)
 		a.mu.Lock()
 		a.nodes = nodes
 		a.subInfos = infos
@@ -353,12 +356,16 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 		if len(nodes) == 0 {
 			return fmt.Errorf("no cached or manual nodes available; sync a subscription manually first")
 		}
+		// 手动节点每轮都重新解析，先继承同一身份的上一轮展示值；再提前发布（与下载路径
+		// 一致），这样检测期间概览看到的就是本轮节点对象，能逐节点标记「测速中」并换上新延迟。
+		a.inheritDisplay(nodes)
 		a.mu.Lock()
+		a.nodes = nodes
 		a.subInfos = infos
 		a.mu.Unlock()
 	}
 
-	a.checkNodes(ctx, nodes, a.dialerTargets()...)
+	a.checkNodes(ctx, nodes, pool.CheckOptions{}, a.dialerTargets()...)
 	return a.applyNodes(ctx, nodes)
 }
 
@@ -366,33 +373,87 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 //
 // 参数：无。
 //
-// 返回值：bool，pool.Check 执行期间为 true。
+// 返回值：bool，任一轮 pool.Check 执行期间为 true。
 //
-// 错误情况：无；只读原子标记，供概览接口把延迟列降级为「测速中」。
+// 错误情况：无；只读原子计数，供概览暴露全局「测速中」状态（控制台据此决定是否加密
+// 轮询）。逐节点的延迟列以节点自己的展示行为准。
 func (a *App) Testing() bool {
-	return a.testing.Load()
+	return a.testRounds.Load() > 0
 }
 
-// checkNodes 包裹 pool.Check，检测期间置位 Testing 标记。
+// checkNodes 包裹 pool.Check，检测期间维护全局「测速中」轮数。
 //
 // 参数：
 //   - ctx: context.Context，控制整轮检测的取消与超时。
 //   - nodes: []*node.Node，待检测节点，结果原地写回。
+//   - opts: pool.CheckOptions，逐节点结果回调等可选行为。
 //   - dialerTargets: ...string，可作为链式目标的策略组名称。
 //
 // 返回值：无；单节点失败通过节点状态表达。
 //
-// 错误情况：检测串行化由调用方的 refreshing 锁保证，标记不存在并发竞争；
-// 即使 panic 也经 defer 复位，不会让「测速中」状态残留。
-func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets ...string) {
-	a.testing.Store(true)
-	defer a.testing.Store(false)
+// 错误情况：检测串行化由调用方的 refreshing 锁保证（按订阅的测速之间可以并行，
+// 因此用计数而不是布尔标记）；即使 panic 也经 defer 复位，不会让「测速中」状态残留。
+func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, opts pool.CheckOptions, dialerTargets ...string) {
+	a.testRounds.Add(1)
+	defer a.testRounds.Add(-1)
 	a.mu.RLock()
 	healthURL := a.cfg.HealthURL
 	healthTimeout := a.cfg.HealthTimeout.D()
 	stateDir := a.cfg.StateDir
 	a.mu.RUnlock()
-	pool.Check(ctx, nodes, healthURL, healthTimeout, 32, stateDir, dialerTargets...)
+	pool.CheckWithOptions(ctx, nodes, healthURL, healthTimeout, 32, stateDir, opts, dialerTargets...)
+}
+
+// inheritDisplay 让新解析出来的节点继承同一身份（DedupKey）上一轮节点的展示行。
+//
+// 参数：nodes 为即将发布的本轮节点集合（尚未进入运行态）。
+//
+// 返回值：无。
+//
+// 错误情况：无。只按领域身份匹配：服务器或凭据变化意味着这是另一个出口，必须从零开始
+// 测速，不能继承旧结果；没有 auth-key 的多个 Tailscale 审批节点共用同一个 Key，也只有
+// DedupKey 能区分它们。用于避免「重新解析 → 检测结束」这段窗口里控制台整列闪成
+// 「失效 / —」——逐节点展示后这段中间态是可见的，必须保持上一轮的稳定值。
+func (a *App) inheritDisplay(nodes []*node.Node) {
+	previous := a.nodesByDedupKey()
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		existing := previous[n.DedupKey()]
+		if existing == nil || existing == n {
+			continue
+		}
+		n.PublishDisplay(existing.Display())
+	}
+}
+
+// markTesting 把节点标记为「测速中」，并固化它们当前的展示值。
+//
+// 参数：nodes 为待标记节点，nil 元素被忽略。
+//
+// 返回值：无。
+//
+// 错误情况：无。用于在测速开始前向概览预告进度：克隆节点上测速时，已发布节点自己
+// 不会收到 pool 的标记，需要调用方显式标记，并在收尾时用 settleDisplay 复位。
+func markTesting(nodes []*node.Node) {
+	for _, n := range nodes {
+		n.MarkTesting()
+	}
+}
+
+// settleDisplay 按节点当前的权威字段发布最终展示行。
+//
+// 参数：nodes 为待收尾节点，nil 元素被忽略。
+//
+// 返回值：无。
+//
+// 错误情况：无；可重复调用。负责兜住所有提前返回路径（整轮取消、全部节点失效、
+// 提交前发现订阅已变更等），避免节点永久停留在「测速中」。
+func settleDisplay(nodes []*node.Node) {
+	for _, n := range nodes {
+		n.PublishResult()
+	}
 }
 
 // applyNodes 执行健康检测后的流水线尾部，并完成 mihomo 托管节点的二阶段验证。
@@ -408,6 +469,10 @@ func (a *App) checkNodes(ctx context.Context, nodes []*node.Node, dialerTargets 
 // 配置了 Exit Node 的 Tailscale 与普通链式节点随后通过 Runner.URLTest 验证真实链路。
 // 若候选失败，会重新分配端口并热加载一次，确保失败链路不会残留在最终监听入口。
 func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
+	// 无论本轮如何收场，都把展示行复位成最终结果：链路探测阶段的节点已经逐节点发布，
+	// 而「全部节点失效」「端口重新分配失败」等提前返回也必须让控制台不再显示「测速中…」。
+	defer settleDisplay(nodes)
+
 	// 先更新应用节点快照，让 GenerateWithNodes 能看到未分配端口的链路依赖。
 	// 刷新失败时仍保留本轮状态和失败原因，便于 Web/CLI 解释问题，而不是展示旧假象。
 	a.mu.Lock()
@@ -559,11 +624,15 @@ func (a *App) verifyMihomoManagedNodes(ctx context.Context, nodes []*node.Node) 
 			n.Alive = false
 			n.Delay = 0
 			n.FailReason = firstErrorLine(err.Error())
+			// 每个节点探测完立即发布展示行：这些节点的真实延迟只能在这里得到，
+			// 逐节点发布让控制台在大批链路探测期间也能逐个换掉「测速中…」。
+			n.PublishResult()
 			availabilityChanged = true
 			continue
 		}
 		n.Delay = delay
 		n.FailReason = ""
+		n.PublishResult()
 	}
 	return availabilityChanged
 }

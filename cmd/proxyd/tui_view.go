@@ -517,7 +517,7 @@ func (m tuiModel) renderNodesPage(width int) (string, int) {
 			node.Name,
 			node.Subscription,
 			detail,
-			formatTUIDelay(node.Delay, node.Alive),
+			formatTUINodeDelay(node),
 			tuiPortOrDash(node.Port),
 		})
 	}
@@ -1691,6 +1691,22 @@ func formatTUIDelay(delay uint16, alive bool) string {
 		return "—"
 	}
 	return fmt.Sprintf("%dms", delay)
+}
+
+// formatTUINodeDelay 渲染节点表的延迟列，与 Web 控制台保持一致。
+//
+// 参数说明：
+//   - node: api.NodeEntry，概览返回的节点记录。
+//
+// 返回值说明：string，该节点本轮仍在测速时返回“测速中”，否则回退到 formatTUIDelay
+// （未测出时返回破折号）。节点缓存 3 秒刷新一次，因此逐个完成的结果会逐个出现。
+//
+// 错误情况：无；字段缺失按不可用处理。
+func formatTUINodeDelay(node api.NodeEntry) string {
+	if node.Testing {
+		return "测速中"
+	}
+	return formatTUIDelay(node.Delay, node.Alive)
 }
 
 // formatTUILogTime 将 RFC3339 日志时间压缩为本地时分秒。

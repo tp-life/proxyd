@@ -19,6 +19,14 @@ const defaultConcurrency = 32
 // tsnet/openvpn 首次拨号涉及 DERP 协商或 TLS 握手，普通节点的秒级超时对它们必然过紧。
 const tunnelTimeoutFactor = 3
 
+// CheckOptions 是 CheckWithOptions 的可选行为开关。
+type CheckOptions struct {
+	// OnResult 在单个节点的本轮结果最终落定后调用，节点参数即刚被写回的节点；可为 nil。
+	// 用于把克隆节点上得到的结果增量发布给对应的已发布节点（见 App.TestSubscription）：
+	// 回调发生在该节点的字段写回之后，回调方不应再修改节点。
+	OnResult func(n *node.Node)
+}
+
 // Check 并发地检测普通节点，并为 Tailscale 与 dialer-proxy 节点建立可加载候选状态。
 //
 // 参数：
@@ -39,8 +47,27 @@ const tunnelTimeoutFactor = 3
 // mihomo 能否解析配置。链式节点同样先校验结构、依赖和循环引用，需公网探测的
 // Tailscale Exit Node 与普通链式节点由应用层在完整代理表加载后执行端到端测速。
 func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Duration, concurrency int, stateDir string, dialerTargets ...string) {
+	CheckWithOptions(ctx, nodes, url, timeout, concurrency, stateDir, CheckOptions{}, dialerTargets...)
+}
+
+// CheckWithOptions 与 Check 相同，但可以额外指定结果回调等可选行为。
+//
+// 参数：前六个参数与 dialerTargets 同 Check；opts 见 CheckOptions。
+//
+// 返回值：无；单节点失败通过节点状态表达。
+//
+// 错误情况：同 Check。回调在 worker 协程内同步执行，回调方必须自行保证线程安全且不可
+// 阻塞过久，否则会拖慢整轮检测。
+func CheckWithOptions(ctx context.Context, nodes []*node.Node, url string, timeout time.Duration, concurrency int, stateDir string, opts CheckOptions, dialerTargets ...string) {
 	if concurrency <= 0 {
 		concurrency = defaultConcurrency
+	}
+
+	// 先整轮标记「测速中」再启动 worker：标记会把本轮开始前的存活状态与延迟固化成
+	// 展示行，概览在结果落定前一直返回这组稳定值。链式候选节点同样标记，真实结果由
+	// 应用层在完整代理表加载后探测，收尾由应用层负责（见 App.settleDisplay）。
+	for _, n := range nodes {
+		n.MarkTesting()
 	}
 
 	ordinaryCount := 0
@@ -64,6 +91,9 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 				// 即使整轮已取消，也让 checkOne 处理每个排队节点。它会从已取消的父上下文
 				// 立即返回并统一清空旧 Alive/Delay 状态，避免刷新取消后残留上轮健康结果。
 				checkOne(ctx, n, url, timeout, stateDir)
+				if opts.OnResult != nil {
+					opts.OnResult(n)
+				}
 			}
 		}()
 	}
@@ -90,7 +120,10 @@ func Check(ctx context.Context, nodes []*node.Node, url string, timeout time.Dur
 // mihomo 候选且延迟保持 0；失败写入首行错误。
 //
 // 错误情况：配置无法解析、网络失败或超时都将节点标记为不可用，不向调用方抛错。
+// 调用方（Check）已经先调用 MarkTesting 固化本轮开始前的展示值，本函数在所有返回
+// 路径上发布最终结果行，控制台据此逐个节点换掉「测速中…」。
 func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Duration, stateDir string) {
+	defer n.PublishResult()
 	n.Alive = false
 	n.Delay = 0
 	n.FailReason = ""
@@ -141,6 +174,9 @@ func checkOne(ctx context.Context, n *node.Node, url string, timeout time.Durati
 // 返回值：无；链式节点的候选状态原地写回。
 //
 // 错误情况：依赖节点不可用、引用不存在、循环引用或节点配置无法解析时标记为不可用。
+// 候选状态（含从依赖继承的延迟、未知目标使用的最大值）只是加载配置所需的结构性结论，
+// 不发布到展示行：这些节点的展示行保持「测速中」，直到应用层在完整代理表加载后探测出
+// 真实结果或收尾发布。
 // `DIRECT` 是 mihomo 内置出站，已配置策略组由 dialerTargets 明确传入；其它未知名称
 // 不作为候选，避免被 include/exclude 移除的依赖使整份运行配置自检失败。
 func resolveDialerCandidates(nodes []*node.Node, dialerTargets []string) {

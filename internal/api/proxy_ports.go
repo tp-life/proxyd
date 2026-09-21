@@ -27,6 +27,9 @@ type PortEntry struct {
 	Subscription string `json:"subscription"`
 	Delay        uint16 `json:"delay"`
 	Alive        bool   `json:"alive"`
+	// Testing 表示该节点本轮健康检测尚未产出结果，与节点列表同义：延迟列显示
+	// 「测速中…」，delay/alive 为本轮开始前的稳定值。
+	Testing bool `json:"testing,omitempty"`
 }
 
 func (s *Server) handlePorts(w http.ResponseWriter, _ *http.Request) {
@@ -44,12 +47,15 @@ func (s *Server) assignmentEntries() []PortEntry {
 	assigns := s.app.Assignments()
 	entries := make([]PortEntry, 0, len(assigns))
 	for _, as := range assigns {
+		// 与节点列表同源：读节点发布的展示行，测速期间返回轮前稳定值 + testing 标记。
+		display := as.Node.Display()
 		entries = append(entries, PortEntry{
 			Port:         as.Port,
 			Node:         as.Node.Name,
 			Subscription: as.Node.Subscription,
-			Delay:        as.Node.Delay,
-			Alive:        as.Node.Alive,
+			Delay:        display.Delay,
+			Alive:        display.Alive,
+			Testing:      display.Testing,
 		})
 	}
 	return entries

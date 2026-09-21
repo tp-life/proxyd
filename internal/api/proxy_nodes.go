@@ -33,6 +33,9 @@ type NodeEntry struct {
 	FailReason   string `json:"fail_reason,omitempty"` // 测速失败原因
 	Port         int    `json:"port"`                  // 0 表示未映射
 	Tunnel       bool   `json:"tunnel,omitempty"`      // 隧道类（VPN 语义）出站：不参与端口映射，经分组出口使用
+	// Testing 表示该节点本轮健康检测尚未产出结果：延迟列应显示「测速中…」，
+	// delay/alive 是本轮开始前的稳定值。测速结束后逐节点变为 false。
+	Testing bool `json:"testing,omitempty"`
 }
 
 // Overview 是 /api/overview 的响应。
@@ -52,7 +55,7 @@ type Overview struct {
 	AutostartRuntime   autostart.RuntimeStatus `json:"autostart_runtime"`    // 注册与托管进程状态分开，启动失败不会隐藏在开关后
 	ServerTime         string                  `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
 	PortRange          [2]int                  `json:"port_range"`
-	Testing            bool                    `json:"testing"` // 节点健康检测进行中；前端应把延迟列显示为「测速中」而非旧值
+	Testing            bool                    `json:"testing"` // 任一轮健康检测进行中；前端据此加密轮询，逐节点的延迟列以 NodeEntry.Testing 为准
 	Subs               []SubEntry              `json:"subscriptions"`
 	ManualNodes        []app.ManualNodeEntry   `json:"manual_nodes"`
 	Ports              []PortEntry             `json:"ports"`            // 当前实际监听的一对一节点端口
@@ -118,10 +121,13 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		ov.Subs = append(ov.Subs, entry)
 	}
 	for _, n := range s.app.Nodes() {
-		ov.Nodes = append(ov.Nodes, newNodeEntry(n, portOf[n.Name]))
+		entry := newNodeEntry(n, portOf[n.Name])
+		ov.Nodes = append(ov.Nodes, entry)
 		if i, ok := subs[n.Subscription]; ok {
 			ov.Subs[i].Total++
-			if n.Alive {
+			// 存活计数复用同一行展示值：订阅徽标与节点列表不会出现口径不一致，
+			// 也不会在测速期间因为读到半成品状态而闪红。
+			if entry.Alive {
 				ov.Subs[i].Alive++
 			}
 		}
@@ -219,17 +225,23 @@ func (s *Server) handleDelManualNode(w http.ResponseWriter, r *http.Request) {
 
 // newNodeEntry 把运行态节点转换为列表记录；隧道类节点没有端口映射（Port 恒为 0）
 // 是正常状态，通过 Tunnel 标识让控制台与 CLI 区分展示，而不是当作异常。
+//
+// 延迟与存活状态取自节点发布的展示行（见 node.Display）：健康检测进行中时它固定为本轮
+// 开始前的稳定值并带 Testing 标记，因此概览既不会读到 worker 正在写回的中间状态，
+// 也不会在测速期间让状态列与计数抖动。
 func newNodeEntry(n *node.Node, port int) NodeEntry {
+	display := n.Display()
 	return NodeEntry{
 		Name:         n.Name,
 		Key:          n.Key(),
 		Type:         nodeType(n),
 		Subscription: n.Subscription,
-		Delay:        n.Delay,
-		Alive:        n.Alive,
-		FailReason:   n.FailReason,
+		Delay:        display.Delay,
+		Alive:        display.Alive,
+		FailReason:   display.FailReason,
 		Port:         port,
 		Tunnel:       n.IsTunnel(),
+		Testing:      display.Testing,
 	}
 }
 

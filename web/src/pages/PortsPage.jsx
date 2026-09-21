@@ -57,7 +57,10 @@ export function PortsPage({ overview, portSort, onCopy, onCopyEnv, onSort, onTog
         header: "延迟",
         sortable: true,
         width: "110px",
-        cell: (port) => <span className={delayClass(port)}>{formatDelay(port)}</span>,
+        // 与节点页同源：测速中的节点逐节点显示「测速中…」，完成一个换一个。
+        cell: (port) => (port.testing
+          ? <span className="delay-muted">测速中…</span>
+          : <span className={delayClass(port)}>{formatDelay(port)}</span>),
         sortValue: (port) => port.alive && port.delay > 0 ? port.delay : Number.POSITIVE_INFINITY,
       },
       {

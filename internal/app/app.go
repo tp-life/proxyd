@@ -116,9 +116,10 @@ type App struct {
 	// subOpMu 只保护该表的懒初始化，不覆盖操作本身。
 	subOpMu sync.Mutex
 	subOps  map[string]*sync.Mutex
-	// testing 标记节点健康检测（测速）是否正在进行；检测期间旧延迟尚未失效，
-	// 概览接口据此让前端把延迟列显示为「测速中」，而不是容易误读的上轮结果。
-	testing atomic.Bool
+	// testRounds 是正在进行中的健康检测（测速）轮数：不同订阅的测速可以并行，用计数
+	// 而不是布尔量，先结束的一轮不会把仍在跑的那轮标记清掉。概览的全局 testing 标志
+	// 由它导出；逐节点的「测速中」显示以节点自己的展示行为准（见 node.Display）。
+	testRounds atomic.Int32
 
 	// tunFD 是 tun-helper 创建并注入 mihomo 的 utun 文件描述符（纯运行时状态，
 	// 不落盘），0 表示未持有；仅在 refreshing 锁内访问。fd 随配置成功应用后归

@@ -68,6 +68,11 @@ func TestUpdateSubscriptionRenameOnlySkipsFetch(t *testing.T) {
 	if a.nodes[0].Alive {
 		t.Fatal("复用路径不应重新测速，节点存活状态应保持原值")
 	}
+	// 迁移发生在私有副本上：改名前的对象保持原样，概览等并发读者不会看到被就地改写的节点
+	// （见 node.Node 的并发契约）。
+	if deadNode.Subscription != "old" || a.nodes[0] == deadNode {
+		t.Fatalf("改名不得原地修改原有节点对象: %+v", deadNode)
+	}
 	if a.subInfos["new"].Total != 1024 {
 		t.Fatalf("用量缓存未跟随改名迁移: %+v", a.subInfos)
 	}

@@ -434,6 +434,41 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("test: status=%d", resp.StatusCode)
 	}
 
+	// ---- 逐节点测速进度：测完一个换一个，收尾后不得残留「测速中」----
+	// 概览在检测期间给出的是节点自己的展示行（轮前稳定值 + testing 标记），
+	// 结束后每个节点都必须落到最终结果，否则控制台延迟列会永久停在「测速中…」。
+	{
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			var ov struct {
+				Testing bool `json:"testing"`
+				Nodes   []struct {
+					Name    string `json:"name"`
+					Alive   bool   `json:"alive"`
+					Delay   uint16 `json:"delay"`
+					Testing bool   `json:"testing"`
+				} `json:"nodes"`
+			}
+			r, err := http.Get(base + "/api/overview")
+			if err == nil {
+				_ = json.NewDecoder(r.Body).Decode(&ov)
+				r.Body.Close()
+			}
+			if !ov.Testing && len(ov.Nodes) > 0 {
+				for _, n := range ov.Nodes {
+					if n.Testing {
+						t.Fatalf("测速结束后节点 %s 仍显示测速中", n.Name)
+					}
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("等待手动测速结束超时: testing=%v nodes=%d", ov.Testing, len(ov.Nodes))
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
 	// ---- 订阅管理：添加 → 持久化到配置文件；删除 → 同步移除 ----
 	resp, err = http.Post(base+"/api/subscriptions", "application/json",
 		strings.NewReader(`{"url":"`+sub.URL+`/second"}`))

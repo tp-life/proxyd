@@ -95,14 +95,17 @@ func LoadSnapshot(path string) (*Snapshot, error) {
 			continue
 		}
 		sn.Mapping["name"] = sn.Name // 保持与 Node.Name 同步
-		s.Nodes = append(s.Nodes, &Node{
+		n := &Node{
 			Name:         sn.Name,
 			Subscription: sn.Subscription,
 			Mapping:      sn.Mapping,
 			Alive:        sn.Alive,
 			Delay:        sn.Delay,
 			FailReason:   sn.FailReason,
-		})
+		}
+		// 快照恢复的节点会立即进入概览；先发布展示行，读方就不必回退到直接读字段。
+		n.PublishResult()
+		s.Nodes = append(s.Nodes, n)
 	}
 	return s, nil
 }
