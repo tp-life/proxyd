@@ -45,7 +45,7 @@ func Footprint() (uint64, bool) {
 	var counters processMemoryCounters
 	counters.CB = uint32(unsafe.Sizeof(counters))
 	ok, _, _ := procGetProcessMemoryInfo.Call(
-		uintptr(windows.GetCurrentProcess()),
+		uintptr(windows.CurrentProcess()),
 		uintptr(unsafe.Pointer(&counters)),
 		uintptr(counters.CB),
 	)
