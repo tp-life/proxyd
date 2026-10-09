@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/sftp"
 	ssh "github.com/tailscale/gliderssh"
 	gossh "golang.org/x/crypto/ssh"
 
@@ -87,11 +88,14 @@ func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string
 		// callbacks 与 HandleConn 在同一握手协程执行；会话索引的并发读写由 policy 锁保护。
 		defer func() { policy.finished(conn, attempted) }()
 		srv := &ssh.Server{
-			Handler:           func(sess ssh.Session) { shellSessionHandler(sess, shellUser) },
-			HandshakeTimeout:  30 * time.Second,
-			ChannelHandlers:   map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
-			RequestHandlers:   map[string]ssh.RequestHandler{},
-			SubsystemHandlers: map[string]ssh.SubsystemHandler{"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser) }},
+			Handler:          func(sess ssh.Session) { shellSessionHandler(sess, shellUser) },
+			HandshakeTimeout: 30 * time.Second,
+			ChannelHandlers:  map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
+			RequestHandlers:  map[string]ssh.RequestHandler{},
+			SubsystemHandlers: map[string]ssh.SubsystemHandler{
+				"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser) },
+				"sftp":               func(sess ssh.Session) { shellSFTPHandler(sess, shellUser) },
+			},
 		}
 		srv.PublicKeyHandler = func(_ ssh.Context, public ssh.PublicKey) error {
 			attempted = gossh.FingerprintSHA256(public)
@@ -111,6 +115,88 @@ func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string
 		srv.HandleConn(conn)
 	}, nil
 }
+
+// shellSFTPHandler 以与交互 shell 相同的本机用户权限处理标准 SFTP 子系统。
+//
+// 参数说明：
+//   - sess: ssh.Session，已经通过隧道身份及可选 SSH 公钥认证的会话。
+//   - shellUser: string，remote.shell-user 配置原值；客户端声明的 SSH 用户名不参与授权。
+//
+// 返回值说明：无；成功或失败均通过 SSH session 退出码结束。
+//
+// 错误情况：用户解析、SFTP 初始化或协议处理失败时写入 stderr 并返回退出码 1。
+// 当会话无需降权时可在当前进程安全运行；需要从 root 切换到 shell-user 时必须启动
+// 独立子进程，避免并发 goroutine 中修改整个 Go 进程的有效 UID。
+func shellSFTPHandler(sess ssh.Session, shellUser string) {
+	su, err := resolveSessionUser(shellUser)
+	if err != nil {
+		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
+		_ = sess.Exit(1)
+		return
+	}
+	if needsSFTPSubprocess(su) {
+		runShellSessionCommand(sess, newSFTPServerCommand(su))
+		return
+	}
+	server, err := sftp.NewServer(sess, sftp.WithServerWorkingDirectory(su.user.HomeDir))
+	if err != nil {
+		fmt.Fprintf(sess.Stderr(), "sftp init: %v\r\n", err)
+		_ = sess.Exit(1)
+		return
+	}
+	defer server.Close()
+	if err := server.Serve(); err != nil && !errors.Is(err, io.EOF) {
+		fmt.Fprintf(sess.Stderr(), "sftp serve: %v\r\n", err)
+		_ = sess.Exit(1)
+		return
+	}
+	_ = sess.Exit(0)
+}
+
+// ServeSFTP 在当前进程的标准流上运行 SFTP 协议服务。
+//
+// 功能说明：该函数仅供隐藏的 __remote-sftp 子命令调用。父进程在启动前设置工作目录、
+// 最小环境和 Unix 降权凭据，因此子进程的所有文件系统访问都受 shell-user 权限约束。
+//
+// 参数说明：
+//   - input: io.Reader，接收 SFTP 二进制请求，通常为 os.Stdin。
+//   - output: io.WriteCloser，写出 SFTP 二进制响应，通常为 os.Stdout。
+//
+// 返回值说明：error；客户端正常关闭输入时返回 nil，其余初始化或协议错误原样返回。
+//
+// 错误情况：协议初始化失败或底层标准流异常时返回错误；调用方只可把错误写到 stderr，
+// 绝不能混入 stdout 的 SFTP 数据流。
+func ServeSFTP(input io.Reader, output io.WriteCloser) error {
+	stream := &sftpHelperStream{Reader: input, output: output}
+	server, err := sftp.NewServer(stream)
+	if err != nil {
+		return fmt.Errorf("初始化 SFTP 服务失败: %w", err)
+	}
+	defer server.Close()
+	if err := server.Serve(); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("运行 SFTP 服务失败: %w", err)
+	}
+	return nil
+}
+
+// sftpHelperStream 把子进程分离的 stdin/stdout 适配为 pkg/sftp 所需的全双工流。
+// Reader 只读取 stdin，写入和关闭只作用于 stdout；进程退出会由操作系统回收 stdin。
+type sftpHelperStream struct {
+	io.Reader
+	output io.WriteCloser
+}
+
+// Write 把 SFTP 响应写入子进程 stdout。
+// 参数说明：data 为待写出的协议帧字节。
+// 返回值说明：写入字节数和底层错误。
+// 错误情况：stdout 已关闭或系统写入失败时返回错误。
+func (s *sftpHelperStream) Write(data []byte) (int, error) { return s.output.Write(data) }
+
+// Close 关闭 SFTP 响应输出流。
+// 参数说明：无。
+// 返回值说明：stdout 的关闭错误。
+// 错误情况：重复关闭或系统关闭失败时由底层返回错误。
+func (s *sftpHelperStream) Close() error { return s.output.Close() }
 
 // loadOrCreateShellHostKey 读取持久化 ed25519 SSH host key，不存在时原子生成。
 //

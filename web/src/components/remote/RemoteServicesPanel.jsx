@@ -14,11 +14,19 @@ import { PanelTitle } from "@/components/PanelTitle";
 import { StatusBadge } from "@/components/StatusBadge";
 
 /**
- * RemoteServicesPanel 渲染独立任务视图。
- * 参数：解构字段为状态对象、表单值或事件回调，沿用 RemotePage 的接口约定。
- * 返回：React 元素；网络错误由用例回调处理，本组件不直接写配置。
+ * RemoteServicesPanel 渲染远程服务端、中继选择和暴露端口任务视图。
+ *
+ * 参数说明：函数接收一个 object，并解构为：status（object，服务状态）、serve（number[]，
+ * 暴露端口）、relayRegionInput/relayMapInput/serveInput/shellUserInput（string，各表单值）、
+ * terminalAvailable（boolean，终端可用状态），其余 `set*`/`submit*`/动作字段均为 Function，
+ * 由 RemotePage 注入以修改表单或调用应用用例；本组件不直接请求 API 或修改配置。
+ *
+ * 返回值说明：返回 React 元素。
+ *
+ * 可能的异常/错误情况：网络、校验与服务端重建错误由上层用例 toast；状态缺失时以
+ * 安全的关闭态和空值渲染。
  */
-export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpenTerminal, openSSHPort, removeServePort, serve, serveInput, setBuiltinSSH, setServeInput, setShellUserInput, setWebTerminal, shellUserInput, status, submitServePort, submitShellUser, terminalAvailable, toggleEnabled }) {
+export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpenTerminal, openSSHPort, relayMapInput, relayRegionInput, removeServePort, resetRelay, serve, serveInput, setBuiltinSSH, setRelayMapInput, setRelayRegionInput, setServeInput, setShellUserInput, setWebTerminal, shellUserInput, status, submitRelay, submitServePort, submitShellUser, terminalAvailable, toggleEnabled }) {
  return (<>            <section className="panel">
               <PanelTitle
                 title="服务状态"
@@ -126,7 +134,50 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                   </div>
                 )}
               </dl>
-            </section>            <section className="panel">
+            </section>
+            <section className="panel">
+              <PanelTitle
+                title="DERP 中继"
+                detail="自定义 tailcat 的引导与兜底中继，留空使用默认公共网络"
+                help={{
+                  heading: "自定义 DERP 中继",
+                  paragraphs: ["自建 derper 最简单的方式是在「区域或自建主机」填写带有效 TLS 证书的主机名，例如 derp.example.com；多个主机用逗号分隔。生成的 token 会嵌入完整区域，原生 tailcat 客户端可直接使用。"],
+                  items: [
+                    "留空区域：从地图自动选择并持久缓存一个区域",
+                    "填写正整数：从地图固定选择指定区域 ID",
+                    "填写主机名：只使用自建 derper，不再依赖公共 DERP 地图",
+                    "自定义地图：填写完整 HTTP(S) DERP map JSON 地址；私有地图不会回退公共地图",
+                  ],
+                  note: "切换区域会重建服务端，token 可能改变；保存后请重新复制并分发 token。",
+                }}
+              />
+              <form className="form-grid" onSubmit={submitRelay}>
+                <Field label="区域或自建主机" hint="空=自动；区域 ID；或 derp.example.com（多个用逗号分隔）">
+                  <input
+                    aria-label="DERP 区域或自建主机"
+                    type="text"
+                    value={relayRegionInput}
+                    onChange={(event) => setRelayRegionInput(event.target.value)}
+                    placeholder="例如：302 或 derp.example.com"
+                  />
+                </Field>
+                <Field label="DERP map URL" hint="可选；私有地图可使用带鉴权查询参数的 HTTP(S) URL">
+                  <input
+                    aria-label="DERP map URL"
+                    type="url"
+                    value={relayMapInput}
+                    onChange={(event) => setRelayMapInput(event.target.value)}
+                    placeholder="例如：https://control.example.com/derpmap/default"
+                  />
+                </Field>
+                <Button className="form-submit" type="submit"><span>保存中继配置</span></Button>
+                <Button className="form-submit" type="button" variant="outline" onClick={resetRelay}><span>恢复默认</span></Button>
+              </form>
+              <p className="mt-2 text-xs text-muted-foreground">
+                原生客户端示例：<code>tailcat ssh &lt;token&gt;</code>、<code>tailcat forward &lt;token&gt; 2222:22</code>。token 已携带服务端中继区域，客户端通常无需再传 <code>--derpmap-url</code>。
+              </p>
+            </section>
+            <section className="panel">
               <PanelTitle
                 title="暴露端口"
                 detail="这些是本机端口，持有 token 的对端可经隧道访问（如 22 用于 SSH）"

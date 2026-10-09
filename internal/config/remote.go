@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -129,7 +130,7 @@ type RemoteConfig struct {
 	TempKey         string          `yaml:"temp-key,omitempty" json:"temp_key,omitempty"`         // 临时身份公钥（应急 nodekey，给客户端连入本机用；默认为空、只手动生成；与 allow 叠加生效，重置只替换它）
 	KeyFile         string          `yaml:"key-file,omitempty" json:"key_file,omitempty"`         // 自定义服务端密钥文件（tailcat *.private.json，支持 ~/ 开头）；空=内置托管密钥 <state-dir>/remote/server.private.json
 	BuiltinSSH      bool            `yaml:"builtin-ssh,omitempty" json:"builtin_ssh,omitempty"`   // 内嵌 SSH：隧道 22 由进程内处理，无需系统 sshd；默认隧道免密，可叠加公钥认证
-	ShellUser       string          `yaml:"shell-user,omitempty" json:"shell_user,omitempty"`     // 远程会话（内嵌 SSH/SCP/Web 终端/诊断）降权运行的本机账户；root 运行时必须显式配置
+	ShellUser       string          `yaml:"shell-user,omitempty" json:"shell_user,omitempty"`     // 远程会话（内嵌 SSH/SFTP/SCP/Web 终端/诊断）降权运行的本机账户；root 运行时必须显式配置
 	SSHAuthRequired bool            `yaml:"ssh-auth-required,omitempty" json:"ssh_auth_required"` // 开启后在隧道认证之上要求 SSH 公钥；空授权列表保持拒绝全部
 	SSHKeys         []RemoteSSHKey  `yaml:"ssh-keys,omitempty" json:"ssh_keys"`                   // SSH 登录授权公钥，与 WireGuard nodekey 白名单独立
 	WebTerminal     bool            `yaml:"web-terminal,omitempty" json:"web_terminal,omitempty"` // 浏览器终端总开关；默认关闭，且非回环 api-listen 开启时必须显式确认暴露风险
@@ -220,6 +221,55 @@ func ValidateRemoteServe(ports []int) error {
 	return nil
 }
 
+// ValidateRemoteRelay 校验 tailcat 中继选择配置。
+//
+// 功能说明：
+// 将 remote.region 视为中继选择值对象：空值表示自动选区，正整数表示 DERP 区域 ID，
+// 含点号的逗号分隔主机名表示一个自建 DERP 区域。DERP map 只允许绝对 HTTP(S) URL，
+// 既兼容公网 HTTPS 地图，也允许内网环境使用 HTTP 地图。
+//
+// 参数说明：
+//   - region: string，空值、正整数区域 ID，或逗号分隔的自建 derper 主机名。
+//   - derpMapURL: string，可选的 DERP map JSON 地址。
+//
+// 返回值说明：error，配置满足结构约束时返回 nil。
+//
+// 错误情况：区域 ID 非正数、主机名为空或不像 DNS 主机名、地图 URL 不是绝对
+// HTTP(S) 地址、包含 URL fragment 时返回错误。实际 DNS、TLS 与地图内容可用性由
+// remote 基础设施适配层在启动服务时验证。
+func ValidateRemoteRelay(region, derpMapURL string) error {
+	region = strings.TrimSpace(region)
+	if region != "" {
+		if id, err := strconv.Atoi(region); err == nil {
+			if id <= 0 {
+				return fmt.Errorf("region 区域 ID 必须为正整数，got %d", id)
+			}
+		} else {
+			for index, host := range strings.Split(region, ",") {
+				host = strings.TrimSpace(host)
+				// tailcat 的自建 DERP 地址会写入 token，并按标准 DERP HTTPS 端口连接；
+				// 因此这里只接收 DNS 主机名，不接受 scheme、路径或 host:port。
+				if host == "" || !strings.Contains(host, ".") || strings.ContainsAny(host, "/:@?# ") {
+					return fmt.Errorf("region 自建中继主机[%d] %q 无效（应为 derp.example.com）", index, host)
+				}
+			}
+		}
+	}
+
+	derpMapURL = strings.TrimSpace(derpMapURL)
+	if derpMapURL == "" {
+		return nil
+	}
+	parsed, err := url.Parse(derpMapURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("derpmap-url 必须是绝对 HTTP(S) URL")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("derpmap-url 不允许包含 fragment")
+	}
+	return nil
+}
+
 // ValidateRemoteAllow 校验客户端公钥白名单的结构（公钥 nodekey: 前缀、按公钥去重、
 // 非空别名不重复）；密钥格式本身的严格解析由 remote 包（tailcat 依赖的唯一入口）兜底。
 func ValidateRemoteAllow(entries []RemoteAllowEntry) error {
@@ -271,6 +321,9 @@ func ValidateRemoteShellUser(name string) error {
 // 错误情况：SSH 公钥集合越界或其他 remote 字段非法时返回带上下文的错误。
 func (c *Config) checkRemote() error {
 	r := c.Remote
+	if err := ValidateRemoteRelay(r.Region, r.DERPMapURL); err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
 	if err := ValidateRemoteSSHKeys(r.SSHKeys); err != nil {
 		return fmt.Errorf("remote: %w", err)
 	}

@@ -57,6 +57,38 @@ func newShellSessionCommand(su *sessionUser, rawCmd string) *exec.Cmd {
 	return cmd
 }
 
+// needsSFTPSubprocess 判断 SFTP 是否必须放入独立降权子进程。
+// 参数说明：su 为 *sessionUser，已经解析的会话身份。
+// 返回值说明：bool；存在 Unix Credential 时为 true。
+// 错误情况：无；nil 身份不应由调用方传入。
+func needsSFTPSubprocess(su *sessionUser) bool { return su.cred != nil }
+
+// newSFTPServerCommand 创建运行隐藏 SFTP helper 的未启动降权命令。
+//
+// 参数说明：su 为 *sessionUser，包含目标账户、主目录与可选 Unix Credential。
+// 返回值说明：*exec.Cmd，工作目录、最小环境和降权凭据均已设置。
+// 错误情况：无；当前可执行文件路径解析失败时退回 os.Args[0]，实际启动错误由统一
+// SSH 管道执行器返回。使用本项目自身 helper 可避免依赖系统是否安装 sftp-server。
+func newSFTPServerCommand(su *sessionUser) *exec.Cmd {
+	executable, err := os.Executable()
+	if err != nil {
+		executable = os.Args[0]
+	}
+	u := su.user
+	cmd := exec.Command(executable, "__remote-sftp")
+	cmd.Dir = u.HomeDir
+	cmd.Env = []string{
+		"USER=" + u.Username,
+		"LOGNAME=" + u.Username,
+		"HOME=" + u.HomeDir,
+		"PATH=" + defaultShellPath(u),
+	}
+	if su.cred != nil {
+		ensureShellSysProcAttr(cmd).Credential = su.cred
+	}
+	return cmd
+}
+
 // ensureShellSysProcAttr 返回命令的 SysProcAttr（不存在时创建），供各执行路径
 // 合并写入进程组/控制终端/降权凭据，避免后写者覆盖先写的 Credential。
 //

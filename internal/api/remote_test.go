@@ -107,6 +107,26 @@ func TestRemoteAPI(t *testing.T) {
 		t.Fatalf("initial status: %v", st)
 	}
 
+	// 中继设置通过专用端点读写，确保可能带查询凭据的地图 URL 不进入通用状态响应；
+	// 服务端关闭时只调和配置，不触发真实 DERP 网络请求。
+	const relayRegion = "derp.example.com"
+	const relayMapURL = "https://control.example.com/derpmap/default?token=private"
+	code, relay := remoteAPIReq(t, http.MethodPost, base+"/api/remote/relay", map[string]string{"region": relayRegion, "derpmap_url": relayMapURL})
+	if code != http.StatusOK || relay["region"] != relayRegion || relay["derpmap_url"] != relayMapURL {
+		t.Fatalf("设置中继失败: code=%d relay=%v", code, relay)
+	}
+	code, relay = remoteAPIReq(t, http.MethodGet, base+"/api/remote/relay", nil)
+	if code != http.StatusOK || relay["region"] != relayRegion || relay["derpmap_url"] != relayMapURL {
+		t.Fatalf("读取中继失败: code=%d relay=%v", code, relay)
+	}
+	if _, exists := st["derpmap_url"]; exists {
+		t.Fatalf("通用状态不应泄露完整 DERP map URL: %v", st)
+	}
+	code, _ = remoteAPIReq(t, http.MethodPost, base+"/api/remote/relay", map[string]string{"region": "derp.example.com:8443"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法中继主机应返回 400，got %d", code)
+	}
+
 	// Web 使用的 remote 总开关端点必须联动 builtin-ssh；先独立开启内嵌 SSH，
 	// 再关闭总开关，验证响应与持久配置不会留下“remote 关、SSH 开”的残余状态。
 	code, st = remoteAPIReq(t, http.MethodPost, base+"/api/remote/builtin-ssh", map[string]bool{"enabled": true})

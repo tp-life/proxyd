@@ -167,6 +167,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
 | `proxyd remote status\|on\|off\|token` | 远程连接（tailcat 隧道）：查看状态、热开关服务端、打印完整本机 token（见「十、远程连接」） |
 | `proxyd remote serve [端口,...]` | 查看/设置经隧道暴露的本机端口 |
+| `proxyd remote relay [auto\|区域ID\|derp主机] [--map-url URL\|--default-map]` | 查看/设置 DERP 中继；不带参数查看，`reset` 恢复 tailcat 默认公共中继 |
 | `proxyd remote allow list\|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]\|del <别名\|公钥>` | 管理带有效期和目标端口限制的客户端授权 |
 | `proxyd remote audit [--tail N]` | 查看连接建立、拒绝与断开审计记录（最多 500 条） |
 | `proxyd remote keyfile [路径\|-]\|export <路径>\|import <路径>` | 设置自定义密钥路径，或迁移内置托管的服务端身份 |
@@ -587,6 +588,9 @@ state-dir: ~/.local/state/proxyd       # 状态目录（快照/缓存/pid/日志
 
 remote:                     # 远程连接（tailcat 隧道），与代理功能独立，详见「十、远程连接」
   enabled: false            # 隧道服务端开关
+  # region: derp.example.com # 空=自动；正整数=地图区域 ID；主机名=自建 derper（可逗号分隔）
+  # derpmap-url: https://control.example.com/derpmap/default
+                            # 可选：自定义 DERP map；私有来源失败时不会回退公共地图
   serve: [22]               # 经隧道暴露的本机端口
   # key-file: ~/Library/Application Support/tailcat/keys/default.private.json
                             # 可选：自定义服务端密钥文件（tailcat *.private.json），
@@ -594,7 +598,7 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
                             # 缺省用内置托管密钥 state-dir/remote/server.private.json
   # builtin-ssh: false        # 内嵌免密 SSH：隧道 22 由进程内 SSH 处理（隧道即认证），
                             # 无需系统 sshd；持有 token 即可登录，建议配合白名单
-  # shell-user: tp           # 远程会话（内嵌 SSH/SCP/Web 终端/诊断）降权运行的本机账户；
+  # shell-user: tp           # 远程会话（内嵌 SSH/SFTP/SCP/Web 终端/诊断）降权运行的本机账户；
                             # proxyd 以 root 运行时必须显式配置普通账户，
                             # 否则内嵌 SSH 与 Web 终端拒绝开启（不默认提供 root shell）
   # web-terminal: false      # 浏览器本机 shell，默认关闭；独立于远程服务端运行（不开
@@ -628,6 +632,7 @@ desktop:                    # 独立远程桌面管理；数据通道复用 remo
 - **token（连接凭据）**：服务端启动后生成 `tc...` 字符串，由服务端 WireGuard 公钥 + DERP 区域信息派生。谁拿到 token 谁就能连到服务端的暴露端口——**像密码一样保管**（Web/CLI 默认只显示摘要，配置导出默认打码）。
 - **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。配置 `remote.key-file` 可改用自定义密钥文件（如 tailcat 的 default key），此时内置文件不再使用。
 - **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。`remote.region` 留空时自动就近选择，且**进程内保持粘性**——配置变更（白名单/端口等）引发的隧道重建沿用首次探测结果，已分发的 token 不会因区域漂移而失效；彻底固定可显式填区域 ID（如 `302`）。跨区域迁移或脱离公共中继时可填自建 derper 主机名。
+- **自定义中继配置**：`proxyd remote relay derp.example.com` 直接固定到一个自建 derper；多个中继可用逗号分隔。若已有完整的私有 DERP map，可用 `proxyd remote relay auto --map-url https://control.example.com/derpmap/default` 自动选择其中区域，或把 `auto` 换成区域 ID。`proxyd remote relay reset` 恢复默认公共地图。自建 derper 主机必须可从服务端和客户端解析，并提供有效 TLS 证书；切换区域会重建服务端且可能改变 token，需重新分发。
 - **连接观测**：`proxyd remote remotes list` 会主动探测已保存远端并显示在线状态、直连/DERP 路径与 RTT；Web 展开远端行后立即探测，并每 30 秒刷新。服务端入站客户端可显示在线近似状态、路径与累计收发流量；tailcat 当前不提供服务端侧 RTT，因此该列显示“—”。
 
 ### 服务端：暴露本机端口
@@ -641,13 +646,17 @@ proxyd remote token           # 打印完整 token，发给要连接的人
 # 页面会同时检测系统端口是否真实监听，避免只开放端口却没有运行桌面服务。
 proxyd remote serve 22,3389   # Windows RDP
 proxyd remote serve 22,5900   # macOS 屏幕共享或其它 VNC 服务
+
+# 自建 DERP：服务端 token 会嵌入该中继主机，客户端无需单独配置地图
+proxyd remote relay derp.example.com
+proxyd remote token
 ```
 
 隧道内访问 `22` 端口的连接会被转发到本机 `127.0.0.1:22`，因此需要系统 sshd 已在运行。Web 控制台「远程连接」页提供同样能力：顶部是两步快速上手指引（开启服务端 → 开放端口），并有「开放 SSH（22 端口）」快捷按钮一键把 22 加入 serve 列表；serve/转发列表中端口 22 的条目带 SSH 标识。
 
-**内嵌 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理，**无需系统 sshd（如 macOS 远程登录）**。默认保持隧道免密模式，通过隧道认证即可获得本机 shell（以远程会话用户身份，见下段）；也可按下文额外启用 SSH 公钥认证，并配合 `remote allow` 白名单收窄来源。
+**内嵌 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理，**无需系统 sshd（如 macOS 远程登录）**。新版内嵌 SSH 同时提供标准 `sftp` 子系统，Web 文件面板和原生 SFTP 客户端均可使用。默认保持隧道免密模式，通过隧道认证即可获得本机 shell/SFTP（以远程会话用户身份，见下段）；也可按下文额外启用 SSH 公钥认证，并配合 `remote allow` 白名单收窄来源。
 
-**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SCP、诊断命令和 Web Terminal 创建子进程时的运行身份：配置后子进程切换到该账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析；客户端 `user@` 始终不能选择本机账号。proxyd 以 root 运行时**必须**显式配置普通账户（`proxyd remote shell-user <账户名>` 或 Web 控制台设置），否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell；非 root 运行时无需配置，会话保持进程用户（TUN 自特权助手落地后不再要求 root 运行，见「TUN 模式」）。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
+**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SFTP/SCP、诊断命令和 Web Terminal 的运行身份：配置后 shell 子进程和 SFTP helper 都切换到该账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析；客户端 `user@` 始终不能选择本机账号。proxyd 以 root 运行时**必须**显式配置普通账户（`proxyd remote shell-user <账户名>` 或 Web 控制台设置），否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell 或 root 文件访问；非 root 运行时无需配置，会话保持进程用户（TUN 自特权助手落地后不再要求 root 运行，见「TUN 模式」）。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
 
 **Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
@@ -683,6 +692,25 @@ Web 服务端区域的「连接记录」面板提供同样的只读视图。
 
 ### 客户端：连接远端
 
+proxyd 启动的是标准 tailcat 数据面服务端，复制 `proxyd remote token` 输出的完整
+`tc...` token 后，可直接使用同协议版本的原生 tailcat 客户端。proxyd 总是把选定的完整
+DERP 区域写入 token；包括 `remote.region: derp.example.com` 的自建中继场景，客户端通常
+不需要额外传 `--derpmap-url`：
+
+```sh
+tailcat ping tc...
+tailcat ssh tc...                    # proxyd 开启 builtin-ssh 时直接登录
+tailcat tc... 8080                   # stdio 连接 proxyd 暴露的 8080 端口
+tailcat forward tc... 2222:22        # 本机 127.0.0.1:2222 → proxyd 隧道端口 22
+ssh -p 2222 localhost
+```
+
+若 proxyd 配置了客户端 nodekey 白名单，原生客户端还需要持久客户端身份：先在客户端执行
+`tailcat genkey --client --key=client-default`，再执行 `tailcat printpub`，把输出的
+`nodekey:...` 通过 `proxyd remote allow add <公钥> [别名]` 加到服务端。SSH 公钥认证是
+第二层独立认证；如果 proxyd 开启了 `ssh-auth-required`，还需让原生 `tailcat ssh` 使用
+已授权的 OpenSSH 私钥。
+
 ```sh
 # 先保存远端 token（只需一次；也可直接用 token 不保存）
 proxyd remote remotes add nas tc...
@@ -692,8 +720,8 @@ proxyd ssh nas                # 等价 ssh 到 nas 的 22 端口
 proxyd ssh root@nas -p 2222   # 指定用户/远端端口；其余参数原样透传 ssh
 proxyd ssh nas ls -la         # 带远端命令
 
-# 文件传输直接用 proxyd scp（包装系统 scp，注入 -o ProxyCommand='proxyd remote pipe <token> 22'；
-# 远端操作数以对端名称/token 作主机名；因此对端需 serve 22 端口。无独立的文件传输功能）
+# CLI 文件传输使用 proxyd scp（包装系统 scp，注入 -o ProxyCommand='proxyd remote pipe <token> 22'；
+# 远端操作数以对端名称/token 作主机名；因此对端需 serve 22 端口）
 proxyd scp ./file nas:/tmp/           # 上传
 proxyd scp tc-xxxx:/var/log/a.log ./  # 也可直接用 token 不保存远端
 proxyd scp -r ./dir nas:/tmp/         # 其余 scp 选项原样透传
@@ -710,13 +738,25 @@ proxyd remote forwards add nas-ssh auto nas 22   # listen 留空或填 auto：�
 ssh -p 2222 localhost         # 之后任何 TCP 客户端都能用这条转发
 ```
 
+Web 控制台「远程连接 → 远程设备」下方提供**直接传输文件**面板：选择已保存设备后，可浏览
+远端目录、上传单个文件或点击普通文件下载。浏览器不取得完整 tailcat token；请求由本机
+proxyd 解析设备名称，复用持久客户端 nodekey，经 token 指定的 DERP（或打洞后的直连路径）
+连接远端 22 端口，再使用标准 SFTP。远端使用新版 builtin-ssh 时无需安装系统
+`sftp-server`；若 22 端口转发给系统 sshd，则该 sshd 必须启用 SFTP。
+
+默认隧道免密模式无需再填写凭据。远端启用 SSH 公钥认证或使用系统 sshd 时，可在页面临时
+选择私钥、填写口令和用户名；这些值只保存在当前页面内存并随单次管理 API 请求发送，不写入
+配置。上传先写同目录临时文件再原子替换同名目标；root 守护进程会为 SFTP 启动按
+`shell-user` 降权的 helper，文件访问权限与远端终端一致。网页下载需要先形成浏览器 Blob，
+超大文件仍建议使用 `proxyd scp` 以避免浏览器内存峰值。
+
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
 内嵌 SSH 在 Linux/macOS 上按**远程会话用户**（`remote.shell-user`，缺省为服务端 proxyd 运行用户）的账户配置启动登录 shell，并加载该 shell 的用户启动文件；`user@` 不会切换系统用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
 
 ### SSH 私钥文件登录与服务端公钥管理
 
-tailcat 已升级到 **v0.6.0**，构建需要 **Go 1.27.1 或更新版本**。内嵌 SSH 增加可选的 SSH 公钥认证，默认仍保持原来的隧道免密模式。开启后，客户端既要通过 tailcat 隧道的 token/nodekey 授权，也要持有服务端登记公钥所对应的 SSH 私钥。它与 `remote keyfile`（服务端 WireGuard 身份）及 `--client-key`（客户端 WireGuard 身份）是不同的密钥，不能混用。
+tailcat 当前锁定 **v0.7.0**，构建需要 **Go 1.27.1 或更新版本**。内嵌 SSH 增加可选的 SSH 公钥认证，默认仍保持原来的隧道免密模式。开启后，客户端既要通过 tailcat 隧道的 token/nodekey 授权，也要持有服务端登记公钥所对应的 SSH 私钥。它与 `remote keyfile`（服务端 WireGuard 身份）及 `--client-key`（客户端 WireGuard 身份）是不同的密钥，不能混用。
 
 客户端使用自己的 SSH 密钥；没有密钥时，可先执行 `ssh-keygen -t ed25519`。将生成的 **`.pub` 公钥文件**交给服务端管理员，私钥留在客户端。服务端执行：
 
@@ -773,7 +813,7 @@ proxyd ssh home --diagnose -i ~/.ssh/id_ed25519 -o SetEnv=TERM=xterm-256color
 
 Web 在「设备与连接」提供复制诊断命令入口；「访问授权 → SSH 公钥」可设置到期时间、禁用/启用及断开已有会话。「连接审计」集中展示隧道及 SSH 事件。
 
-v0.6.0 新生成的服务端身份会持久化 WireGuard PSK，重启与公钥配置变更不会重新生成 PSK。旧密钥文件缺少 PSK 时保留兼容模式及原 token；导入带 PSK 的新版 tailcat 密钥文件则保留其中的 PSK，客户端需要使用支持 PSK 的版本。
+v0.6.0 起新生成的服务端身份会持久化 WireGuard PSK，当前 v0.7.0 同样保持该语义：重启与公钥配置变更不会重新生成 PSK。旧密钥文件缺少 PSK 时保留兼容模式及原 token；导入带 PSK 的新版 tailcat 密钥文件则保留其中的 PSK，客户端需要使用支持 PSK 的版本。
 
 Web 控制台把两类任务分为两个侧边栏页面。「远程连接」继续按“服务端 / 客户端”管理 tailcat 身份、SSH、token 和通用端口转发；设备的“连接”对话框只提供 SSH/scp 用法，不再混放 RDP/VNC。「远程桌面」则专门管理桌面：服务端按 RDP/VNC 展示“系统服务是否真实监听”和“隧道是否开放”两个状态，端口可按操作系统实际配置修改；客户端保存常用连接档案，一键创建守护进程内的临时转发并下载 `.rdp` 文件或打开 `vnc://` 系统处理器。档案不保存密码，token 也只在 `remote.remotes` 保留一份。
 
@@ -802,7 +842,7 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 
 - tailcat 上游不承诺 API 与 wire format 稳定性，proxyd 锁定依赖版本升级；跨版本互联失败时先对齐版本。
 - 公共 DERP 中继限速，大流量场景（如长时间文件传输）建议自建 derper。
-- 文件传输通过 `proxyd scp`（包装系统 scp 走隧道）完成，不提供独立的文件传输子协议；不含 tailcat cp/recv、SOCKS 与 exit-node。
+- 文件传输支持 CLI `proxyd scp`，以及 Web 管理端经标准 SSH/SFTP 进行的目录浏览、上传和下载；不含 tailcat cp/recv、SOCKS 与 exit-node。
 
 ## 十一、LAN 网关（旁路由）
 
