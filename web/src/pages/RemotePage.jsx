@@ -4,6 +4,7 @@ import { RemoteServicesPanel } from "@/components/remote/RemoteServicesPanel";
 import { RemoteAccessPanel } from "@/components/remote/RemoteAccessPanel";
 import { RemoteAuditPanel } from "@/components/remote/RemoteAuditPanel";
 import { RemoteDevicesPanel } from "@/components/remote/RemoteDevicesPanel";
+import { RemoteFilesPanel } from "@/components/remote/RemoteFilesPanel";
 import { RemoteForwardsPanel } from "@/components/remote/RemoteForwardsPanel";
 import { NAV_ITEMS } from "@/lib/navigation";
 import { useEffect, useMemo, useState } from "react";
@@ -26,7 +27,7 @@ import { classNames, formatBytes, maskRemoteSecret } from "@/lib/format";
  * RemotePage 渲染远程连接页。
  *
  * 功能说明：
- * 该页是 remote 任务页面的共享编排容器，通过 view 选择设备、服务、授权、转发或审计。
+ * 该页是 remote 任务页面的共享编排容器，通过 view 选择设备、文件传输、服务、授权、转发或审计。
  * 分页不会重置本容器中的未提交表单；导航注册表负责标题与 URL，业务写入仍由 hook 编排。
  * token 一律以摘要展示，完整值只在点击复制时显式从 `/api/remote/token` 获取。
  *
@@ -151,7 +152,7 @@ export function RemotePage({
 
   const remoteColumns = useMemo(
     () => [
-      { key: "name", header: "名称", sortable: true, width: "22%" },
+      { key: "name", header: "名称", sortable: true, width: "16%" },
       {
         key: "status",
         header: "状态",
@@ -181,15 +182,18 @@ export function RemotePage({
       {
         key: "token",
         header: "token 摘要",
-        width: "28%",
+        width: "24%",
         cell: (row) => <code className="font-mono text-xs text-muted-foreground">{maskRemoteSecret(row.token)}</code>,
       },
       {
         key: "actions",
         header: "操作",
         align: "right",
+        // 操作列固定占到整表 38%：五个按钮（连接/终端/复制 SSH 命令/复制诊断命令/删除）
+        // 的固有宽度约 400px，此前没有声明宽度时会被固定布局压缩并裁掉末尾按钮。
+        width: "38%",
         cell: (row) => (
-          <div className="flex items-center justify-end gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-1 whitespace-nowrap">
             <Button size="sm" variant="outline" type="button" onClick={() => setConnectTarget(row.name)}>
               <Link2 size={14} aria-hidden="true" />
               <span>连接</span>
@@ -567,9 +571,10 @@ export function RemotePage({
       ) : (
 <>
 {view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} relayMapInput={relayMapInput} relayRegionInput={relayRegionInput} removeServePort={removeServePort} resetRelay={resetRelay} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setRelayMapInput={setRelayMapInput} setRelayRegionInput={setRelayRegionInput} setServeInput={setServeInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitRelay={submitRelay} submitServePort={submitServePort} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
+{view === "remote/files" && <RemoteFilesPanel apiLoopback={status?.api_loopback} downloadRemoteFile={downloadRemoteFile} listRemoteFiles={listRemoteFiles} remotes={remotes} uploadRemoteFile={uploadRemoteFile} />}
 {view === "remote/access" && <RemoteAccessPanel activity={activity} allow={allow} allowInput={allowInput} allowNameInput={allowNameInput} allowPortsInput={allowPortsInput} allowTTL={allowTTL} copyTempKey={copyTempKey} copyText={copyText} importKeyFile={importKeyFile} keyFileInput={keyFileInput} manageSSHKeys={manageSSHKeys} peers={peers} removeAllowKey={removeAllowKey} resetTempKey={resetTempKey} saveKeyFile={saveKeyFile} setAllowInput={setAllowInput} setAllowNameInput={setAllowNameInput} setAllowPortsInput={setAllowPortsInput} setAllowTTL={setAllowTTL} setKeyFileInput={setKeyFileInput} status={status} submitAllowKey={submitAllowKey} submitKeyFile={submitKeyFile} tempPeer={tempPeer} />}
 {view === "remote/audit" && <RemoteAuditPanel auditColumns={auditColumns} auditEntries={auditEntries} refreshAudit={refreshAudit} />}
-{view === "remote/devices" && <RemoteDevicesPanel apiLoopback={status?.api_loopback} downloadRemoteFile={downloadRemoteFile} expandedRemote={expandedRemote} listRemoteFiles={listRemoteFiles} probeRemote={probeRemote} remoteColumns={remoteColumns} remoteForm={remoteForm} remoteProbes={remoteProbes} remotes={remotes} setRemoteForm={setRemoteForm} setSshSetEnvTerm={setSshSetEnvTerm} sshSetEnvTerm={sshSetEnvTerm} submitRemote={submitRemote} uploadRemoteFile={uploadRemoteFile} />}
+{view === "remote/devices" && <RemoteDevicesPanel expandedRemote={expandedRemote} probeRemote={probeRemote} remoteColumns={remoteColumns} remoteForm={remoteForm} remoteProbes={remoteProbes} remotes={remotes} setRemoteForm={setRemoteForm} setSshSetEnvTerm={setSshSetEnvTerm} sshSetEnvTerm={sshSetEnvTerm} submitRemote={submitRemote} />}
 {view === "remote/forwards" && <RemoteForwardsPanel forwardColumns={forwardColumns} forwardForm={forwardForm} forwards={forwards} remotes={remotes} setForwardForm={setForwardForm} submitForward={submitForward} />}
 </>
       )}

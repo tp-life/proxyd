@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { Field } from "@/components/Field";
 import { PanelTitle } from "@/components/PanelTitle";
+import { Select } from "@/components/ui/select";
 import { formatBytes } from "@/lib/format";
 
 /**
@@ -139,13 +140,13 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
   }
 
   /**
-   * handleRemoteChange 切换文件目标设备，并主动清除上一台设备的临时 SSH 凭据。
-   * 参数说明：event 为设备 select 的 change 事件。
+   * selectRemote 切换文件目标设备，并主动清除上一台设备的临时 SSH 凭据。
+   * 参数说明：name 为下拉框选中的远程设备名，空字符串表示未选择。
    * 返回值说明：无。
    * 可能的异常/错误情况：无；清空私钥可避免用户误把 A 设备凭据发送给 B 设备。
    */
-  function handleRemoteChange(event) {
-    setRemoteName(event.target.value);
+  function selectRemote(name) {
+    setRemoteName(name);
     setDirectory(".");
     setEntries([]);
     setPrivateKey("");
@@ -217,10 +218,15 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
 
       <div className="form-grid remote-form">
         <Field label="远程设备">
-          <select value={remoteName} onChange={handleRemoteChange}>
-            <option value="">请选择设备</option>
-            {remotes.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-          </select>
+          <Select
+            ariaLabel="远程设备"
+            value={remoteName}
+            onValueChange={selectRemote}
+            options={[
+              { value: "", label: "请选择设备" },
+              ...remotes.map((item) => ({ value: item.name, label: item.name })),
+            ]}
+          />
         </Field>
         <Field label="远端目录">
           <input className="mono-input" value={directory} onChange={(event) => setDirectory(event.target.value)} placeholder=". 或 /home/user" />
@@ -248,7 +254,7 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
         </div>
       </details>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button disabled={!remoteName || loading || transferring} size="sm" variant="outline" type="button" onClick={() => loadDirectory(parentRemotePath(directory))}>
           <ArrowUp size={15} aria-hidden="true" /><span>上一级</span>
         </Button>
@@ -262,9 +268,11 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
       {error && <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
 
       {entries.length === 0 ? (
-        <EmptyState compact title="尚未读取目录" detail="选择远程设备后点击“连接并浏览”，即可直接传输文件。" />
+        <div className="mt-4">
+          <EmptyState compact title="尚未读取目录" detail="选择远程设备后点击“连接并浏览”，即可直接传输文件。" />
+        </div>
       ) : (
-        <div className="mt-3 divide-y rounded-md border">
+        <div className="mt-4 divide-y rounded-md border">
           {entries.map((entry) => (
             <div key={entry.path} className="flex min-w-0 items-center gap-3 px-3 py-2">
               {entry.is_dir ? <Folder className="shrink-0 text-warning" size={18} aria-hidden="true" /> : <File className="shrink-0 text-muted-foreground" size={18} aria-hidden="true" />}

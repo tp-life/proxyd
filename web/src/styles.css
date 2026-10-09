@@ -419,10 +419,14 @@
     @apply grid min-h-9 w-full auto-cols-fr grid-flow-col gap-0.5 overflow-hidden rounded-md border bg-muted/65 p-0.5;
   }
   .tabs-trigger {
-    @apply grid min-h-8 min-w-0 content-center justify-items-start gap-0 rounded-sm border-0 bg-transparent px-3 py-1 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/35 disabled:pointer-events-none disabled:opacity-50;
+    @apply grid min-h-8 min-w-0 content-center justify-items-start gap-0 rounded-sm border-0 bg-transparent px-3 py-1 text-left text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/35 disabled:pointer-events-none disabled:opacity-50;
   }
+  /* 选中项同时用主色底与底部主色条标记：只靠 bg-card 时，暗黑主题下卡片色与
+     页签容器底色几乎相同，选中状态看不出来。 */
   .tabs-trigger[data-state="active"] {
-    @apply bg-card shadow-sm;
+    @apply font-medium text-foreground;
+    background: color-mix(in oklab, var(--primary) 16%, var(--card));
+    box-shadow: inset 0 -2px 0 var(--primary);
   }
   .tabs-trigger-title {
     @apply text-xs font-medium text-muted-foreground;
@@ -2763,6 +2767,16 @@
     @apply self-end;
   }
 
+  /* DERP 中继的两个设置项等分宽度：区域/主机名与地图 URL 都是长文本，用 auto 列
+     兜底会把 DERP map URL 压到几乎无法输入。 */
+  .relay-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .relay-form-actions {
+    @apply col-span-full flex flex-wrap items-center gap-2;
+  }
+
   .setting-row {
     grid-template-columns: minmax(220px, 280px) minmax(0, 640px);
     justify-content: space-between;
@@ -3194,8 +3208,10 @@
         oklch(0.66 0.14 330 / 0.08),
         transparent 62%
       ),
-      linear-gradient(oklch(0.72 0.055 235 / 0.3) 1px, transparent 1px),
-      linear-gradient(90deg, oklch(0.72 0.055 235 / 0.3) 1px, transparent 1px);
+      /* 网格线在白底上一旦过深就会形成“桌面垫”质感、抢走卡片与正文的注意力，
+         因此明亮主题只保留很淡的定位参考线（浅灰蓝 + 低透明度）。 */
+      linear-gradient(oklch(0.62 0.035 235 / 0.12) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(0.62 0.035 235 / 0.12) 1px, transparent 1px);
   }
 
   /* 扫描线是深色终端质感专属，亮主题下去掉。 */
@@ -3205,18 +3221,20 @@
 }
 
 @layer components {
-  /* 主按钮沿用品牌渐变（霓虹青 → 品红），配柔和青色环境阴影。 */
+  /* 主按钮在亮主题下使用纯色填充（不使用霓虹渐变），保持与其它按钮一致的扁平观感。 */
   [data-theme="light"] .btn-primary {
-    background-image: linear-gradient(135deg, var(--primary), var(--neon));
+    background-image: none;
+    background-color: var(--primary);
     box-shadow:
-      0 2px 6px -2px oklch(0.6 0.13 215 / 0.45),
-      0 10px 24px -10px oklch(0.6 0.13 215 / 0.4);
+      0 1px 2px -1px oklch(0.4 0.05 285 / 0.2),
+      0 8px 20px -12px oklch(0.6 0.13 215 / 0.45);
   }
   [data-theme="light"] .btn-primary:hover {
-    background-image: linear-gradient(135deg, oklch(0.55 0.135 215), oklch(0.53 0.15 330));
+    background-image: none;
+    background-color: oklch(0.55 0.135 215);
     box-shadow:
-      0 3px 10px -2px oklch(0.6 0.13 215 / 0.5),
-      0 14px 28px -10px oklch(0.6 0.13 215 / 0.45);
+      0 2px 6px -2px oklch(0.4 0.05 285 / 0.24),
+      0 10px 24px -12px oklch(0.6 0.13 215 / 0.5);
   }
 
   [data-theme="light"] .brand-mark {
@@ -3273,6 +3291,32 @@
   }
   [data-theme="light"] .page-kicker {
     text-shadow: none;
+  }
+
+  /*
+   * 日志区在深色主题里是黑色终端面板；白底上沿用 45% 黑底会让浅灰正文变成低对比的
+   * “灰上加灰”。亮主题改为浅色纸面 + 深色正文，并保留各等级的色相区分。
+   */
+  [data-theme="light"] .log-lines {
+    background: oklch(0.985 0.004 280);
+    border-color: var(--border);
+  }
+
+  [data-theme="light"] .log-line,
+  [data-theme="light"] .log-lines > pre {
+    @apply text-foreground;
+  }
+
+  [data-theme="light"] .log-line.level-error {
+    color: oklch(0.5 0.19 20);
+  }
+
+  [data-theme="light"] .log-line.level-warning {
+    color: oklch(0.48 0.11 70);
+  }
+
+  [data-theme="light"] .log-line.level-debug {
+    color: oklch(0.5 0.13 275);
   }
 }
 

@@ -60,8 +60,8 @@ async function main() {
     const nav = page.getByRole('navigation', { name: '当前大类子菜单' });
     const top = page.getByRole('navigation', { name: '业务大类' });
     await top.getByRole('button', { name: '远程访问', exact: true }).waitFor();
-    if (await nav.getByRole('button').count() !== 6) throw Error('远程子菜单数量错误');
-    for (const label of ['访问授权', '端口转发', '连接审计', '设备与连接', '本机服务']) {
+    if (await nav.getByRole('button').count() !== 7) throw Error('远程子菜单数量错误');
+    for (const label of ['访问授权', '端口转发', '连接审计', '设备与连接', '文件传输', '本机服务']) {
       await nav.getByRole('button', { name: label, exact: true }).click();
       await page.getByRole('heading', { name: label, exact: true }).waitFor();
     }

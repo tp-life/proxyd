@@ -151,7 +151,7 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                   note: "切换区域会重建服务端，token 可能改变；保存后请重新复制并分发 token。",
                 }}
               />
-              <form className="form-grid" onSubmit={submitRelay}>
+              <form className="form-grid relay-form" onSubmit={submitRelay}>
                 <Field label="区域或自建主机" hint="空=自动；区域 ID；或 derp.example.com（多个用逗号分隔）">
                   <input
                     aria-label="DERP 区域或自建主机"
@@ -170,8 +170,10 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                     placeholder="例如：https://control.example.com/derpmap/default"
                   />
                 </Field>
-                <Button className="form-submit" type="submit"><span>保存中继配置</span></Button>
-                <Button className="form-submit" type="button" variant="outline" onClick={resetRelay}><span>恢复默认</span></Button>
+                <div className="relay-form-actions">
+                  <Button className="form-submit" type="submit"><span>保存中继配置</span></Button>
+                  <Button className="form-submit" type="button" variant="outline" onClick={resetRelay}><span>恢复默认</span></Button>
+                </div>
               </form>
               <p className="mt-2 text-xs text-muted-foreground">
                 原生客户端示例：<code>tailcat ssh &lt;token&gt;</code>、<code>tailcat forward &lt;token&gt; 2222:22</code>。token 已携带服务端中继区域，客户端通常无需再传 <code>--derpmap-url</code>。
