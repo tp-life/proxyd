@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/desktop"
@@ -33,6 +34,10 @@ type DesktopStatus struct {
 	Sessions      []desktop.Session          `json:"sessions"`
 	RemoteEnabled bool                       `json:"remote_enabled"`
 	APILoopback   bool                       `json:"api_loopback"`
+	// SessionIdleTimeout / SessionMaxLifetime 是当前生效的临时会话回收边界，供
+	// 控制台展示；完整配置仍以 desktop 段为准。
+	SessionIdleTimeout time.Duration `json:"session_idle_timeout"`
+	SessionMaxLifetime time.Duration `json:"session_max_lifetime"`
 }
 
 // initDesktop 创建桌面会话管理器，并注入 remote 临时转发适配器。
@@ -43,6 +48,10 @@ type DesktopStatus struct {
 //
 // 错误情况：构造阶段不执行网络 I/O；真正的远端解析或监听错误由 StartDesktopSession 返回。
 func (a *App) initDesktop() {
+	a.mu.RLock()
+	configuration := a.cfg.Desktop.Clone()
+	a.mu.RUnlock()
+	idleTimeout, maxLifetime := desktopSessionTimeouts(configuration)
 	a.desktop = desktop.NewManager(func(spec desktop.SessionSpec) (desktop.Forward, error) {
 		a.mu.RLock()
 		remotes := append([]config.RemotePeer(nil), a.cfg.Remote.Remotes...)
@@ -52,7 +61,30 @@ func (a *App) initDesktop() {
 			return nil, err
 		}
 		return a.remote.StartTransientForward(token, spec.RemotePort)
-	}, desktop.Options{})
+	}, desktop.Options{IdleTimeout: idleTimeout, MaxLifetime: maxLifetime})
+}
+
+// desktopSessionTimeouts 返回临时桌面会话当前生效的空闲与最长寿命边界。
+//
+// 参数说明：configuration 是桌面配置快照；零值视为使用默认值，负数不会出现，因为
+// 配置校验已在加载阶段拒绝。
+//
+// 返回值说明：time.Duration，依次为 IdleTimeout 与 MaxLifetime，且后者不小于前者。
+//
+// 错误情况：无；这里只做运行期兜底，非法值最终由配置校验拦截。
+func desktopSessionTimeouts(configuration config.DesktopConfig) (time.Duration, time.Duration) {
+	idleTimeout := configuration.SessionIdleTimeout.D()
+	if idleTimeout <= 0 {
+		idleTimeout = config.DefaultDesktopSessionIdleTimeout
+	}
+	maxLifetime := configuration.SessionMaxLifetime.D()
+	if maxLifetime <= 0 {
+		maxLifetime = config.DefaultDesktopSessionMaxLifetime
+	}
+	if maxLifetime < idleTimeout {
+		maxLifetime = idleTimeout
+	}
+	return idleTimeout, maxLifetime
 }
 
 // stopDesktop 幂等停止全部桌面会话及后台清扫协程。
@@ -107,12 +139,15 @@ func (a *App) DesktopStatus(ctx context.Context) DesktopStatus {
 	}
 	connections := append([]config.DesktopConnection(nil), configuration.Connections...)
 	sort.Slice(connections, func(i, j int) bool { return connections[i].Name < connections[j].Name })
+	idleTimeout, maxLifetime := desktopSessionTimeouts(configuration)
 	return DesktopStatus{
-		Services:      services,
-		Connections:   connections,
-		Sessions:      a.desktop.List(),
-		RemoteEnabled: remoteConfiguration.Enabled,
-		APILoopback:   config.IsLoopbackAPIListen(apiListen),
+		Services:           services,
+		Connections:        connections,
+		Sessions:           a.desktop.List(),
+		RemoteEnabled:      remoteConfiguration.Enabled,
+		APILoopback:        config.IsLoopbackAPIListen(apiListen),
+		SessionIdleTimeout: idleTimeout,
+		SessionMaxLifetime: maxLifetime,
 	}
 }
 

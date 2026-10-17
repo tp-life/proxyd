@@ -266,6 +266,16 @@ func remotePrintStatus(c *apiClient) error {
 				formatBytes(peer.RxBytes), formatBytes(peer.TxBytes), peer.Active)
 		}
 		_ = tw.Flush()
+		relayed := 0
+		for _, peer := range st.Peers {
+			if peer.Online && peer.Path == remote.PathDERP {
+				relayed++
+			}
+		}
+		if relayed > 0 {
+			fmt.Printf("\n注意：%d 个在线客户端正在走 DERP 中继（TCP）。远程桌面、SSH 交互和大文件传输通常明显慢于直连。\n", relayed)
+			fmt.Println("  可检查双方 UDP 是否互通、客户端防火墙是否放行 proxyd 入站 UDP，以及是否有多个网口在同一子网抢路由。")
+		}
 	}
 	if len(st.Forwards) > 0 {
 		fmt.Println("\n本地转发：")

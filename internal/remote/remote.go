@@ -9,6 +9,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"strconv"
@@ -46,7 +47,7 @@ type Status struct {
 	WebTerminal     bool                      `json:"web_terminal"`              // 浏览器终端总开关；默认关闭，API 层关闭时直接返回 404
 	// ClientActivity 是各已知客户端公钥（白名单+临时身份）当前的入站活动连接数。
 	ClientActivity map[string]int64  `json:"client_activity,omitempty"`
-	Peers          []PeerObservation `json:"peers"`    // 已知入站客户端的连接路径与累计流量
+	Peers          []PeerObservation `json:"peers"`    // 入站客户端快照；tailcat v0.7.0 起才有数据，含未登记公钥
 	Forwards       []ForwardStatus   `json:"forwards"` // 全部转发条目（含禁用项）
 }
 
@@ -78,6 +79,7 @@ type Manager struct {
 	token            string
 	serveErr         string
 	forwards         map[string]*forwardRunner
+	clients          *clientPool         // 进程内共享 tailcat 客户端（同 token/身份只建一个）
 	activeClients    map[string]int64    // 已知客户端公钥 → 当前入站活动连接数
 	sshAccess        *sshAccess          // SSH 授权与会话运行态，独立于隧道生命周期
 	audit            *auditLog           // 独立于代理日志的固定容量连接审计环
@@ -107,6 +109,7 @@ func NewManager(stateDir string, logf func(format string, args ...any)) *Manager
 		terminalCtx: terminalCtx, terminalCancel: terminalCancel,
 		logf:          logf,
 		forwards:      map[string]*forwardRunner{},
+		clients:       newClientPool(logf),
 		activeClients: map[string]int64{},
 		audit:         audit,
 		sshAccess:     newSSHAccess(audit),
@@ -309,6 +312,8 @@ func (m *Manager) Close() {
 		r.stop()
 		delete(m.forwards, name)
 	}
+	// 转发全部停止后仍有借用者的场景（在途探测/诊断）由兜底关闭收尾。
+	m.clients.closeAll()
 }
 
 // StartTransientForward 使用管理器持久化的客户端身份启动一条临时本地转发。
@@ -322,12 +327,20 @@ func (m *Manager) Close() {
 // 错误情况：token/端口非法、客户端身份文件不可用或本机回环监听失败时返回错误。
 // 身份文件读取失败时沿用 remote 既有降级语义，使用临时身份继续尝试连接。
 func (m *Manager) StartTransientForward(token string, remotePort int) (*TransientForward, error) {
+	if err := ValidateToken(token); err != nil {
+		return nil, err
+	}
+	if remotePort <= 0 || remotePort > 65535 {
+		return nil, fmt.Errorf("端口 %d 超出 1-65535", remotePort)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cfg.Disabled {
 		return nil, fmt.Errorf("远程访问模块已禁用")
 	}
-	forward, err := StartTransientForward(token, remotePort, m.clientKeyLocked())
+	clientKey := m.clientKeyLocked()
+	client, release := m.clients.acquire(token, clientKey)
+	forward, err := startTransientForwardWithDial("127.0.0.1:0", token, remotePort, clientKey, sharedClientDial(client, uint16(remotePort)), release)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +354,59 @@ func (m *Manager) StartTransientForward(token string, remotePort int) (*Transien
 		}
 	}()
 	return forward, nil
+}
+
+// sharedConn 是共享客户端拨出的连接；关闭时只归还本次借用，不关闭共享客户端。
+type sharedConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+// Close 关闭底层连接并幂等归还客户端引用。
+func (c *sharedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// dialShared 使用 Manager 共享客户端拨号远端端口。
+//
+// 参数说明：
+//   - ctx: context.Context，控制 DERP 建连与拨号；无 deadline 时套用 dialTimeout。
+//   - token: string，已经由应用层解析出的完整远端 token。
+//   - port: int，远端 TCP 端口。
+//
+// 返回值说明：net.Conn，调用方必须 Close；关闭时自动归还共享客户端引用。
+//
+// 错误情况：token/端口非法、模块禁用、客户端身份不可用或拨号失败时返回错误。
+func (m *Manager) dialShared(ctx context.Context, token string, port int) (net.Conn, error) {
+	if err := ValidateToken(token); err != nil {
+		return nil, err
+	}
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("端口 %d 超出 1-65535", port)
+	}
+	m.mu.Lock()
+	if m.cfg.Disabled {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("远程访问模块已禁用")
+	}
+	clientKey := m.clientKeyLocked()
+	m.mu.Unlock()
+
+	client, release := m.clients.acquire(token, clientKey)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+	}
+	conn, err := client.DialTCPPort(ctx, uint16(port))
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return &sharedConn{Conn: conn, release: release}, nil
 }
 
 // ResolveToken 把 remotes 名称解析为 token；以 "tc" 开头的输入按 token 原样返回。

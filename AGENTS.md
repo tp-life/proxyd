@@ -14,6 +14,9 @@ proxyd 是多节点端口映射代理工具：Go 守护进程内嵌 mihomo 做�
 - Web 单独构建：`npm --prefix web run build`。
 - 提交前至少跑 `go build -tags "with_gvisor ts_omit_acme" ./... && go test -tags "with_gvisor ts_omit_acme" ./...`；
   动了 `web/src` 必须重新 `make`，dist 产物随仓库提交。
+- 升级 tailcat（或 tailscale.com/gvisor）后跑一次联网冒烟，校验 `Server.Status().Peer` 仍被填充
+  （入站客户端观测依赖它，回退时单测发现不了；默认跳过，需真实公共 DERP）：
+  `PROXYD_REMOTE_LIVE=1 go test -tags "with_gvisor ts_omit_acme" -run TestLiveServerStatusPeer ./internal/remote`。
 
 ## 模块划分（新增功能的落位规则）
 
@@ -46,3 +49,6 @@ web/src/pages/<Module>Page.jsx + web/src/hooks/use<Module>Feed.js   控制台页
 - API 路由注册只写在各域文件的 `register*Routes` 里，`api.go` 的 `Start()` 只保留调用清单。
 - 凭据类字段（token/secret）在列表/状态接口一律打码，完整值只通过专用 GET 端点返回（参考 `internal/api/remote.go`）。
 - 平台相关代码按 `*_darwin.go` / `*_linux.go` / `*_windows.go` 分文件。
+- `internal/remote` 内的 tailcat 客户端必须通过 `Manager.clients` 池借用；不要在 forward、桌面临时会话或
+  探测/诊断里各自 `tailcat.NewClient`——同一 node key 的多个客户端会互相覆盖握手与 endpoint，表现为反复
+  握手和会话过期。纯 CLI 命令（`proxyd desk`/`ssh`/`pipe`）各自持有独立客户端，不受此约束。

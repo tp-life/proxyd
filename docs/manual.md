@@ -303,7 +303,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `PUT /api/groups/{name}` | 编辑分组端口、类型与成员来源；为保护 `dialer-proxy` 引用，暂不支持在线改名 |
 | `DELETE /api/groups/{name}` | 删除节点分组 |
 | `POST /api/groups/{name}/select` `{"node":"节点名"}` | 选择 select 分组的手动出口节点；节点须为该组当前可用成员，选中项持久化到 state-dir 并热更新，失败整体回滚 |
-| `GET /api/desktop` | 返回 RDP/VNC 本机监听与隧道开放状态、已保存连接和当前临时会话；不返回 token 或密码 |
+| `GET /api/desktop` | 返回 RDP/VNC 本机监听与隧道开放状态、已保存连接、当前临时会话，以及当前生效的会话空闲/最长寿命；不返回 token 或密码 |
 | `POST /api/desktop/services/{rdp\|vnc}` | 原子更新协议实际服务端口及其 `remote.serve` 开放状态，失败时同时回滚桌面配置和 remote 运行态 |
 | `POST /api/desktop/connections` / `PUT` / `DELETE` | 新增、更新或删除不含密码的桌面连接档案；远端字段引用 `remote.remotes` 名称 |
 | `POST /api/desktop/sessions` / `DELETE /api/desktop/sessions/{id}` | 创建（或复用）和断开临时桌面回环转发；遗忘的会话会按首次连接宽限、空闲期和最长寿命自动回收 |
@@ -653,6 +653,8 @@ remote:                     # 远程连接（tailcat 隧道），与代理功能
 desktop:                    # 独立远程桌面管理；数据通道复用 remote，不经过 mihomo
   rdp-port: 3389            # 本机操作系统 RDP 服务真实端口
   vnc-port: 5900            # 本机屏幕共享 / VNC 服务真实端口
+  session-idle-timeout: 30m # 临时桌面会话在客户端全部断开后的保留时间；默认 30m
+  session-max-lifetime: 24h # 临时桌面会话硬上限；默认 24h
   connections:              # 客户端常用连接；只引用远端名称，不保存 token 副本或密码
     - name: 办公室电脑
       remote: office        # 引用 remote.remotes 中的 name
@@ -673,7 +675,8 @@ desktop:                    # 独立远程桌面管理；数据通道复用 remo
 - **密钥与 token 寿命**：密钥持久化在 `state-dir/remote/server.private.json`（0600），重启后 token 不变；删除该文件即生成全新身份，旧 token 永久失效。配置 `remote.key-file` 可改用自定义密钥文件（如 tailcat 的 default key），此时内置文件不再使用。
 - **DERP 中继**：默认使用 tailcat 公共中继（免费、限速、无 SLA）；打洞成功后会升级为直连，中继只是兜底。`remote.region` 留空时自动就近选择，且**进程内保持粘性**——配置变更（白名单/端口等）引发的隧道重建沿用首次探测结果，已分发的 token 不会因区域漂移而失效；彻底固定可显式填区域 ID（如 `302`）。跨区域迁移或脱离公共中继时可填自建 derper 主机名。
 - **自定义中继配置**：`proxyd remote relay derp.example.com` 直接固定到一个自建 derper；多个中继可用逗号分隔。若已有完整的私有 DERP map，可用 `proxyd remote relay auto --map-url https://control.example.com/derpmap/default` 自动选择其中区域，或把 `auto` 换成区域 ID。`proxyd remote relay reset` 恢复默认公共地图。自建 derper 主机必须可从服务端和客户端解析，并提供有效 TLS 证书；切换区域会重建服务端且可能改变 token，需重新分发。
-- **连接观测**：`proxyd remote remotes list` 会主动探测已保存远端并显示在线状态、直连/DERP 路径与 RTT；Web 展开远端行后立即探测，并每 30 秒刷新。服务端入站客户端可显示在线近似状态、路径与累计收发流量；tailcat 当前不提供服务端侧 RTT，因此该列显示“—”。
+- **连接观测**：`proxyd remote remotes list` 会主动探测已保存远端并显示在线状态、直连/DERP 路径与 RTT；Web 展开远端行后立即探测，并每 30 秒刷新。服务端入站客户端可显示在线近似状态、路径与累计收发流量（tailcat v0.7.0 起才会上报这些数据；客户端连过一次即进入列表，隧道重建或进程退出才清空，所以可能包含已离线的历史客户端，开放模式下未登记公钥以 `nodekey:` 原样显示）；tailcat 当前不提供服务端侧 RTT，因此该列显示“—”。
+- **客户端共享**：同一 proxyd 进程内，`remote.forwards` 的多条转发、Web 桌面临时会话以及探测/诊断/文件传输对同一 token（同一客户端身份）只维护**一个** tailcat 客户端，共用一条 WireGuard 会话，避免同 node key 多客户端互相覆盖握手和 endpoint。纯 CLI 的 `desk`/`ssh`/`scp` 每个进程仍是独立客户端；同时运行多个 CLI 时请给每个进程不同的 `--client-key`，或只保留一个。
 
 ### 服务端：暴露本机端口
 
@@ -857,9 +860,11 @@ v0.6.0 起新生成的服务端身份会持久化 WireGuard PSK，当前 v0.7.0 
 
 Web 控制台把两类任务分为两个侧边栏页面。「远程连接」继续按“服务端 / 客户端”管理 tailcat 身份、SSH、token 和通用端口转发；设备的“连接”对话框只提供 SSH/scp 用法，不再混放 RDP/VNC。「远程桌面」则专门管理桌面：服务端按 RDP/VNC 展示“系统服务是否真实监听”和“隧道是否开放”两个状态，端口可按操作系统实际配置修改；客户端保存常用连接档案，一键创建守护进程内的临时转发并下载 `.rdp` 文件或打开 `vnc://` 系统处理器。档案不保存密码，token 也只在 `remote.remotes` 保留一份。
 
-Web 临时会话绑定在**运行 proxyd 的机器**的 `127.0.0.1`，因此一键打开系统客户端只适合浏览器与 proxyd 同机的场景；若通过局域网远程访问 Web，页面会显示警告。纯 CLI 的 `proxyd desk` 仍从当前登录用户会话启动 GUI，适合不希望由 root/system 开机守护进程直接拉起桌面窗口的场景。Web 会话若始终没有客户端连接、客户端断开后长期空闲或超过最长寿命，会由单个清扫协程自动关闭 listener、活动连接和 tailcat 客户端。
+Web 临时会话绑定在**运行 proxyd 的机器**的 `127.0.0.1`，因此一键打开系统客户端只适合浏览器与 proxyd 同机的场景；若通过局域网远程访问 Web，页面会显示警告。纯 CLI 的 `proxyd desk` 仍从当前登录用户会话启动 GUI，适合不希望由 root/system 开机守护进程直接拉起桌面窗口的场景。Web 会话若始终没有客户端连接、客户端断开后长期空闲或超过最长寿命，会由单个清扫协程自动关闭 listener、活动连接和 tailcat 客户端。默认在客户端全部断开后保留 **30 分钟**、最长运行 **24 小时**，避免锁屏或短暂断网后的重连重新谈判整条隧道；可用 `desktop.session-idle-timeout` 与 `desktop.session-max-lifetime` 调整。极端情况下硬上限仍会回收会话，页面会显示当前生效的两个值。
 
 RDP/VNC 的应用层流量进入临时 TCP 转发后仍由 tailcat 承载：DERP 负责初始引导与打洞失败兜底，magicsock 会持续尝试 NAT 穿透；成功后升级为 WireGuard 点对点直连。RDP 可以在 TCP-only 模式运行，但中继路径的延迟与吞吐通常不如直连。服务端应同时保留 RDP/VNC 自身账号认证，并用 `remote allow --ports 3389,5900` 将桌面端口限制给可信客户端。
+
+当 `proxyd remote status` 或 Web「远程连接」检测到在线客户端仍在走 DERP 中继时，会显式提示：优先检查双方 UDP 是否互通、客户端防火墙是否放行 proxyd 入站 UDP，以及是否有多个网口在同一子网抢路由。tailcat 没有“只允许直连”的受支持开关；`TS_DEBUG_ALWAYS_USE_DERP=1` 只是把路径强制到中继的调试手段（TCP over TCP，通常更慢），不要用它来解决卡顿。
 
 ### 与 tailcat CLI 的互通
 

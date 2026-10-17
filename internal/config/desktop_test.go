@@ -1,8 +1,11 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
-// TestDesktopConfigDefaultsAndClone 验证桌面默认端口与配置事务克隆互不共享切片。
+// TestDesktopConfigDefaultsAndClone 验证桌面默认端口、会话回收默认值与克隆隔离。
 //
 // 参数说明：t 为 Go 测试上下文。
 //
@@ -17,13 +20,57 @@ func TestDesktopConfigDefaultsAndClone(t *testing.T) {
 	if configuration.RDPPort != DefaultDesktopRDPPort || configuration.VNCPort != DefaultDesktopVNCPort {
 		t.Fatalf("桌面服务默认端口错误: %+v", configuration)
 	}
+	if configuration.SessionIdleTimeout.D() != DefaultDesktopSessionIdleTimeout ||
+		configuration.SessionMaxLifetime.D() != DefaultDesktopSessionMaxLifetime {
+		t.Fatalf("桌面会话默认回收时间错误: %+v", configuration)
+	}
 	if got := configuration.Connections[0].RemotePort; got != DefaultDesktopRDPPort {
 		t.Fatalf("RDP 连接默认端口 = %d，期望 %d", got, DefaultDesktopRDPPort)
 	}
 	clone := configuration.Clone()
 	clone.Connections[0].Name = "已修改"
+	clone.SessionIdleTimeout = Duration(time.Minute)
 	if configuration.Connections[0].Name != "办公室电脑" {
 		t.Fatalf("Clone 与源配置共享 Connections: %+v", configuration.Connections)
+	}
+	if configuration.SessionIdleTimeout.D() != DefaultDesktopSessionIdleTimeout {
+		t.Fatalf("Clone 修改污染源配置的会话空闲时间: %+v", configuration)
+	}
+}
+
+// TestDesktopSessionTimeoutValidation 验证会话回收边界的负值与上下限关系。
+//
+// 参数说明：t 为 Go 测试上下文。
+//
+// 返回值说明：无；合法边界通过且非法值被拒绝时通过。
+//
+// 错误情况：负数或最长寿命短于空闲时间未被拦截时测试失败。
+func TestDesktopSessionTimeoutValidation(t *testing.T) {
+	valid := DesktopConfig{
+		SessionIdleTimeout: Duration(10 * time.Minute),
+		SessionMaxLifetime: Duration(2 * time.Hour),
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("合法会话回收边界被拒绝: %v", err)
+	}
+	for name, mutate := range map[string]func(*DesktopConfig){
+		"空闲时间为负": func(configuration *DesktopConfig) {
+			configuration.SessionIdleTimeout = Duration(-time.Minute)
+		},
+		"最长寿命为负": func(configuration *DesktopConfig) {
+			configuration.SessionMaxLifetime = Duration(-time.Hour)
+		},
+		"最长寿命短于空闲时间": func(configuration *DesktopConfig) {
+			configuration.SessionIdleTimeout = Duration(3 * time.Hour)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			configuration := valid.Clone()
+			mutate(&configuration)
+			if err := configuration.Validate(); err == nil {
+				t.Fatalf("非法会话回收边界未被拒绝: %+v", configuration)
+			}
+		})
 	}
 }
 

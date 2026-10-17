@@ -31,6 +31,9 @@ func TestDesktopAPIConnectionCRUD(t *testing.T) {
 	if status["remote_enabled"] != false || status["api_loopback"] != true {
 		t.Fatalf("桌面前置状态错误: %v", status)
 	}
+	if status["session_idle_timeout"] != "30m0s" || status["session_max_lifetime"] != "24h0m0s" {
+		t.Fatalf("桌面会话回收边界未暴露: %v", status)
+	}
 
 	connection := map[string]any{
 		"name": "办公室 Windows", "remote": "office", "protocol": "rdp", "remote_port": 0, "username": `DOMAIN\user`,

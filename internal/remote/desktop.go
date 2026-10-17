@@ -49,14 +49,32 @@ func StartTransientForward(token string, remotePort int, clientKey key.NodePriva
 //   - token: string，已校验或测试注入的远端 token。
 //   - remotePort: int，目标 TCP 端口。
 //   - clientKey: key.NodePrivate，tailcat 客户端身份。
-//   - dial: func，可选测试拨号器；nil 时使用真实 tailcat 客户端。
+//   - dial: func，可选测试拨号器；nil 时使用独立 tailcat 客户端。
 //
 // 返回值说明：*TransientForward 和 error；成功时 accept loop 已经启动。
 //
 // 错误情况：本地监听失败时返回错误，runner 不会进入运行状态。
 func startTransientForward(listen, token string, remotePort int, clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) (*TransientForward, error) {
+	return startTransientForwardWithDial(listen, token, remotePort, clientKey, dial, nil)
+}
+
+// startTransientForwardWithDial 启动临时转发，并接管共享客户端的释放回调。
+//
+// 参数说明：
+//   - listen/token/remotePort/clientKey: 同 startTransientForward。
+//   - dial: 可选拨号器；非 nil 时 runner 不会再创建自己的客户端。
+//   - release: 可选共享客户端释放函数；启动失败或 runner 停止时调用一次。
+//
+// 返回值说明：*TransientForward 和 error；成功时 accept loop 已经启动。
+//
+// 错误情况：本地监听失败时先归还共享客户端引用再返回错误。
+func startTransientForwardWithDial(listen, token string, remotePort int, clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error), release func()) (*TransientForward, error) {
 	runner := newForwardRunner("desktop", listen, tailcat.ConnBlob(token), uint16(remotePort), logger.Discard, clientKey, dial)
+	runner.release = release
 	if err := runner.start(); err != nil {
+		if release != nil {
+			release()
+		}
 		return nil, err
 	}
 	return &TransientForward{runner: runner}, nil

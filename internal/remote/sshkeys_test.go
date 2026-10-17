@@ -1,6 +1,6 @@
 package remote
 
-// 本文件验证公钥导入边界，以及 tailcat v0.6 升级前后的持久身份兼容性。
+// 本文件验证公钥导入边界，以及 tailcat v0.6 起（含 v0.7.0）持久身份的兼容性。
 
 import (
 	"crypto/ed25519"
@@ -71,7 +71,7 @@ func TestTailcatIdentityPSKPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.Public.PresharedKey.IsZero() {
-		t.Fatal("v0.6 新身份应持久化 PSK")
+		t.Fatal("tailcat v0.6 起新身份应持久化 PSK")
 	}
 	second, err := loadOrCreateTailcatKey(path)
 	if err != nil {

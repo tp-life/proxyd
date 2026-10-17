@@ -37,7 +37,12 @@ type ProbeResult struct {
 	CheckedAt  time.Time `json:"checked_at"`
 }
 
-// PeerObservation 是服务端针对一个已知入站客户端的只读连接质量快照。
+// PeerObservation 是 tailcat 服务端上报的一个入站客户端连接质量快照。
+//
+// 数据来自 tailcat v0.7.0 起 Status().Peer 填充的 ipnstate.PeerStatus：客户端完成
+// 一次握手后即出现，服务端不会主动移除，直到隧道重建或进程退出，因此列表可能包含
+// 已经离线的历史客户端。不在白名单/临时身份中的公钥同样保留（Name 为空），
+// 用于开放模式下发现陌生客户端；展示层按需过滤。
 type PeerObservation struct {
 	Key           string    `json:"key"`
 	Name          string    `json:"name,omitempty"`
@@ -72,6 +77,19 @@ func Probe(ctx context.Context, token string, clientKey key.NodePrivate) (ProbeR
 		client.Key = clientKey
 	}
 	defer client.Close()
+	return probeWithClient(ctx, client)
+}
+
+// probeWithClient 在已有 tailcat 客户端上执行 disco ping。
+//
+// 参数说明：
+//   - ctx: context.Context，控制 DERP 建连、路径发现与 ping 等待的取消/超时。
+//   - client: *tailcat.Client，调用方拥有的客户端；本函数不会关闭它。
+//
+// 返回值说明：ProbeResult，字段语义与 Probe 一致。
+//
+// 错误情况：ping 超时、白名单拒绝或客户端不可用时返回错误。
+func probeWithClient(ctx context.Context, client *tailcat.Client) (ProbeResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, dialTimeout)
@@ -111,6 +129,9 @@ func Probe(ctx context.Context, token string, clientKey key.NodePrivate) (ProbeR
 //
 // 错误情况：客户端身份加载失败时降级为临时身份；实际探测错误原样返回给应用层。
 func (m *Manager) ProbeRemote(ctx context.Context, token string) (ProbeResult, error) {
+	if err := ValidateToken(token); err != nil {
+		return ProbeResult{}, err
+	}
 	m.mu.Lock()
 	if m.cfg.Disabled {
 		m.mu.Unlock()
@@ -118,14 +139,20 @@ func (m *Manager) ProbeRemote(ctx context.Context, token string) (ProbeResult, e
 	}
 	clientKey := m.clientKeyLocked()
 	m.mu.Unlock()
-	return Probe(ctx, token, clientKey)
+
+	// 复用 Manager 共享客户端：探测不再创建第二个同 node key 的 magicsock，
+	// 避免把正在使用的转发/桌面会话握手顶掉。
+	client, release := m.clients.acquire(token, clientKey)
+	defer release()
+	return probeWithClient(ctx, client)
 }
 
 // peerObservations 把 tailcat Server.Status 转换为项目稳定的入站客户端观测模型。
 //
 // 参数说明：
-//   - status: *ipnstate.Status，tailcat 服务端即时状态；可为 nil。
-//   - allowed: []config.RemoteAllowEntry，用于补充客户端别名。
+//   - status: *ipnstate.Status，tailcat 服务端即时状态；可为 nil。tailcat v0.7.0 起
+//     Status().Peer 才会被填充；更早版本该集合恒为空，本函数返回空切片。
+//   - allowed: []config.RemoteAllowEntry，用于补充客户端别名；未命中的公钥保留记录但 Name 为空。
 //   - tempKey: string，临时身份公钥，命中时使用固定可读名称。
 //   - active: map[string]int64，当前业务连接计数快照。
 //   - now: time.Time，判断近期握手在线状态的统一时钟。
@@ -151,6 +178,8 @@ func peerObservations(status *ipnstate.Status, allowed []config.RemoteAllowEntry
 			continue
 		}
 		keyText := publicKey.String()
+		// Name 为空表示公钥未登记（开放模式下的陌生客户端）：保留原始 nodekey，
+		// Web 面板只渲染命中白名单/临时身份的条目，CLI 则直接显示公钥。
 		observation := PeerObservation{
 			Key:           keyText,
 			Name:          names[keyText],
@@ -168,8 +197,9 @@ func peerObservations(status *ipnstate.Status, allowed []config.RemoteAllowEntry
 			observation.Path = PathDERP
 			observation.DERPRegion = peer.Relay
 		}
-		// tailcat 无控制面，PeerStatus.Online 通常没有意义；近期握手、引擎 Active
-		// 或仍有业务连接任一成立即可确认在线，过旧握手则保守标为离线。
+		// tailcat 无控制面，PeerStatus.Online 恒为 false；以近期握手、magicsock 的
+		// 活跃标记或仍有业务连接任一成立近似在线（这些字段同样自 v0.7.0 起才有值），
+		// 过旧握手则保守标为离线。
 		observation.Online = observation.Active > 0 || peer.Active ||
 			(!peer.LastHandshake.IsZero() && now.Sub(peer.LastHandshake) <= 2*time.Minute)
 		result = append(result, observation)

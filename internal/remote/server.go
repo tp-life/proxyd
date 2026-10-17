@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -96,7 +97,8 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 
 	s := &tailcat.Server{
 		Key: identity.Private,
-		// v0.6 默认为零 PSK 自动生成随机值；必须恢复文件中的 PSK 才能保持 token 稳定。
+		// tailcat v0.6 起，Key 为零时自动生成随机 PSK（v0.7.0 语义不变）；
+		// 必须恢复文件中的 PSK 才能保持 token 稳定。
 		// 老文件没有 PSK，显式沿用兼容模式，避免升级后已分发的 token 全部失效。
 		PresharedKey:        identity.Public.PresharedKey,
 		DisablePresharedKey: identity.Public.PresharedKey.IsZero(),
@@ -217,16 +219,52 @@ func (m *Manager) stopServerLocked() {
 	m.serveErr = ""
 }
 
+// loopbackDialTimeout 限制 serve 语义下向本机目标端口建连的总时长。
+const loopbackDialTimeout = 10 * time.Second
+
+// loopbackHosts 是 serve 语义依次尝试的本机目标地址：IPv4 回环优先，
+// 失败后回退 IPv6 回环，兼容只监听 ::1 的本机服务。
+var loopbackHosts = [...]string{"127.0.0.1", "::1"}
+
 // serveConn 把隧道内到来的连接转发到本机回环端口（serve 语义的实现）。
 func (m *Manager) serveConn(c net.Conn, port uint16) {
 	defer c.Close()
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), 10*time.Second)
+	upstream, err := dialLoopback(port)
 	if err != nil {
-		m.logf("[remote] 隧道连接 → 127.0.0.1:%d 失败: %v", port, err)
+		m.logf("[remote] 隧道连接 → 本机端口 %d 失败: %v", port, err)
 		return
 	}
 	defer upstream.Close()
+	tuneLocalConn(upstream)
 	relay(c, upstream)
+}
+
+// dialLoopback 依次尝试 127.0.0.1 与 ::1 上的 port，返回第一个可用连接。
+//
+// 参数说明：
+//   - port: uint16，隧道要访问的本机端口。
+//
+// 返回值说明：net.Conn，成功建立的本机 TCP 连接；两个地址都失败时返回合并错误。
+//
+// 错误情况：两次尝试共享 loopbackDialTimeout 总预算；连接被拒绝会立即换下一个
+// 地址，预算耗尽则不再尝试，并把各地址的失败原因拼成单行错误返回给调用方记录。
+func dialLoopback(port uint16) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), loopbackDialTimeout)
+	defer cancel()
+	var dialer net.Dialer
+	var failures []string
+	for _, host := range loopbackHosts {
+		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)))
+		if err == nil {
+			return conn, nil
+		}
+		// 各地址的失败原因用 "; " 拼成单行，避免多行日志在 Web/CLI 日志面板里断行。
+		failures = append(failures, fmt.Sprintf("%s: %v", host, err))
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, errors.New(strings.Join(failures, "; "))
 }
 
 // allowKeys 提取白名单条目的公钥列表（别名只用于管理展示，不参与握手判定）。
@@ -244,14 +282,20 @@ func allowKeys(entries []config.RemoteAllowEntry) []string {
 //   - a: net.Conn，双向转发的一端。
 //   - b: net.Conn，双向转发的另一端。
 //
-// 返回值说明：无；两个 io.Copy 均退出后返回。
+// 返回值说明：无；两个拷贝协程均退出后返回。
 //
 // 错误情况：转发错误不向上返回；关闭两端会解除另一个方向的阻塞，
 // 等待第二个完成信号可保证函数返回时不残留持有连接的拷贝协程。
 func relay(a, b net.Conn) {
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(a, b); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(b, a); done <- struct{}{} }()
+	copyOne := func(dst, src net.Conn) {
+		buffer := getRelayCopyBuffer()
+		defer putRelayCopyBuffer(buffer)
+		_, _ = io.CopyBuffer(dst, src, buffer)
+		done <- struct{}{}
+	}
+	go copyOne(a, b)
+	go copyOne(b, a)
 	<-done
 	_ = a.Close()
 	_ = b.Close()
@@ -291,7 +335,7 @@ func loadOrCreateNodeKey(path string) (priv key.NodePrivate, err error) {
 	return saved.Private, nil
 }
 
-// loadOrCreateTailcatKey 读取完整 tailcat 身份，保留 v0.6 新增的持久化 PSK。
+// loadOrCreateTailcatKey 读取完整 tailcat 身份，保留 v0.6 起新增的持久化 PSK（v0.7.0 语义不变）。
 // 参数说明：path 为 string，服务端或客户端密钥文件路径。
 // 返回值说明：*tailcat.PrivateKey 和 error；老文件保持原值，新文件包含随机 PSK。
 // 错误情况：损坏文件或写入失败时返回错误。新文件通过同目录原子替换以 0600 落盘；

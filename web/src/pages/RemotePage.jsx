@@ -145,6 +145,7 @@ export function RemotePage({
   const allow = status?.allow || [];
   const activity = status?.client_activity || {};
   const peers = status?.peers || [];
+  const relayedPeers = peers.filter((item) => item.online && item.path === "derp");
   const tempPeer = peers.find((item) => item.key === status?.temp_key);
   const forwards = status?.forwards || [];
   const initialLoading = loading && !hasLoaded && !status;
@@ -561,6 +562,16 @@ export function RemotePage({
             <RefreshCw size={16} aria-hidden="true" />
             <span>重试</span>
           </Button>
+        </div>
+      )}
+
+      {relayedPeers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">
+          <CircleAlert size={16} aria-hidden="true" />
+          <span className="min-w-0 break-words">
+            检测到 {relayedPeers.length} 个在线客户端正在走 DERP 中继（TCP）。远程桌面、SSH 交互和大文件传输通常明显慢于直连；
+            请检查双方 UDP 连通性、客户端防火墙是否放行 proxyd 入站 UDP，以及是否有多余网口在同一子网抢路由。
+          </span>
         </div>
       )}
 

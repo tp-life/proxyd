@@ -313,6 +313,12 @@ export function DesktopPage({
       <section className="panel compact-panel">
         <PanelTitle title="连接方式" detail="tailcat 先通过 DERP 完成发现，再尝试 NAT 穿透建立 WireGuard 点对点通道；无法直连时自动回退 DERP 中继。" />
         <p className="permission-note ok">proxyd 只转发桌面协议流量，不绕过 Windows、macOS 或 VNC 服务自身的账号与密码认证。</p>
+        {status?.session_idle_timeout && (
+          <p className="permission-note">
+            临时会话空闲 <code className="font-mono text-foreground">{status.session_idle_timeout}</code> 后回收，最长运行{" "}
+            <code className="font-mono text-foreground">{status.session_max_lifetime}</code>；可在 desktop 配置段调整。
+          </p>
+        )}
       </section>
 
       {initialLoading ? (

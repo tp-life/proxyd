@@ -118,7 +118,9 @@ type Session struct {
 //
 // StartupGrace 是等待桌面客户端首次连接的时间；IdleTimeout 是已有连接全部断开后的
 // 保留时间；MaxLifetime 是无论客户端状态如何都必须回收的硬上限；SweepInterval 控制
-// 单个固定清扫协程的检查频率，避免为每个会话创建定时器。
+// 单个固定清扫协程的检查频率，避免为每个会话创建定时器。零值字段使用适合桌面重连
+// 的默认值（30 分钟空闲 / 24 小时上限），过短的空闲期会让锁屏或网络切换后的重连
+// 重新建立整条隧道。
 type Options struct {
 	StartupGrace  time.Duration
 	IdleTimeout   time.Duration
@@ -179,10 +181,10 @@ func normalizeOptions(options Options) Options {
 		options.StartupGrace = 2 * time.Minute
 	}
 	if options.IdleTimeout <= 0 {
-		options.IdleTimeout = time.Minute
+		options.IdleTimeout = 30 * time.Minute
 	}
 	if options.MaxLifetime <= 0 {
-		options.MaxLifetime = 12 * time.Hour
+		options.MaxLifetime = 24 * time.Hour
 	}
 	if options.SweepInterval <= 0 {
 		options.SweepInterval = 15 * time.Second

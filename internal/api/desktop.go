@@ -33,11 +33,13 @@ type desktopSessionResponse struct {
 
 // desktopStatusResponse 是 GET /api/desktop 的稳定响应结构。
 type desktopStatusResponse struct {
-	Services      []app.DesktopServiceStatus `json:"services"`
-	Connections   []config.DesktopConnection `json:"connections"`
-	Sessions      []desktopSessionResponse   `json:"sessions"`
-	RemoteEnabled bool                       `json:"remote_enabled"`
-	APILoopback   bool                       `json:"api_loopback"`
+	Services           []app.DesktopServiceStatus `json:"services"`
+	Connections        []config.DesktopConnection `json:"connections"`
+	Sessions           []desktopSessionResponse   `json:"sessions"`
+	RemoteEnabled      bool                       `json:"remote_enabled"`
+	APILoopback        bool                       `json:"api_loopback"`
+	SessionIdleTimeout string                     `json:"session_idle_timeout"`
+	SessionMaxLifetime string                     `json:"session_max_lifetime"`
 }
 
 // registerDesktopRoutes 注册「远程桌面」模块的全部路由。
@@ -239,11 +241,13 @@ func (s *Server) writeDesktopStatus(w http.ResponseWriter, status app.DesktopSta
 	// API 客户端直接遍历，也避免删除最后一条档案后响应类型发生变化。
 	connections := append(make([]config.DesktopConnection, 0, len(status.Connections)), status.Connections...)
 	writeJSON(w, desktopStatusResponse{
-		Services:      status.Services,
-		Connections:   connections,
-		Sessions:      sessions,
-		RemoteEnabled: status.RemoteEnabled,
-		APILoopback:   status.APILoopback,
+		Services:           status.Services,
+		Connections:        connections,
+		Sessions:           sessions,
+		RemoteEnabled:      status.RemoteEnabled,
+		APILoopback:        status.APILoopback,
+		SessionIdleTimeout: status.SessionIdleTimeout.String(),
+		SessionMaxLifetime: status.SessionMaxLifetime.String(),
 	})
 }
 

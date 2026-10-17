@@ -241,6 +241,50 @@ func TestPeerObservations(t *testing.T) {
 	}
 }
 
+// TestPeerObservationsUnlistedPeer 验证未登记公钥被保留为匿名条目，
+// 同时跳过状态中的 nil 值：tailcat v0.7.0 起 Peer 不再是空集合，
+// 开放模式下陌生客户端必须在列表里可见，Web 层自行按白名单过滤展示。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；断言失败时由 testing 标记用例失败。
+//
+// 错误情况：不调用 tailcat 网络；失败表示匿名条目被误删或被赋予别名。
+func TestPeerObservationsUnlistedPeer(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	unlistedKey := key.NewNode().Public()
+	offlineKey := key.NewNode().Public()
+	nilKey := key.NewNode().Public()
+	status := &ipnstate.Status{Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+		unlistedKey: {LastHandshake: now.Add(-30 * time.Second), RxBytes: 7},
+		offlineKey:  {LastHandshake: now.Add(-time.Hour)},
+		nilKey:      nil,
+	}}
+
+	observations := peerObservations(status, nil, "", nil, now)
+	if len(observations) != 2 {
+		t.Fatalf("应保留 2 个非 nil 客户端（未登记公钥不删除，nil 跳过），got %d: %+v", len(observations), observations)
+	}
+	byKey := make(map[string]PeerObservation, len(observations))
+	for _, observation := range observations {
+		byKey[observation.Key] = observation
+		if observation.Name != "" {
+			t.Fatalf("未登记公钥不应有别名，got %q", observation.Name)
+		}
+		if observation.Path != PathUnknown {
+			t.Fatalf("无路径信息时应为 unknown，got %q", observation.Path)
+		}
+	}
+	unlisted := byKey[unlistedKey.String()]
+	if !unlisted.Online || unlisted.RxBytes != 7 {
+		t.Fatalf("近期握手的未登记客户端应近似在线并保留流量，got %+v", unlisted)
+	}
+	if offline := byKey[offlineKey.String()]; offline.Online {
+		t.Fatalf("握手过旧的客户端应标为离线，got %+v", offline)
+	}
+}
+
 // TestDurationMillis 验证 RTT 毫秒转换不会把成功的亚毫秒探测展示成零。
 //
 // 参数说明：

@@ -1,6 +1,6 @@
 package remote
 
-// 本文件适配 tailcat v0.6 的 SSH authorized_keys 语义，并将公钥转换为稳定管理标识。
+// 本文件适配 tailcat v0.6+（v0.7.0 未变）的 SSH authorized_keys 语义，并将公钥转换为稳定管理标识。
 // 公钥认证叠加于隧道授权；既不保存客户端私钥，也不赋予切换本机账户的权限。
 
 import (
