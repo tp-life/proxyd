@@ -115,6 +115,10 @@ func (c *Config) Clone() *Config {
 			enabled := *subscription.PortMapping
 			out.Subscriptions[index].PortMapping = &enabled
 		}
+		if subscription.ImportRules != nil {
+			enabled := *subscription.ImportRules
+			out.Subscriptions[index].ImportRules = &enabled
+		}
 	}
 	out.ManualNodes = append([]any(nil), c.ManualNodes...)
 	for i, entry := range out.ManualNodes {
@@ -536,21 +540,24 @@ type Config struct {
 	SystemProxy bool `yaml:"system-proxy,omitempty"`
 
 	// Clash-semantics globals, passed through to mihomo.
-	Mode               string         `yaml:"mode"`                     // rule | global | direct
-	Rules              []string       `yaml:"rules"`                    // clash rule lines
-	CustomRules        []string       `yaml:"custom-rules,omitempty"`   // 追加式自定义规则，生成时前置到 rules 之前
-	RuleURLs           []RuleURL      `yaml:"rule-urls,omitempty"`      // 远程规则源（gfwlist/mihomo 规则文本），导入规则排在 custom-rules 之后
-	Groups             []NodeGroup    `yaml:"groups,omitempty"`         // 节点分组端口：一组节点 → 指定端口（自动选优）
-	RuleProviders      map[string]any `yaml:"rule-providers,omitempty"` // clash rule-providers
-	DNS                map[string]any `yaml:"dns,omitempty"`            // mihomo dns section (optional)
-	DNSPreset          string         `yaml:"dns-preset,omitempty"`     // off|fake-ip|redir-host；手写 DNS 非空时优先
-	TUN                TUNConfig      `yaml:"tun" json:"tun"`           // mihomo TUN 段；常用字段有默认值，其余字段原样透传
-	CheckUpdates       *bool          `yaml:"check-updates,omitempty"`  // 启动后异步检查 GitHub Releases；指针保留显式 false
-	GeoXUrl            map[string]any `yaml:"geox-url,omitempty"`       // 可选：覆盖 geo 数据下载地址（键：mmdb/geoip/geosite/asn）
-	ExternalController string         `yaml:"external-controller"`      // default 127.0.0.1:19090
-	Secret             string         `yaml:"secret,omitempty"`
-	ExternalUI         string         `yaml:"external-ui,omitempty"`
-	LogLevel           string         `yaml:"log-level"` // silent|error|warning|info|debug, default info
+	Mode          string         `yaml:"mode"`                     // rule | global | direct
+	Rules         []string       `yaml:"rules"`                    // clash rule lines
+	CustomRules   []string       `yaml:"custom-rules,omitempty"`   // 追加式自定义规则，生成时前置到 rules 之前
+	RuleURLs      []RuleURL      `yaml:"rule-urls,omitempty"`      // 远程规则源（gfwlist/mihomo 规则文本），导入规则排在 custom-rules 之后
+	Groups        []NodeGroup    `yaml:"groups,omitempty"`         // 节点分组端口：一组节点 → 指定端口（自动选优）
+	RuleProviders map[string]any `yaml:"rule-providers,omitempty"` // clash rule-providers
+	// SubscriptionGroupFallback 控制订阅自带策略组的默认出口是否交给内置 PROXY 组
+	// （主端口默认出口）：auto|proxy|off，默认 auto。详见 config/proxy.go。
+	SubscriptionGroupFallback string         `yaml:"subscription-group-fallback,omitempty"`
+	DNS                       map[string]any `yaml:"dns,omitempty"`           // mihomo dns section (optional)
+	DNSPreset                 string         `yaml:"dns-preset,omitempty"`    // off|fake-ip|redir-host；手写 DNS 非空时优先
+	TUN                       TUNConfig      `yaml:"tun" json:"tun"`          // mihomo TUN 段；常用字段有默认值，其余字段原样透传
+	CheckUpdates              *bool          `yaml:"check-updates,omitempty"` // 启动后异步检查 GitHub Releases；指针保留显式 false
+	GeoXUrl                   map[string]any `yaml:"geox-url,omitempty"`      // 可选：覆盖 geo 数据下载地址（键：mmdb/geoip/geosite/asn）
+	ExternalController        string         `yaml:"external-controller"`     // default 127.0.0.1:19090
+	Secret                    string         `yaml:"secret,omitempty"`
+	ExternalUI                string         `yaml:"external-ui,omitempty"`
+	LogLevel                  string         `yaml:"log-level"` // silent|error|warning|info|debug, default info
 
 	// APIListen is proxyd's own API (port mapping table). Default 127.0.0.1:19091.
 	// Kept separate from external-controller because mihomo's router cannot be extended.
@@ -800,6 +807,9 @@ func (c *Config) applyDefaults() {
 	if c.DNSPreset == "" {
 		c.DNSPreset = DNSPresetOff
 	}
+	if c.SubscriptionGroupFallback == "" {
+		c.SubscriptionGroupFallback = GroupFallbackAuto
+	}
 	if c.CheckUpdates == nil {
 		enabled := true
 		c.CheckUpdates = &enabled
@@ -973,6 +983,16 @@ func (c *Config) validate(allowMissingAPISecret bool) error {
 	case DNSPresetOff, DNSPresetFakeIP, DNSPresetRedirHost:
 	default:
 		return fmt.Errorf("invalid dns-preset %q (off|fake-ip|redir-host)", dnsPreset)
+	}
+	// 空值与 Parse 补出的默认 auto 语义一致；同样不在这里修改调用方对象。
+	groupFallback := c.SubscriptionGroupFallback
+	if groupFallback == "" {
+		groupFallback = GroupFallbackAuto
+	}
+	switch groupFallback {
+	case GroupFallbackAuto, GroupFallbackProxy, GroupFallbackOff:
+	default:
+		return fmt.Errorf("invalid subscription-group-fallback %q (auto|proxy|off)", groupFallback)
 	}
 	if c.Exclude != "" {
 		if _, err := regexp.Compile(c.Exclude); err != nil {

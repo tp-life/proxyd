@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/term"
@@ -28,6 +29,7 @@ type serviceAccount struct {
 	UserName string
 	HomeDir  string
 	UID      string
+	GID      string
 }
 
 // privilegedCommand 是一次必须以管理员权限执行的固定外部命令。
@@ -80,7 +82,7 @@ func validateServiceAccount(current *user.User) (serviceAccount, error) {
 	if strings.TrimSpace(current.Username) == "" || strings.TrimSpace(current.HomeDir) == "" || strings.TrimSpace(current.Uid) == "" {
 		return serviceAccount{}, fmt.Errorf("LaunchDaemon 运行账户信息不完整")
 	}
-	return serviceAccount{UserName: current.Username, HomeDir: current.HomeDir, UID: current.Uid}, nil
+	return serviceAccount{UserName: current.Username, HomeDir: current.HomeDir, UID: current.Uid, GID: current.Gid}, nil
 }
 
 // RootDaemonPlistInstalled 报告系统自启项是否仍是旧的 root 模式（plist 无 UserName，
@@ -152,10 +154,14 @@ func on(opt Options) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(opt.StateDir, 0o755); err != nil {
-		return fmt.Errorf("创建状态目录失败: %w", err)
+	// StateDir 由注册进程解析（默认取其 $HOME），而服务以 account 降权运行、
+	// plist 注入的 HOME 是 account.HomeDir；sudo 注册、RunAsUser 迁移等场景中
+	// 两者可能不属于同一用户（如 /var/root），日志路径必须锚定到服务账户主目录。
+	processHome, _ := os.UserHomeDir()
+	logPath := serviceLogPath(opt.StateDir, processHome, account.HomeDir)
+	if err := ensureLogDir(filepath.Dir(logPath), account); err != nil {
+		return err
 	}
-	logPath := filepath.Join(opt.StateDir, "proxyd.log")
 	temporary, err := os.CreateTemp("", "proxyd-launchdaemon-*.plist")
 	if err != nil {
 		return fmt.Errorf("创建 LaunchDaemon 临时文件失败: %w", err)
@@ -178,6 +184,70 @@ func on(opt Options) error {
 	// 延迟 bootout 让本次请求（可能正由旧实例处理）先返回。
 	if err := removeLegacyLaunchAgent(account, true); err != nil {
 		return fmt.Errorf("系统 LaunchDaemon 已启用，但旧 LaunchAgent 清理失败: %w", err)
+	}
+	return nil
+}
+
+// serviceLogPath 计算写入 plist 的日志路径。
+//
+// 参数说明：
+//   - stateDir: string，注册进程解析出的状态目录（默认值派生自其 $HOME）。
+//   - processHome: string，注册进程的主目录；为空时不做重锚。
+//   - accountHome: string，LaunchDaemon 服务账户的主目录（plist 注入的 HOME）。
+//
+// 返回值说明：string，launchd 标准输出/错误日志的绝对路径。stateDir 位于注册进程
+// 主目录下且服务账户主目录不同（sudo 注册、RunAsUser 迁移等）时，相对部分重锚到
+// 服务账户主目录，与服务运行期按自身 HOME 解析出的默认 state-dir 保持一致；
+// 显式配置在主目录之外的 state-dir 原样保留。
+//
+// 错误情况：无；路径不可相对化时按原样使用 stateDir。
+func serviceLogPath(stateDir, processHome, accountHome string) string {
+	dir := stateDir
+	if processHome != "" && accountHome != "" && processHome != accountHome {
+		if rel, err := filepath.Rel(processHome, stateDir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			dir = filepath.Join(accountHome, rel)
+		}
+	}
+	return filepath.Join(dir, "proxyd.log")
+}
+
+// ensureLogDir 创建日志目录；sudo 注册（euid=0）时把新建目录还给服务账户，
+// 否则降权守护进程无法在自己的主目录下写日志。
+//
+// 参数说明：
+//   - dir: string，日志文件所在目录的绝对路径。
+//   - account: serviceAccount，目录属主目标账户。
+//
+// 返回值说明：error，目录创建成功时为 nil；属主调整失败只记日志不阻断注册。
+//
+// 错误情况：目录创建失败时返回错误。只 chown 本次新建的目录层级，已存在的
+// 目录属主保持不变。
+func ensureLogDir(dir string, account serviceAccount) error {
+	var created []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		}
+		created = append(created, d)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建状态目录失败: %w", err)
+	}
+	if os.Geteuid() != 0 || len(created) == 0 {
+		return nil
+	}
+	uid, uidErr := strconv.Atoi(account.UID)
+	gid, gidErr := strconv.Atoi(account.GID)
+	if uidErr != nil || gidErr != nil {
+		return nil
+	}
+	for _, d := range created {
+		if err := os.Chown(d, uid, gid); err != nil {
+			log.Printf("[autostart] 调整状态目录属主失败 %s: %v", d, err)
+		}
 	}
 	return nil
 }

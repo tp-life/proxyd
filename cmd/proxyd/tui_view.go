@@ -719,14 +719,15 @@ func (m tuiModel) renderPortsPage(width int) string {
 	return strings.Join([]string{entryPanel, portPanel, groupPanel}, "\n")
 }
 
-// renderRulesPage 渲染自定义规则顺序及远程规则源状态。
+// renderRulesPage 渲染自定义规则顺序、当前生效规则来源统计及远程规则源状态。
 //
 // 参数说明：
 //   - width: int，页面可用宽度。
 //
-// 返回值说明：string，两张只读规则表；顺序与实际匹配优先级一致。
+// 返回值说明：string，三张只读规则表；顺序与实际匹配优先级一致。
 //
-// 错误情况：无；规则源地址只显示安全摘要，拉取错误以状态列呈现。
+// 错误情况：无；规则源地址只显示安全摘要，拉取错误以状态列呈现。生效规则在这里只给
+// 来源统计：订阅自带规则可能上万条，完整列表请用 Web 控制台或 `proxyd rules effective`。
 func (m tuiModel) renderRulesPage(width int) string {
 	ruleRows := make([][]string, 0, len(m.overview.CustomRules))
 	for index, rule := range m.overview.CustomRules {
@@ -734,6 +735,8 @@ func (m tuiModel) renderRulesPage(width int) string {
 	}
 	ruleColumns := []tuiColumn{{Title: "优先级", Width: 8, Right: true}, {Title: "自定义规则", Width: 0}}
 	rulesPanel := renderTUIPanel(width, "自定义访问规则", "从上到下匹配 · 首条命中后停止", renderTUITable(ruleColumns, ruleRows, tuiPanelBodyWidth(width)))
+
+	effectivePanel := m.renderEffectiveRulesPanel(width)
 
 	sourceRows := make([][]string, 0, len(m.ruleURLs))
 	for _, source := range m.ruleURLs {
@@ -752,7 +755,38 @@ func (m tuiModel) renderRulesPage(width int) string {
 		{Title: "来源", Width: 24},
 	}
 	sourcesPanel := renderTUIPanel(width, "远程规则源", fmt.Sprintf("%d 个来源", len(sourceRows)), renderTUITable(sourceColumns, sourceRows, tuiPanelBodyWidth(width)))
-	return rulesPanel + "\n" + sourcesPanel
+	return rulesPanel + "\n" + effectivePanel + "\n" + sourcesPanel
+}
+
+// renderEffectiveRulesPanel 渲染当前生效规则的来源统计。
+//
+// 参数说明：
+//   - width: int，页面可用宽度。
+//
+// 返回值说明：string，一张「来源 / 条数」表；快照缺失或代理未生效时给出说明文案。
+//
+// 错误情况：无；统计来自 /api/rules/effective，缺失时只显示提示，不影响其它面板。
+func (m tuiModel) renderEffectiveRulesPanel(width int) string {
+	title := "当前生效规则"
+	if m.effectiveRules == nil {
+		return renderTUIPanel(width, title, "统计暂不可用", renderTUITable(
+			[]tuiColumn{{Title: "来源", Width: 18}, {Title: "条数", Width: 10, Right: true}},
+			nil, tuiPanelBodyWidth(width)))
+	}
+	if !m.effectiveRules.Available {
+		return renderTUIPanel(width, title, "代理未生效，暂无规则；启动代理或同步订阅后查看",
+			renderTUITable([]tuiColumn{{Title: "来源", Width: 18}, {Title: "条数", Width: 10, Right: true}}, nil, tuiPanelBodyWidth(width)))
+	}
+	rows := make([][]string, 0, len(m.effectiveRules.Sources))
+	for _, source := range m.effectiveRules.Sources {
+		if source.Count == 0 {
+			continue
+		}
+		rows = append(rows, []string{source.Label, strconv.Itoa(source.Count)})
+	}
+	columns := []tuiColumn{{Title: "来源", Width: 18}, {Title: "条数", Width: 10, Right: true}}
+	detail := fmt.Sprintf("共 %d 条 · 完整列表见 Web 控制台或 proxyd rules effective", m.effectiveRules.Total)
+	return renderTUIPanel(width, title, detail, renderTUITable(columns, rows, tuiPanelBodyWidth(width)))
 }
 
 // renderConnectionsPage 渲染连接总量、累计流量、内存与活动连接明细。
@@ -1240,7 +1274,8 @@ func renderTUIPanel(width int, title, detail, body string) string {
 //   - width: int，传入 renderTUIPanel 的页面宽度。
 //
 // 返回值说明：int，表格/事实网格的安全宽度；行内容不超过它才不会在面板内换行，
-//   光标行号计算（一行 = 一条记录）也因此成立。
+//
+//	光标行号计算（一行 = 一条记录）也因此成立。
 //
 // 错误情况：无；极窄宽度使用 8 列下限以避免负尺寸。
 func tuiPanelBodyWidth(width int) int {

@@ -35,15 +35,19 @@ func (s *Server) registerProxySubscriptionRoutes(mux *http.ServeMux) {
 
 // SubEntry 是订阅聚合信息。
 type SubEntry struct {
-	Name        string              `json:"name"`
-	URL         string              `json:"url"`
-	Type        string              `json:"type"`
-	Enabled     bool                `json:"enabled"`
-	PortMapping bool                `json:"port_mapping"`
-	State       string              `json:"state"` // disabled|empty|error|degraded|healthy
-	Total       int                 `json:"total"`
-	Alive       int                 `json:"alive"`
-	UserInfo    *subscribe.UserInfo `json:"userinfo,omitempty"`
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Type        string `json:"type"`
+	Enabled     bool   `json:"enabled"`
+	PortMapping bool   `json:"port_mapping"`
+	// ImportRules 是该订阅是否开启了自带规则/策略组导入（配置事实，与本次导入是否成功无关）。
+	ImportRules bool `json:"import_rules"`
+	// Import 是本次路由导入的结果计数与错误；未开启导入时不返回。
+	Import   *app.SubscriptionImportStatus `json:"import,omitempty"`
+	State    string                        `json:"state"` // disabled|empty|error|degraded|healthy
+	Total    int                           `json:"total"`
+	Alive    int                           `json:"alive"`
+	UserInfo *subscribe.UserInfo           `json:"userinfo,omitempty"`
 }
 
 // handleAddSub 保存一条订阅配置，但不隐式拉取远端内容。
@@ -61,13 +65,15 @@ func (s *Server) handleAddSub(w http.ResponseWriter, r *http.Request) {
 		Type        string `json:"type"`
 		Enabled     *bool  `json:"enabled"`
 		PortMapping *bool  `json:"port_mapping"`
+		ImportRules *bool  `json:"import_rules"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
 		http.Error(w, "bad request: url required", http.StatusBadRequest)
 		return
 	}
 	sub, err := s.app.AddSubscriptionEntry(config.Subscription{
-		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled, PortMapping: req.PortMapping,
+		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled,
+		PortMapping: req.PortMapping, ImportRules: req.ImportRules,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -94,6 +100,7 @@ func (s *Server) handleUpdateSub(w http.ResponseWriter, r *http.Request) {
 		Type        string `json:"type"`
 		Enabled     *bool  `json:"enabled"`
 		PortMapping *bool  `json:"port_mapping"`
+		ImportRules *bool  `json:"import_rules"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -102,7 +109,8 @@ func (s *Server) handleUpdateSub(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
 	updated, err := s.app.UpdateSubscription(ctx, r.PathValue("name"), config.Subscription{
-		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled, PortMapping: req.PortMapping,
+		Name: req.Name, URL: req.URL, Type: req.Type, Enabled: req.Enabled,
+		PortMapping: req.PortMapping, ImportRules: req.ImportRules,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

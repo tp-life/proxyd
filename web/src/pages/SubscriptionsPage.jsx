@@ -17,6 +17,7 @@ import { Switch as UISwitch } from "@/components/ui/switch";
 import { EmptyState } from "@/components/EmptyState";
 import { Field } from "@/components/Field";
 import { PageHeader } from "@/components/PageHeader";
+import { PanelTitle } from "@/components/PanelTitle";
 import { StatusBadge } from "@/components/StatusBadge";
 import { classNames, formatUserInfo } from "@/lib/format";
 
@@ -39,7 +40,7 @@ import { classNames, formatUserInfo } from "@/lib/format";
  * 尚未手动同步的订阅不会产生节点；同步失败时显示错误通知，保存设置本身不访问远端。
  */
 export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAction, onWrite }) {
-  const emptyDraft = { name: "", url: "", type: "auto", enabled: true, port_mapping: true };
+  const emptyDraft = { name: "", url: "", type: "auto", enabled: true, port_mapping: true, import_rules: false };
   const [editor, setEditor] = useState(null);
   const [draft, setDraft] = useState(emptyDraft);
   const [saving, setSaving] = useState(false);
@@ -109,6 +110,7 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
       type: subscription.type || "auto",
       enabled: subscription.enabled !== false,
       port_mapping: subscription.port_mapping !== false,
+      import_rules: subscription.import_rules === true,
     } : emptyDraft);
   }
 
@@ -188,7 +190,13 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
   function toggleSubscription(subscription, enabled) {
     return onWrite(
       `/api/subscriptions/${encodeURIComponent(subscription.name)}`,
-      { name: subscription.name, url: subscription.url, type: subscription.type || "auto", enabled },
+      {
+        name: subscription.name,
+        url: subscription.url,
+        type: subscription.type || "auto",
+        enabled,
+        import_rules: subscription.import_rules === true,
+      },
       enabled ? "订阅已启用" : "订阅已停用",
       "PUT",
     );
@@ -209,9 +217,68 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
   function toggleSubscriptionMapping(subscription, enabled) {
     return onWrite(
       `/api/subscriptions/${encodeURIComponent(subscription.name)}`,
-      { name: subscription.name, url: subscription.url, type: subscription.type || "auto", port_mapping: enabled },
+      {
+        name: subscription.name,
+        url: subscription.url,
+        type: subscription.type || "auto",
+        port_mapping: enabled,
+        import_rules: subscription.import_rules === true,
+      },
       enabled ? `订阅 ${subscription.name} 的端口映射已开启` : `订阅 ${subscription.name} 的端口映射已关闭（节点仍参与选路）`,
       "PUT",
+    );
+  }
+
+  /**
+   * toggleSubscriptionImport 切换单个订阅是否导入自带的策略组与规则。
+   *
+   * 参数说明：
+   * - subscription: object，当前订阅完整快照。
+   * - enabled: boolean，目标开关状态。
+   *
+   * 返回值说明：返回 Promise<boolean>，由通用写入器返回提交结果。
+   *
+   * 可能的异常/错误情况：
+   * 请求体会带上已有的端口映射与启用状态，避免布尔开关覆盖其它字段；mihomo 自检或
+   * 持久化失败时后端回滚，界面回退为服务端状态。
+   */
+  function toggleSubscriptionImport(subscription, enabled) {
+    return onWrite(
+      `/api/subscriptions/${encodeURIComponent(subscription.name)}`,
+      {
+        name: subscription.name,
+        url: subscription.url,
+        type: subscription.type || "auto",
+        import_rules: enabled,
+      },
+      enabled
+        ? `订阅 ${subscription.name} 将导入自带的策略组与规则`
+        : `订阅 ${subscription.name} 已停止导入自带策略组与规则`,
+      "PUT",
+    );
+  }
+
+  /**
+   * toggleGroupFallback 切换订阅自带策略组的默认出口策略。
+   *
+   * 功能说明：
+   * 开启（auto）后，订阅里「只有 DIRECT/REJECT 成员」的策略组会把内置 PROXY 组放在成员
+   * 首位，未指定出口时跟随主端口的默认出口，而不是静默直连；手动指定过出口的组仍以手动
+   * 值为准（default-selected 优先于成员顺序）。关闭（off）则完全尊重订阅作者。
+   *
+   * 参数说明：enabled 为 boolean，true 写 auto，false 写 off。
+   *
+   * 返回值说明：返回 Promise<boolean>，由通用写入器返回提交结果。
+   *
+   * 可能的异常/错误情况：热更新或持久化失败时后端回滚，开关回退为服务端状态。
+   */
+  function toggleGroupFallback(enabled) {
+    return onWrite(
+      "/api/subscription-group-fallback",
+      { mode: enabled ? "auto" : "off" },
+      enabled
+        ? "订阅策略组将跟随主端口的默认出口"
+        : "订阅策略组将完全按订阅作者的成员列表出站",
     );
   }
 
@@ -220,6 +287,19 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
       <PageHeader eyebrow="代理资源" title="订阅管理" detail="管理来源、启用状态、同步与缓存健康度。">
         <Button type="button" onClick={() => openEditor()}><Plus size={16} aria-hidden="true" />添加订阅</Button>
       </PageHeader>
+      {(overview.subscriptions || []).some((subscription) => subscription.import_rules === true) && (
+        <section className="panel">
+          <PanelTitle
+            title="订阅策略组的默认出口"
+            detail="订阅作者常把分类策略组的成员只写成 DIRECT；开启后这类组的默认出口跟随主端口（含 AUTO/具体节点），手动指定过出口的组不受影响"
+          />
+          <UISwitch
+            checked={overview.group_fallback !== "off"}
+            label="只有直连成员的订阅策略组默认跟随主端口的默认出口"
+            onCheckedChange={(enabled) => toggleGroupFallback(enabled)}
+          />
+        </section>
+      )}
       <div className="subscription-cards">
         {(overview.subscriptions || []).map((subscription) => {
           const info = formatUserInfo(subscription.userinfo);
@@ -259,6 +339,57 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
                   <span className="text-xs text-muted-foreground">该订阅节点不参与一对一端口监听，仍保留稳定分配并参与选路</span>
                 ) : null}
               </div>
+              <div className="subscription-mapping">
+                <UISwitch
+                  ariaLabel={`${subscription.name} 导入自带规则`}
+                  checked={subscription.import_rules === true}
+                  className="mt-0 border-0 pt-0"
+                  disabled={subscription.enabled === false}
+                  label="导入订阅自带的策略组与规则"
+                  onCheckedChange={(enabled) => toggleSubscriptionImport(subscription, enabled)}
+                />
+                {subscription.enabled === false ? (
+                  <span className="text-xs text-muted-foreground">订阅已停用</span>
+                ) : subscription.import_rules !== true ? (
+                  <span className="text-xs text-muted-foreground">默认只取节点，订阅自带的分流策略不会生效</span>
+                ) : subscription.import?.error ? (
+                  <span className="text-xs text-destructive">{`导入失败，本轮仅导入节点：${subscription.import.error}`}</span>
+                ) : subscription.import ? (
+                  (() => {
+                    // 订阅自带的策略组常常只有 DIRECT/REJECT 成员（订阅作者留给自己在客户端
+                    // 里手选节点）。默认出口开启时它们会跟随主端口，关闭时才真的直连，
+                    // 两种情况必须给出不同提示，否则用户无法判断流量到底走没走代理。
+                    const directOnly = (subscription.import.group_entries || []).filter((group) => group.proxy_members === 0);
+                    const defaultRouted = directOnly.filter((group) => group.fallback_applied);
+                    const plainDirect = directOnly.filter((group) => !group.fallback_applied);
+                    const skipped = subscription.import.skipped_rules || 0;
+                    return (
+                      <>
+                        <span className="text-xs text-muted-foreground">
+                          {`已导入 ${subscription.import.groups} 个策略组、${subscription.import.rules} 条规则、${subscription.import.providers} 个规则集`}
+                        </span>
+                        {defaultRouted.length > 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            {`其中 ${defaultRouted.length} 个策略组只有直连成员（${defaultRouted.map((group) => group.name).join("、")}），未指定出口时跟随主端口的默认出口`}
+                          </span>
+                        )}
+                        {plainDirect.length > 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            {`其中 ${plainDirect.length} 个策略组只有直连成员（${plainDirect.map((group) => group.name).join("、")}），命中它们的流量不会走代理`}
+                          </span>
+                        )}
+                        {skipped > 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            {`已跳过 ${skipped} 条规则：${(subscription.import.skip_notes || []).join("；") || "目标策略组当前没有可用成员"}`}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()
+                ) : (
+                  <span className="text-xs text-muted-foreground">同步成功后开始导入</span>
+                )}
+              </div>
               {info && <div className="subscription-usage"><span>{info.usage}</span><span className={classNames(info.urgent && "urgent")}>{info.expire}</span></div>}
               <div className="subscription-card-actions">
                 <Button size="sm" variant="ghost" type="button" onClick={() => onNavigateNodes(subscription.name)}>查看节点</Button>
@@ -294,6 +425,7 @@ export function SubscriptionsPage({ overview, onDelete, onNavigateNodes, onSubAc
               </Field>
               <UISwitch checked={draft.enabled} label="保存后启用此订阅" onCheckedChange={(enabled) => updateDraft("enabled", enabled)} />
               <UISwitch checked={draft.port_mapping} label="该订阅节点参与端口映射（一对一节点端口）" onCheckedChange={(enabled) => updateDraft("port_mapping", enabled)} />
+              <UISwitch checked={draft.import_rules} label="导入订阅自带的策略组与规则（默认关闭；开启后策略组与规则一起导入）" onCheckedChange={(enabled) => updateDraft("import_rules", enabled)} />
             </div>
             <DialogFooter>
               <Button variant="outline" type="button" onClick={() => cancelEditor(false)}>{saving ? "取消等待" : "取消"}</Button>

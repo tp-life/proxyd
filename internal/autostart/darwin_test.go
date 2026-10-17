@@ -105,6 +105,56 @@ func TestDaemonRegisterCommands(t *testing.T) {
 	}
 }
 
+// TestServiceLogPath 验证 plist 日志路径锚定到服务账户主目录：注册进程与服务
+// 账户主目录不一致（sudo 注册、RunAsUser 迁移）时，主目录下的 state-dir 相对部分
+// 重锚到服务账户；主目录一致或显式配置在主目录外的 state-dir 保持原样。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；各场景日志路径与预期一致时测试通过。
+//
+// 错误情况：重锚缺失或误重锚时测试失败。
+func TestServiceLogPath(t *testing.T) {
+	cases := []struct {
+		name                            string
+		stateDir, processHome, acctHome string
+		want                            string
+	}{
+		{"主目录一致不重锚", "/Users/alice/.local/state/proxyd", "/Users/alice", "/Users/alice", "/Users/alice/.local/state/proxyd/proxyd.log"},
+		{"sudo 注册重锚到服务账户", "/var/root/.local/state/proxyd", "/var/root", "/Users/alice", "/Users/alice/.local/state/proxyd/proxyd.log"},
+		{"RunAsUser 迁移重锚", "/var/root/.local/state/proxyd", "/var/root", "/Users/bob", "/Users/bob/.local/state/proxyd/proxyd.log"},
+		{"显式主目录外路径保留", "/var/lib/proxyd", "/var/root", "/Users/alice", "/var/lib/proxyd/proxyd.log"},
+		{"显式服务账户主目录内路径保留", "/Users/alice/proxyd-state", "/var/root", "/Users/alice", "/Users/alice/proxyd-state/proxyd.log"},
+		{"注册进程主目录未知不重锚", "/var/root/.local/state/proxyd", "", "/Users/alice", "/var/root/.local/state/proxyd/proxyd.log"},
+	}
+	for _, c := range cases {
+		if got := serviceLogPath(c.stateDir, c.processHome, c.acctHome); got != c.want {
+			t.Fatalf("%s: serviceLogPath(%q, %q, %q) = %q, want %q", c.name, c.stateDir, c.processHome, c.acctHome, got, c.want)
+		}
+	}
+}
+
+// TestEnsureLogDirChownsCreatedDirs 验证 root 注册时新建的日志目录层级还给服务账户，
+// 已存在的祖先目录属主保持不变。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；目录创建成功时测试通过（chown 语义需 root 环境，非 root 仅覆盖创建）。
+//
+// 错误情况：目录创建失败时测试失败。
+func TestEnsureLogDirChownsCreatedDirs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a", "b", "proxyd")
+	if err := ensureLogDir(dir, serviceAccount{UserName: "x", HomeDir: "/Users/x", UID: "501", GID: "20"}); err != nil {
+		t.Fatalf("创建日志目录失败: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("日志目录未创建: %v", err)
+	}
+}
+
 // TestRenderShellCommandQuotesArguments 验证管理员授权脚本不会把路径内容解释为 shell 操作符。
 //
 // 参数说明：

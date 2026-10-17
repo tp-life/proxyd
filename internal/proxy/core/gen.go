@@ -15,14 +15,18 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
+	"proxyd/internal/proxy/routing"
 )
 
 // Assignment 是端口到节点的映射（internal/pool 定义的别名）。
 type Assignment = pool.Assignment
 
 const (
-	// adBlockProviderName 是广告拦截注入的 rule-provider 保留键名。
+	// adBlockProviderName 是广告拦截注入的 rule-provider 保留键名（保留在 core 内，
+	// 新代码统一使用 config.AdBlockProviderName）。
 	adBlockProviderName = "adblock"
+	// autoGroupName 是内置 AUTO url-test 组名，与 config.ReservedPolicyNames 保持一致。
+	autoGroupName = "AUTO"
 	// adBlockRule 是开启广告拦截时插入的规则：命中的域名直接 REJECT。
 	adBlockRule = "RULE-SET,adblock,REJECT"
 )
@@ -77,7 +81,21 @@ func GenerateWithNodes(cfg *config.Config, assigns []Assignment, nodes []*node.N
 // 回退到组成员首位。选择 default-selected 而非 external-controller 恢复，是因为它在
 // 配置加载期生效，无需等 mihomo 启动后再发 API 请求，路径更短且无并发时序问题。
 func GenerateWithState(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) ([]byte, error) {
-	built, err := BuildWithState(cfg, assigns, nodes, imported, selected)
+	return GenerateWithRouting(cfg, assigns, nodes, imported, selected, routing.Plan{})
+}
+
+// GenerateWithRouting 在 GenerateWithState 基础上接受「订阅自带路由元信息」的导入计划。
+//
+// 参数：
+//   - plan: routing.Plan，来自开启 import-subscription-rules 的订阅；为空时行为与
+//     GenerateWithState 完全一致。
+//
+// 其余参数、返回值与错误语义同 GenerateWithState。订阅策略组追加在 proxyd 内置组与
+// 用户分组之后，订阅规则插入在自定义规则与规则源导入之后、广告拦截之前，保证显式
+// 用户意图优先级更高；订阅原文的 MATCH/FINAL 兜底规则（plan.FallbackRules）追加在
+// 整份规则列表最后，避免它遮蔽广告拦截与内置规则（见 generate 内的规则顺序注释）。
+func GenerateWithRouting(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string, plan routing.Plan) ([]byte, error) {
+	built, err := BuildWithRouting(cfg, assigns, nodes, imported, selected, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -95,12 +113,21 @@ func GenerateWithState(cfg *config.Config, assigns []Assignment, nodes []*node.N
 //
 // 返回值：
 //   - *Generated，可直接取 YAML 比较，或在决定应用时调用 Validate 完成自检。
-//   - error，assignment 缺节点或 YAML 序列化失败时返回。
+//   - error，assignment 缺节点、订阅路由与保留名冲突或 YAML 序列化失败时返回。
 //
 // 错误情况：调用方必须在真正交给 mihomo 之前调用一次 Validate；跳过 Validate 只允许
 // 发生在配置字节与上一次成功生效的完全一致时。
 func BuildWithState(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) (*Generated, error) {
-	return generate(cfg, assigns, nodes, imported, selected)
+	return BuildWithRouting(cfg, assigns, nodes, imported, selected, routing.Plan{})
+}
+
+// BuildWithRouting 是 BuildWithState 的带订阅路由导入版本。
+//
+// 参数：plan 为订阅路由导入计划（routing.Plan 零值表示不导入任何订阅策略）。
+//
+// 返回值与错误语义同 BuildWithState。
+func BuildWithRouting(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string, plan routing.Plan) (*Generated, error) {
+	return generate(cfg, assigns, nodes, imported, selected, plan)
 }
 
 // Generated 是完成配置翻译与序列化、但尚未经过 mihomo 解析自检的配置产物。
@@ -111,6 +138,23 @@ type Generated struct {
 	yaml []byte
 	// rules 是最终写入的规则列表，用于判断自检失败能否走 GEO 降级。
 	rules []string
+	// ruleEntries 与 rules 一一对应，额外记录每条规则的来源，供界面展示当前生效规则。
+	// GEO 降级会同时剔除两边的 GEO 条目，保证展示与真正生效的配置一致。
+	ruleEntries []RuleEntry
+}
+
+// Rules 返回本次生成的完整规则列表及其来源（按匹配顺序）。
+//
+// 参数：无。
+//
+// 返回值：[]RuleEntry，与写入 mihomo 的 rules 顺序严格一致；调用方修改返回值不会
+// 影响 Generated 内部状态。
+//
+// 错误情况：无。调用方应在 Validate 之后读取，以便拿到 GEO 降级后的真实规则集合。
+func (g *Generated) Rules() []RuleEntry {
+	out := make([]RuleEntry, len(g.ruleEntries))
+	copy(out, g.ruleEntries)
+	return out
 }
 
 // YAML 返回未经自检的配置字节，供调用方与上一次生效的配置做等值比较。
@@ -139,6 +183,9 @@ func (g *Generated) Validate() ([]byte, error) {
 		return nil, fmt.Errorf("mihomo 配置自检失败: %w", parseErr)
 	}
 	log.Printf("[core] geo 数据不可用（%v），本轮降级为不含 GEO 规则运行；可配置 geox-url 镜像后恢复", firstLine(parseErr.Error()))
+	// g.rules 保留原始列表，使 Validate 可重复调用并得到相同的降级结果；来源清单同步剔除
+	// GEO 条目，界面展示的规则集合必须与真正交给 mihomo 的字节一致。
+	g.ruleEntries = stripGeoRuleEntries(g.ruleEntries)
 	g.config["rules"] = stripGeoRules(g.rules)
 	buf, err := yaml.Marshal(g.config)
 	if err != nil {
@@ -163,7 +210,7 @@ func (g *Generated) Validate() ([]byte, error) {
 //
 // 错误情况：assignment 缺节点、保留规则集名冲突或 YAML 序列化失败时返回错误；
 // mihomo 语义自检不在这里执行，由调用方按需调用 Generated.Validate。
-func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string) (*Generated, error) {
+func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, imported []string, selected map[string]string, plan routing.Plan) (*Generated, error) {
 	m := map[string]any{
 		"mode":                cfg.Mode,
 		"log-level":           cfg.LogLevel,
@@ -213,6 +260,13 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		proxies = append(proxies, prepareOutboundMapping(cfg, n))
 		proxyNodeSet[n.Name] = true
 	}
+	// AUTO 组的成员只能是「有独立本地端口」的节点：端口映射是按节点分配出口的入口，
+	// 没有端口的节点（链路依赖、端口容量不足被截断等）不参与自动选优。
+	//
+	// 注意 nodeNames 必须在下面的 assignment 循环里填充完成后再使用（见 AUTO 组生成处）：
+	// 只在这里按 assigns 预分配容量，避免在循环前用空集合判断 AUTO 是否存在——那会让
+	// 「运行时节点全部来自未分配端口的健康节点」时丢失 AUTO 组，同时把 PROXY 组里的
+	// AUTO 成员变成悬空引用，最终被 mihomo 以 proxy not found 拒绝整份配置。
 	nodeNames := make([]string, 0, len(assigns))
 	listeners := make([]map[string]any, 0, len(assigns)+len(cfg.Groups)+1)
 	for _, a := range assigns {
@@ -239,10 +293,20 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	// 组的选中项（默认出口）由用户在控制台/API 选择并经 default-selected 持久化。
 	m["mixed-port"] = cfg.MixedPort
 
-	// AUTO url-test 组（全部可用节点中延迟最低）：有可用节点即生成，
-	// 供内置 PROXY 组（「自动最快」选项）与 auto-port listener 引用；成员限 nodeNames，
-	// 不含隧道类节点（隧道节点延迟语义不同，只经 PROXY 组直接选择）。
-	autoGroupOn := len(nodeNames) > 0
+	// AUTO url-test 组（全部可用节点中延迟最低）：有可用节点即生成，供内置 PROXY 组
+	// （「自动最快」选项）、auto-port listener 与订阅导入的策略组引用。
+	//
+	// 成员取全部可用出站（proxyNodes）而不是仅获得本地端口的节点：AUTO 的语义是
+	// 「在可用节点里选最快的」，端口映射只是本地入口，与出口能力无关；同时这也保证
+	// AUTO 只要有节点就存在，不会被订阅组引用成悬空目标（mihomo 会直接拒绝配置）。
+	autoMembers := make([]string, 0, len(proxyNodes))
+	for _, n := range proxyNodes {
+		if n.IsTunnel() {
+			continue // 隧道节点延迟语义不同，只经 PROXY 组直接选择
+		}
+		autoMembers = append(autoMembers, n.Name)
+	}
+	autoGroupOn := len(autoMembers) > 0
 	if cfg.AutoPort > 0 && !autoGroupOn {
 		log.Printf("[core] auto-port %d 已开启但当前无可用节点，本轮跳过该 listener", cfg.AutoPort)
 	}
@@ -269,7 +333,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		groups = append(groups, map[string]any{
 			"name":      "AUTO",
 			"type":      "url-test",
-			"proxies":   nodeNames,
+			"proxies":   autoMembers,
 			"url":       cfg.HealthURL,
 			"interval":  300,
 			"tolerance": 50,
@@ -326,27 +390,74 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	m["proxy-groups"] = groups
 
+	// 订阅自带路由元信息（默认关闭，见 config.Subscription.ImportRulesEnabled）：
+	// 策略组追加在内置与用户分组之后。规划阶段已经完成全局改名（内置名、用户组名、
+	// 节点名、adblock 保留名），这里只做保留名的防御性复核，避免调用方直接构造
+	// Plan 时把重名组写进配置——mihomo 会以 "the duplicate name" 拒绝整份配置。
+	if err := validatePlannedGroupNames(groups, nodeNames, plan.Groups); err != nil {
+		return nil, err
+	}
+	for _, group := range plan.Groups {
+		members := normalizeMembers(group.Proxies)
+		if !autoGroupOn {
+			// AUTO 组只在有节点获得本地端口时生成；订阅组引用它时（用户把导入组出口
+			// 设为「自动最快」）必须同步剔除，否则 mihomo 会以 proxy not found 拒绝
+			// 整份配置。
+			members = dropMember(members, autoGroupName)
+		}
+		if len(members) == 0 {
+			log.Printf("[core] 订阅策略组 %q 在本轮没有可用成员（可能只剩未生成的 AUTO），跳过", group.Name)
+			continue
+		}
+		planned := map[string]any{
+			"name":    group.Name,
+			"type":    group.Type,
+			"proxies": members,
+		}
+		// 与用户分组一致：带探测语义的组补上健康检查参数，mihomo 对 select 组会忽略。
+		planned["url"] = cfg.HealthURL
+		planned["interval"] = 300
+		planned["tolerance"] = 50
+		// select 组恢复持久化选中项：订阅自带组里「作者只给了 DIRECT、用户选择走某个
+		// 节点」是常态，缺少这一步用户的出口选择就不会生效（mihomo 会落成员首位）。
+		if strings.EqualFold(group.Type, config.GroupTypeSelect) {
+			if sel := selected[group.Name]; sel != "" && slices.Contains(members, sel) {
+				planned["default-selected"] = sel
+			}
+		}
+		groups = append(groups, planned)
+	}
+	m["proxy-groups"] = groups
+
 	// 规则合并顺序：gateway 设备规则（SRC-IP-CIDR）最前 → 用户 custom-rules →
-	// rule-urls 导入规则 → 广告拦截 RULE-SET → 内置规则（追加在 GEOSITE/GEOIP/MATCH
-	// 之后永远不会命中，所以设备/自定义/导入规则必须前置）。广告规则排在导入规则之后，
-	// 用户可用 custom-rules / rule-urls 自行加白名单例外。
-	rules := make([]string, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(cfg.Rules)+1)
+	// rule-urls 导入规则 → 订阅自带规则 → 广告拦截 RULE-SET → 内置规则 → 订阅兜底规则。
+	// 订阅规则排在用户显式规则与规则源之后，是因为用户的白名单/直连意图必须能覆盖
+	// 订阅作者的分流；排在广告拦截之前，则让订阅自带的 REJECT 继续生效。订阅原文里的
+	// MATCH/FINAL 必须留在整份列表最后（见 plan.FallbackRules）：mihomo 按顺序匹配，
+	// 兜底规则一旦落在中间，它之后的自定义规则、广告拦截与内置 CN 直连就再也不命中。
+	//
+	// 这里同时记录每条规则的来源（ruleEntries）：来源只存在于生成阶段，最终配置里没有
+	// 任何字段可以反推它，控制台「当前生效规则」直接消费这份标注。
+	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(plan.Rules)+len(cfg.Rules)+len(plan.FallbackRules)+1)
 	if gatewayActive(cfg) {
-		rules = append(rules, gatewayDeviceRules(cfg, groups)...)
+		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceGateway, gatewayDeviceRules(cfg, groups))
 	}
-	rules = append(rules, cfg.CustomRules...)
-	rules = append(rules, imported...)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceCustom, cfg.CustomRules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceRuleURL, imported)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscription, plan.Rules)
 	if cfg.AdBlock.Enable {
-		rules = append(rules, adBlockRule)
+		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceAdBlock, []string{adBlockRule})
 	}
-	rules = append(rules, cfg.Rules...)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceBuiltin, cfg.Rules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscriptionFallback, plan.FallbackRules)
+	rules := ruleEntriesToLines(ruleEntries)
 	m["rules"] = rules
 	ruleProviders := cfg.RuleProviders
 	if cfg.AdBlock.Enable {
 		// adblock 是 proxyd 保留的 rule-provider 键；用户手写 rule-providers 占用
 		// 该键时直接报错（经配置事务回滚），避免静默覆盖用户配置。
-		if _, taken := ruleProviders[adBlockProviderName]; taken {
-			return nil, fmt.Errorf("rule-providers 中 %q 是广告拦截功能的保留名，请改用其它键名", adBlockProviderName)
+		if _, taken := ruleProviders[config.AdBlockProviderName]; taken {
+			return nil, fmt.Errorf("rule-providers 中 %q 是广告拦截功能的保留名，请改用其它键名", config.AdBlockProviderName)
 		}
 		merged := make(map[string]any, len(ruleProviders)+1)
 		for key, value := range ruleProviders {
@@ -354,12 +465,19 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		}
 		// 默认规则集（Loyalsoldier clash-rules reject.txt）是 domain 行为的
 		// YAML payload 文本；下载/缓存/周期刷新全部由 mihomo 负责。
-		merged[adBlockProviderName] = map[string]any{
+		merged[config.AdBlockProviderName] = map[string]any{
 			"type":     "http",
 			"behavior": "domain",
 			"format":   "yaml",
 			"url":      cfg.AdBlock.RuleURL,
 			"interval": 86400,
+		}
+		ruleProviders = merged
+	}
+	if len(plan.Providers) > 0 {
+		merged, err := mergePlannedProviders(ruleProviders, plan.Providers)
+		if err != nil {
+			return nil, err
 		}
 		ruleProviders = merged
 	}
@@ -374,7 +492,137 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	if err != nil {
 		return nil, fmt.Errorf("序列化 mihomo 配置: %w", err)
 	}
-	return &Generated{config: m, yaml: buf, rules: rules}, nil
+	return &Generated{config: m, yaml: buf, rules: rules, ruleEntries: ruleEntries}, nil
+}
+
+// dropMember 返回剔除指定成员后的切片副本。
+//
+// 参数：members 为成员名；target 为待剔除成员。
+// 返回值：[]string，保持原顺序的副本；没有命中时返回原切片。
+// 错误情况：无。
+func dropMember(members []string, target string) []string {
+	out := members[:0:0]
+	for _, member := range members {
+		if member != target {
+			out = append(out, member)
+		}
+	}
+	return out
+}
+
+// normalizeMembers 去重策略组成员并保持首次出现的顺序。
+//
+// 参数：members 为规划器给出的成员名（用户追加项在前，订阅作者成员在后）。
+// 返回值：[]string，去重后的副本；输入为 nil 或空时返回 nil。
+//
+// 错误情况：无。用户把订阅作者已列出的节点再追加一次时会出现重复项，而 mihomo 对
+// 重复成员会告警并按重复处理，这里统一收敛。
+func normalizeMembers(members []string) []string {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(members))
+	seen := make(map[string]bool, len(members))
+	for _, member := range members {
+		if member == "" || seen[member] {
+			continue
+		}
+		seen[member] = true
+		out = append(out, member)
+	}
+	return out
+}
+
+// validatePlannedGroupNames 复核订阅策略组名没有与本轮其他代理重名。
+//
+// 参数：
+//   - groups: []map[string]any，本轮已经写入的内置 + 用户分组。
+//   - outboundNames: []string，本轮全部出站名（节点名与策略组名同处 mihomo 的代理
+//     命名空间，重名同样会被拒绝）。
+//   - planned: []routing.Group，订阅导入的策略组。
+//
+// 返回值：error，出现重名或组结构不完整时返回；否则 nil。
+//
+// 错误情况：正常路径由 subscribe 的规划器完成改名，这里只在调用方绕过规划器直接
+// 构造 Plan 时兜底。重名组会让 mihomo 以 "the duplicate name" 拒绝整份配置，
+// 属于必须阻塞的错误而不是可降级告警。
+func validatePlannedGroupNames(groups []map[string]any, outboundNames []string, planned []routing.Group) error {
+	if len(planned) == 0 {
+		return nil
+	}
+	taken := make(map[string]string, len(groups)+len(outboundNames)+len(planned))
+	for _, name := range outboundNames {
+		taken[strings.ToLower(name)] = "代理节点"
+	}
+	for _, group := range groups {
+		if name, ok := group["name"].(string); ok {
+			taken[strings.ToLower(name)] = "proxyd 内置或用户策略组"
+		}
+	}
+	for _, group := range planned {
+		key := strings.ToLower(group.Name)
+		if group.Name == "" {
+			return fmt.Errorf("订阅策略组缺少名称")
+		}
+		if group.Type == "" {
+			return fmt.Errorf("订阅策略组 %q 缺少类型", group.Name)
+		}
+		if len(group.Proxies) == 0 {
+			return fmt.Errorf("订阅策略组 %q 没有成员", group.Name)
+		}
+		if reason, exists := taken[key]; exists {
+			return fmt.Errorf("订阅策略组 %q 与%s重名，无法写入 mihomo 配置", group.Name, reason)
+		}
+		taken[key] = "另一个订阅策略组"
+	}
+	return nil
+}
+
+// mergePlannedProviders 把订阅导入的规则集引用合并进 rule-providers 段。
+//
+// 参数：
+//   - existing: map[string]any，用户手写与广告拦截已占用的 rule-providers。
+//   - planned: []routing.Provider，订阅导入的规则集引用（已带最终键名）。
+//
+// 返回值：map[string]any，合并后的 rule-providers；existing 为 nil 时新建 map。
+//
+// 错误情况：订阅规则集与既有键名冲突时返回错误。正常路径由规划器改名规避，这里
+// 兜底是为了在调用方绕过规划器时宁可失败也不要静默覆盖用户规则集。
+func mergePlannedProviders(existing map[string]any, planned []routing.Provider) (map[string]any, error) {
+	merged := make(map[string]any, len(existing)+len(planned))
+	for key, value := range existing {
+		merged[key] = value
+	}
+	for _, provider := range planned {
+		if _, taken := merged[provider.Name]; taken {
+			return nil, fmt.Errorf("订阅规则集 %q 与已有 rule-providers 键名冲突", provider.Name)
+		}
+		entry := make(map[string]any, len(provider.Config)+5)
+		for key, value := range provider.Config {
+			entry[key] = value
+		}
+		providerType := provider.Type
+		if providerType == "" {
+			providerType = "http"
+		}
+		entry["type"] = providerType
+		entry["behavior"] = provider.Behavior
+		if provider.IsInline() {
+			// inline 规则集没有远端来源：内容随配置内联，mihomo 既不下载也不缓存。
+			entry["payload"] = append([]string(nil), provider.Payload...)
+			merged[provider.Name] = entry
+			continue
+		}
+		entry["url"] = provider.URL
+		entry["interval"] = 86400
+		// path 由应用层在规划时写入位于 mihomo home（proxyd 用 state-dir 作为 home）
+		// 之下的绝对路径；缺失时交给 mihomo 按 URL 哈希决定缓存文件。
+		if provider.Path != "" {
+			entry["path"] = provider.Path
+		}
+		merged[provider.Name] = entry
+	}
+	return merged, nil
 }
 
 // gatewayActive 判断 gateway 数据面是否应参与本次生成：模块未停用、代理数据面
@@ -584,8 +832,7 @@ func resolveGroupMembersFromNodes(g config.NodeGroup, nodes []*node.Node, nodeSe
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。
 func hasGeoRules(rules []string) bool {
 	for _, r := range rules {
-		head, _, _ := strings.Cut(r, ",")
-		if strings.EqualFold(head, "GEOSITE") || strings.EqualFold(head, "GEOIP") {
+		if isGeoRule(r) {
 			return true
 		}
 	}
@@ -596,8 +843,7 @@ func hasGeoRules(rules []string) bool {
 func stripGeoRules(rules []string) []string {
 	out := make([]string, 0, len(rules))
 	for _, r := range rules {
-		head, _, _ := strings.Cut(r, ",")
-		if strings.EqualFold(head, "GEOSITE") || strings.EqualFold(head, "GEOIP") {
+		if isGeoRule(r) {
 			continue
 		}
 		out = append(out, r)

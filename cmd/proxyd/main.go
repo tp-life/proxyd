@@ -213,6 +213,7 @@ usage:
   proxyd nodes add --proxy '<出站JSON>' [名称]   添加隧道类（VPN）手动节点（tailscale/openvpn 等）
   proxyd nodes del <名称|下标>          删除手动节点
   proxyd rules list|add "<规则>"|set <下标> "<规则>"|move <从> <到>|del <下标>   自定义规则
+  proxyd rules effective [--source 来源] [--grep 关键字] [--limit N]   当前生效的全部规则（含订阅导入，按匹配顺序）
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
   proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点...]   修改分组

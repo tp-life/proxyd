@@ -51,6 +51,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { EmptyState } from "@/components/EmptyState";
 import { useConnectionsFeed } from "@/hooks/useConnectionsFeed";
 import { useDesktopFeed } from "@/hooks/useDesktopFeed";
+import { useEffectiveRules } from "@/hooks/useEffectiveRules";
 import { useRemoteFeed } from "@/hooks/useRemoteFeed";
 import { useGatewayFeed } from "@/hooks/useGatewayFeed";
 import { useToast } from "@/hooks/useToast";
@@ -431,6 +432,19 @@ function App() {
    * 接口失败时由 hook 内部承接到错误条带；调用方无需额外捕获。
    */
   const connections = useConnectionsFeed(activeView, requestConfirmation, showToast);
+
+  /**
+   * useEffectiveRules 接入规则页「当前生效规则」面板。
+   *
+   * 功能说明：
+   * 只在规则页可见时请求 `/api/rules/effective`，避免后台页签继续拉取可能上万条的
+   * 规则分页数据；面板自身管理来源筛选、关键字防抖与「加载更多」分页。
+   *
+   * 参数说明：activeView 为当前激活视图名称。
+   * 返回值说明：返回面板所需的分页数据与筛选操作。
+   * 可能的异常/错误情况：接口失败由 hook 内部错误状态承接，App 层不做额外提示。
+   */
+  const effectiveRules = useEffectiveRules(activeView);
 
   /**
    * useRemoteFeed 接入远程连接页的加载与管理能力。
@@ -1005,6 +1019,7 @@ function App() {
                 ruleUrls={ruleUrls}
                 overview={overview}
                 adblock={adblock}
+                effective={effectiveRules}
                 onDelete={deleteJSON}
                 onForm={updateForm}
                 onPost={postJSON}

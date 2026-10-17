@@ -140,13 +140,14 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd mode [rule\|global\|direct]` | 无参查看当前模式；带参切换（持久化） |
 | `proxyd refresh` / `proxyd test` | 触发刷新订阅 / 手动测速（后台执行） |
 | `proxyd subs list\|add <名> <url>\|del <名>` | 订阅管理（list 含状态列：正常/部分可用/全部失效/无节点/已禁用） |
-| `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] [--mapping on\|off] <名>` | 修改订阅；未给出的字段保持原值；`--mapping` 是该订阅的端口映射开关（只控制其节点的一对一监听） |
+| `proxyd subs set [--rename 新名] [--url 地址] [--type 类型] [--enable\|--disable] [--mapping on\|off] [--import-rules on\|off] <名>` | 修改订阅；未给出的字段保持原值；`--mapping` 是该订阅的端口映射开关（只控制其节点的一对一监听）；`--import-rules` 控制是否导入该订阅自带的策略组与规则 |
 | `proxyd subs refresh <名>` / `proxyd subs test <名>` | 只刷新 / 只测速单个订阅（同步执行，失败原因直接返回） |
 | `proxyd nodes` | 按订阅分组列出节点、端口、延迟/失败原因；隧道类（VPN）节点带 `vpn` 标记且无端口映射 |
 | `proxyd nodes add <url> [名称]` | 添加手动节点（http(s)/socks5/分享链接） |
 | `proxyd nodes add --proxy '<出站JSON>' [名称]` | 添加隧道类（VPN）手动节点：`<出站JSON>` 是 mihomo 出站映射，type 限 `tailscale\|openvpn\|zerotier\|wireguard\|ssh`（tailscale 的 auth-key 可选，缺失时由 tsnet 输出交互注册链接；openvpn 必填 server/port/ca） |
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
 | `proxyd rules list\|add "<规则>"\|set <下标> "<规则>"\|move <从> <到>\|del <下标>` | 自定义规则的增改删与优先级调整 |
+| `proxyd rules effective [--source 来源] [--grep 关键字] [--limit N]` | 打印**当前生效的全部规则**（含订阅导入、广告拦截与内置规则），按真实匹配顺序带序号与来源；`--source` 可填来源键（`gateway`/`custom`/`rule-url`/`subscription`/`subscription-fallback`/`adblock`/`builtin`）或中文名，`--grep` 按规则文本子串过滤，`--limit` 为每页拉取条数（服务端上限 1000） |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
 | `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组（list 含类型与 select 组的当前选中项；type 支持 `url-test\|fallback\|load-balance\|select`） |
 | `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
@@ -216,7 +217,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 - **订阅管理**：以卡片管理订阅的新增、编辑、启停、单独同步与测速；新增、编辑和重新启用只保存设置，不访问远端；点击“同步”后直接拉取、检测并热更新，无确认弹窗，完成或失败均显示通知
 - **代理入口**：集中展示主端口、自动选优端口、分组端口与逐节点稳定分配；支持一键复制地址，并独立热开关 `port-mapping`
 - **策略分组**：展示健康摘要、复制分组端口、新增/编辑/删除分组；可选择类型（url-test/fallback/load-balance）并按手选节点或订阅来源配置成员
-- **访问规则**：搜索、新增、编辑、删除和调整自定义规则顺序；规则 URL 保持只读内容视图并可展开查看可读原文（优先缓存，无缓存时现场拉取；整体 Base64 gfwlist 自动解码）
+- **访问规则**：搜索、新增、编辑、删除和调整自定义规则顺序；规则 URL 保持只读内容视图并可展开查看可读原文（优先缓存，无缓存时现场拉取；整体 Base64 gfwlist 自动解码）；页面下方的**当前生效规则**面板只读列出 mihomo 真正在用的全部规则（含订阅导入与内置规则），带全局匹配序号与来源徽标，可按来源筛选、按关键字搜索并"加载更多"翻页——订阅规则有没有生效、某条域名分流落到了哪一层，在这里一眼可查
 - **运行日志**：查看进程内约 1000 条环形缓冲日志，支持搜索、暂停刷新、复制和下载
 - **活动连接**：仅在页面打开且未暂停时每 2 秒读取 mihomo 连接快照；按域名/IP/进程/出口链搜索，查看入口端口、累计流量与开始时间，并可关闭单条或全部连接
 - **远程连接**：管理 tailcat 服务端身份、SSH、客户端白名单、远端 token 和通用 TCP 转发；“服务端 / 客户端”页签只处理隧道与 SSH，不再混放桌面配置
@@ -241,7 +242,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/overview` | 总览：模式、主端口、默认出口（groups 内置 PROXY 项的 selected）、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因；隧道类节点带 `tunnel: true` 且 port 恒为 0）、自定义规则、节点分组（含 type 与 select 组的 selected）、TUN 权限、系统代理与开机自启状态 |
+| `GET /api/overview` | 总览：模式、主端口、默认出口（groups 内置 PROXY 项的 selected）、auto-port、订阅聚合（含类型、启用状态、订阅级映射开关、自带规则导入开关 `import_rules` 与导入结果 `import`：策略组/规则/规则集计数、被跳过的规则条数与原因、逐组代理成员数与默认出口标记、失败原因、userinfo）、手动节点、端口映射开关与稳定分配、全部节点（含类型/失败原因；隧道类节点带 `tunnel: true` 且 port 恒为 0）、自定义规则、节点分组（含 type 与 select 组的 selected）、TUN 权限、系统代理与开机自启状态 |
 | `GET /api/traffic` | 代理 mihomo `/traffic` 流，返回 NDJSON 实时速率；后端自动附加 `secret` 鉴权 |
 | `GET /api/connections` | 代理 mihomo `/connections` 快照，返回活动连接、累计上下行和内存占用；后端自动附加 `secret` 鉴权 |
 | `DELETE /api/connections/{id}` | 关闭指定活动连接；连接 ID 作为单个安全路径段转发 |
@@ -250,7 +251,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/refresh` | 触发一轮完整刷新：拉订阅 + 规则源 + 测速（异步，返回 202） |
 | `POST /api/test` | 手动测速：只对现有节点做延迟/可用性检测，不拉订阅（异步，返回 202） |
 | `POST /api/subscriptions` `{"url":"..."}` | 添加订阅（name 可选，默认按域名命名） |
-| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式、启用状态或订阅级端口映射开关（`port_mapping`）；改名时同步修正引用该订阅的策略分组；未给出的字段保持原值；设置保存不下载订阅 |
+| `PUT /api/subscriptions/{name}` | 编辑订阅名称、URL、格式、启用状态、订阅级端口映射开关（`port_mapping`）或订阅自带规则/策略组导入开关（`import_rules`）；改名时同步修正引用该订阅的策略分组；未给出的字段保持原值；设置保存不下载订阅 |
 | `DELETE /api/subscriptions/{name}` | 删除订阅 |
 | `POST /api/subscriptions/{name}/refresh` | 只刷新该订阅：重新拉取 + 只检测其节点 + 热更新（同步，最长 3 分钟，失败直接返回原因） |
 | `POST /api/subscriptions/{name}/test` | 只对该订阅的现有节点测速（同步，不拉订阅） |
@@ -259,6 +260,9 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `GET /api/subscriptions/{name}/draft` | 读取当前待确认草稿的脱敏差异视图（不返回节点 Mapping、稳定 Key 或订阅正文） |
 | `POST /api/subscriptions/{name}/draft/{id}/apply` | 确认应用草稿；若预览后的节点健康状态、稳定身份、订阅配置或策略组发生变化则返回 409，要求重新生成 |
 | `DELETE /api/subscriptions/{name}/draft/{id}` | 按随机 ID 丢弃草稿；旧页面的 ID 不会误删后来生成的新草稿 |
+| `POST /api/subscription-group-fallback` `{"mode":"auto\|proxy\|off"}` | 设置订阅自带策略组的默认出口策略（默认 `auto`：只有直连成员的组把 `PROXY` 放在成员首位，未手选时跟随主端口默认出口）；热更新或持久化失败时整体回滚 |
+| `GET /api/imported-groups` | 列出订阅自带并被导入的策略组：最终组名、原文组名、类型、成员数与真实代理成员数、用户追加节点、当前选中出口、选中项是否生效、默认出口是否已交给内置 `PROXY`（`fallback_applied`） |
+| `POST /api/imported-groups/{name}/select` `{"node":"节点名\|AUTO\|DIRECT\|REJECT"}` | 为某个导入策略组指定出口；节点会被追加为该组出口并持久化，热更新失败时整体回滚 |
 | `GET /api/manual-nodes` | 列出手动节点（index/url 或结构化映射 type + 已打码的 proxy/解析出的名称） |
 | `POST /api/manual-nodes` `{"url":"http://user:pass@host:8080","name":"可选"}` | 添加手动节点（解析校验 + 持久化 + 后台重建现有节点，不下载订阅） |
 | `POST /api/manual-nodes` `{"proxy":{"name":"ts-exit","type":"tailscale","auth-key":"..."},"name":"可选覆盖"}` | 添加结构化隧道类（VPN）手动节点；type 限 `tailscale/openvpn/zerotier/wireguard/ssh`，与 `url` 二选一，其余字段透传 mihomo |
@@ -284,6 +288,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/restart` | 重启 proxyd 进程：先返回 200 再异步执行——系统托管实例完成优雅清理后以非零码退出、由 launchd 拉起替代进程（保持托管身份）；独立实例派生 detached `restart` 子进程完成 stop→start。调用方轮询 `/healthz` 判断恢复，监听地址变更后需访问新地址 |
 | `POST /api/autostart` `{"enabled":true}` | 注册/移除开机自启项（OS 级状态，不写配置文件；overview 实时反映） |
 | `GET /api/rules` | 列出自定义规则 |
+| `GET /api/rules/effective?source=&q=&offset=0&limit=200` | 列出**当前生效配置里的全部规则**：`available`（是否存在已生效配置，代理停用/未生成时为 false）、`total`/`matched`（全量与筛选后条数）、`sources`（各来源键、中文名与条数）、`rules`（`position` 全局匹配序号、`line`、`source`、`source_label`）。`source` 接受来源键或中文名，`q` 按规则文本子串（大小写不敏感）过滤，`limit` 上限 1000；来源未知名或非法分页参数返回 400。数据来自最近一次成功热更新的配置快照（含 GEO 降级后的剔除结果），只读且不触发重新生成 |
 | `POST /api/rules` `{"rule":"DOMAIN-SUFFIX,example.com,DIRECT"}` | 追加自定义规则（前置到内置规则之前） |
 | `PUT /api/rules/{index}` `{"rule":"..."}` | 编辑指定自定义规则并热更新 |
 | `POST /api/rules/reorder` `{"from":2,"to":0}` | 调整自定义规则优先级并热更新 |
@@ -360,7 +365,7 @@ tun:
 - 全局模式：跳过访问规则，统一进入 mihomo 内置 `GLOBAL` 选择组。
 - 直连模式：全部直接连接。
 
-**默认出口**（内置 `PROXY` 组选中项，未选择时落成员首位——第一可用节点）：可设为某个可用节点（含隧道类）、`AUTO`（url-test 组自动选延迟最低者）或 `DIRECT`（直连）。修改入口：Web 概览页的「默认出口」/代理设置页下拉、`POST /api/groups/PROXY/select`（`{"node":"节点名|AUTO|DIRECT"}`）、`proxyd groups select PROXY <节点名|AUTO|DIRECT>`。选择持久化在 `state-dir/group-selected.json`，生成配置时写入 `default-selected`，重启与订阅刷新后保持。规则优先级高于默认出口：命中 `REJECT`/`DIRECT`/指定节点的流量不会进入 PROXY 组，因此广告拦截等规则对该出口依然生效；选中节点失效或消失时 mihomo 按原生语义回退成员首位，Web 概览会提示已回退；`AUTO` 需要至少一个可用节点。节点映射端口、分组端口、auto-port 完全不受默认出口影响。
+**默认出口**（内置 `PROXY` 组选中项，未选择时落成员首位——第一可用节点）：可设为某个可用节点（含隧道类）、`AUTO`（url-test 组自动选延迟最低者）或 `DIRECT`（直连）。修改入口：Web 概览页的「默认出口」/代理设置页下拉、`POST /api/groups/PROXY/select`（`{"node":"节点名|AUTO|DIRECT"}`）、`proxyd groups select PROXY <节点名|AUTO|DIRECT>`。选择持久化在 `state-dir/group-selected.json`，生成配置时写入 `default-selected`，重启与订阅刷新后保持。规则优先级高于默认出口：命中 `REJECT`/`DIRECT`/指定节点的流量不会进入 PROXY 组，因此广告拦截等规则对该出口依然生效；选中节点失效或消失时 mihomo 按原生语义回退成员首位，Web 概览会提示已回退；`AUTO` 需要至少一个可用节点，其成员是当前全部可用节点（不含隧道类）。节点映射端口、分组端口、auto-port 完全不受默认出口影响。
 
 **主端口在线修改**（Web 概览页 / `POST /api/main-port` / `proxyd main-port <端口>`）：校验 1-65535 且不与 api 端口、节点区间、分组端口、auto-port 冲突；保存后持久化 + 热更新；系统代理当前已开启时自动重新绑定到新端口。
 
@@ -374,6 +379,16 @@ tun:
 - gfwlist / AutoProxy（base64 编码）：`||domain` → `DOMAIN-SUFFIX,domain,PROXY`；`@@||domain` → `DOMAIN-SUFFIX,domain,DIRECT`；`!` 注释、`[AutoProxy]` 段头、含 `*`/`/` 的复杂条目跳过
 
 合并顺序：custom-rules 最前 → 规则 URL 导入规则 → 内置规则。全部来源合并去重后上限 10000 条，超出截断打日志。
+
+**查看当前生效规则**：规则来源分散在配置文件、规则源、订阅与广告拦截开关里，只看 `custom-rules` 无法判断某个域名最终走了哪条规则。因此生成配置时会同步记录每条规则的来源，并提供只读视图：Web 控制台「规则管理」页的**当前生效规则**面板、API `GET /api/rules/effective`、CLI `proxyd rules effective`。三者展示的都是**最近一次成功热更新到 mihomo 的配置**（含 GEO 数据不可用时的降级剔除结果），规则顺序就是真实匹配顺序，来源取值与拼接顺序一致：
+
+```
+gateway（网关设备分流）→ custom（自定义规则）→ rule-url（远程规则源）
+→ subscription（订阅自带规则）→ adblock（广告拦截）→ builtin（内置规则）
+→ subscription-fallback（订阅兜底规则，恒在最末）
+```
+
+订阅自带规则动辄上万条，因此视图按页读取（默认 200 条/页，单次上限 1000），并支持按来源与关键字筛选。若面板显示「当前没有已生效的配置」，说明代理被停用或尚未生成过配置——启动代理或同步一次订阅即可。注意这是只读视图：修改规则仍然只能在 `custom-rules` 或订阅开关上操作，订阅原文的规则始终由订阅刷新覆盖。
 
 **广告拦截**（`adblock`，默认关闭）：Web 控制台「规则管理」页顶部的开关，或配置文件 `adblock.enable: true`；API 为 `GET/PUT /api/adblock`（PUT 体 `{"enable": true, "rule_url": "可选，空=保持原值"}`）。开启后生成配置注入一个名为 `adblock` 的 mihomo rule-provider（`type: http`，下载/缓存/每 24 小时刷新全部由 mihomo 负责）和一条 `RULE-SET,adblock,REJECT` 规则，排在 custom-rules 与规则 URL 导入之后、内置规则之前——因此想放行某个被误拦的域名，在自定义规则里加一条 `DOMAIN-SUFFIX,example.com,DIRECT` 即可。默认规则集是 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 reject 域名集（约 19 万条广告/跟踪域名，走 jsDelivr CDN，国内直连可用）；`adblock.rule-url` 可换成其它地址，但必须是 **domain 行为的 YAML payload 格式**（`payload: - '+.example.com'`）。`rule-providers` 里 `adblock` 是保留键名，手写占用会导致开启报错。主端口恒为规则模式，开启后对主端口、TUN 与网关流量一致生效（GET /api/adblock 的 `effective` 字段反映这一点）。
 
@@ -491,6 +506,27 @@ dns:              # 可选，mihomo dns 配置原样透传
 
 **订阅级端口映射**：除全局 `port-mapping` 总开关外，每个订阅还有自己的映射开关（订阅 YAML 的 `port-mapping` 字段，默认开启；Web 订阅卡片 / `proxyd subs set --mapping on|off` / `PUT /api/subscriptions/{name}` 均可切换）。两者是叠加关系：全局关闭时全部不监听；全局开启而某订阅关闭时，只有该订阅的节点不生成一对一监听。被关闭的节点仍保留稳定端口分配，并继续参与主端口、auto-port 与策略组选路；手动节点没有订阅级开关，只跟随全局开关。
 
+**订阅自带规则与策略组（可选导入，默认关闭）**：很多机场订阅的 Clash YAML 里除了 `proxies`，还带有 `proxy-groups`、`rules`、`rule-providers` 段落。proxyd **默认只取节点**，这些分流策略一律不生效；要让它们参与选路，需要给该订阅打开 `import-subscription-rules`（Web 订阅卡片「导入订阅自带的策略组与规则」开关 / `proxyd subs set --import-rules on|off` / `PUT /api/subscriptions/{name}` 的 `import_rules` 字段）。
+
+**一个开关同时导入策略组与规则**：订阅自带的 `proxy-groups` 与 `rules` 是配套的（规则的目标就是那些策略组），因此不存在「只导入规则」或「只导入策略组」的中间状态——打开开关就一起导入，关闭就一起撤销。proxyd 自身的规则只有 `GEOSITE,private`/`GEOIP,private`/`GEOSITE,cn`/`GEOIP,CN`/`MATCH,PROXY` 这几条，订阅自带的分流规则（机场通常有几十上百条）能明显补足分流粒度。
+
+打开后的行为：
+
+- **策略组**：订阅声明的组按原类型与成员顺序导入，追加在内置 `PROXY`/`AUTO` 与用户分组之后；组成员会按当前可用节点过滤（下线的节点自动剔除，空组丢弃）。组名与内置组、用户分组或节点名冲突时自动改名为「订阅名 · 原名」，并同步改写引用它的规则目标。
+- **规则**：按订阅原文顺序插入，位置在**自定义规则与规则源之后、广告拦截与内置规则之前**——你的自定义规则始终能覆盖订阅分流，而订阅自带的 `REJECT` 仍然生效。`MATCH`/`FINAL` 兜底规则（Clash 的 `FINAL` 会被归一化成 mihomo 认识的 `MATCH`）目标改写为内置 `PROXY` 组，并**整体后置到规则列表最末**：mihomo 按顺序匹配，兜底规则留在中间会把它之后的自定义规则、广告拦截与内置 `GEOIP,CN,DIRECT` 全部变成死规则。只要规则目标能解析（内置策略或订阅自有组），**订阅只有规则、没有策略组也能导入**。
+- **规则集**：`rule-providers` 会透传给 mihomo，由它负责下载/缓存/每 24 小时刷新；远程规则集的缓存路径固定为 `state-dir/ruleset/<订阅名>/<规则集名>.yaml`（避免相对路径随启动方式漂移）。订阅内联的 `inline` 规则集（内容是 `payload`）原样内联进配置。
+- **不导入**：订阅的 `dns` 段（与 TUN/fake-ip 预设、网关 DNS 重定向强耦合，混入会造成解析异常，仅界面提示存在差异）、`proxy-providers`（动态节点源，需要另做支持）与 `SUB-RULE`。
+
+**导入是 fail-closed 的**：只要订阅里有一条规则引用了订阅未声明的策略组或缺失的规则集，或者使用了不支持的 provider 来源，整个订阅的路由导入都会被放弃并在订阅卡片上显示原因（此时只导入节点）。原因是 mihomo 对规则目标与重名策略组是硬校验（`proxy not found` / `the duplicate name`），放过一条错误引用会让整份配置加载失败、代理数据面直接起不来。部分导入会把订阅的分流意图静默改成另一套出口，比不导入更难排查。
+
+唯一的例外是「订阅声明过、但本轮因为可用节点全部下线而变空」的策略组：指向它的规则会被**单条跳过**并计入卡片上的「已跳过 N 条规则」与原因，其余规则照常导入。组被丢空是 proxyd 侧的节点过滤结果，不是订阅自身的引用错误，让一个组的节点全部下线连带丢掉全部规则并不合理。
+
+**导入策略组的默认出口（默认开启）**：机场订阅常把「AI/流媒体/社交」这类策略组的成员只写成 `DIRECT`（订阅作者留给自己在客户端里手选）。若原样导入，命中这些组的流量会静默直连，用户会以为代理没生效。因此 proxyd 默认把**内置 `PROXY` 组放在这类组的成员首位**——mihomo 的 `select` 组在未设置 `default-selected` 时取成员首位，所以未手动指定出口时该组跟随**主端口的默认出口**（`PROXY` 组选中项，含 `AUTO`/`DIRECT`/具体节点）；一旦你手动指定出口，手选值以 `default-selected` 写入，优先级高于成员顺序；手选节点将来下线时，选择失效并回落到主端口默认出口，而不是静默直连。开关是配置项 `subscription-group-fallback`（Web 订阅管理页顶部 / `POST /api/subscription-group-fallback`）：`auto`（默认）只处理「没有任何可用代理成员」的组，`proxy` 把所有订阅组都交给主端口默认出口，`off` 完全尊重订阅作者。策略分组页的「订阅自带策略组」区块会显示每个组是「默认走主端口出口」还是「仅有直连」。
+
+**导入策略组的出口可以手选**：订阅给的成员列表是只读的「订阅作者意图」，但用户可以为每个 `select` 类型的导入组指定出口——Web「策略分组」页的「订阅自带策略组」区块 / `POST /api/imported-groups/{name}/select`（`{"node":"节点名|AUTO|DIRECT|REJECT"}`）。选择某个节点时该节点会被**追加**到该组出口（订阅作者通常只写了 `DIRECT`），并写入 mihomo 的 `default-selected`；选择持久化在 `state-dir/group-selected.json` 与 `state-dir/groups/<订阅名>.json`，订阅刷新与进程重启后都保持。追加走并集而不是替换：订阅下一版新增成员不会丢掉你添加的出口，你的追加项也不会被订阅刷新抹掉；被追加的节点下线时会自动从该组剔除并提示「已选择的节点当前不可用」。
+
+**导入结果随刷新整订阅替换**：每次同步、启动、停用或删除订阅都会从该订阅的正文缓存重新规划，所以订阅下一版删掉的规则/规则集不会残留。订阅卡片会显示「已导入 N 个策略组、M 条规则、K 个规则集」以及（有跳过时）「已跳过 X 条规则：原因」；如果某个策略组当前只有 `DIRECT`/`REJECT` 成员（订阅作者常见做法：留给自己在客户端里手选节点），卡片会额外提示这些组的情况：默认（`subscription-group-fallback: auto`）下它们会**默认走主端口的默认出口**，因此不需要额外配置就能走代理；把该开关设为 `off` 时才需要你自己用「默认出口」或自定义规则另行安排出口。
+
 **节点快照（nodes.json）**：每轮手动同步或健康检测后，把合并后的全量节点（完整 proxy 配置、来源订阅、最近测速结果）持久化到 `state-dir/nodes.json`。下次启动时**只加载该快照生成配置提供服务**，不会自动访问订阅地址；用户下一次手动同步成功后再覆盖。快照带格式版本号，解析失败或版本不兼容时记录日志并按空节点启动，不影响控制台使用。
 
 **失败兜底**：手动同步时订阅拉取失败会自动使用本地缓存（`state-dir/cache/`），网络抖动不会清空节点；全部订阅失败或全部节点死亡时保持现有配置不动，等待用户再次手动同步。后台健康检测只检查已有节点，不会触发订阅下载。
@@ -507,6 +543,7 @@ dns:              # 可选，mihomo dns 配置原样透传
 | 手动节点（自有代理 URL/分享链接/结构化 VPN 出站映射） | `manual-nodes` |
 | 端口区间/主端口/auto-port/分组端口 | `port-range` / `mixed-port` / `auto-port` / `groups` |
 | 代理模式、自定义规则、规则源 URL | `mode` / `custom-rules` / `rule-urls`（只存 URL，不存规则内容） |
+| 订阅自带策略组的默认出口策略 | `subscription-group-fallback`（`auto`（默认，仅直连成员的组跟随主端口默认出口）/`proxy`（所有订阅组）/`off`（完全尊重订阅作者）） |
 | 系统代理开关、节点正则过滤、健康检测周期等 | `system-proxy` / `include` / `exclude` / `health-interval` / ... |
 | 远程连接（隧道开关、暴露端口、远端与转发） | `remote`（token 属凭据，导出默认打码） |
 | 远程桌面（服务端口与不含密码的连接档案） | `desktop`（开放状态仍以 `remote.serve` 为准） |
@@ -521,6 +558,8 @@ dns:              # 可选，mihomo dns 配置原样透传
 | `tsnet/<节点>-<哈希>/` | tailscale 出站按节点隔离的 tsnet 状态目录（配置历史不备份这些文件） |
 | `cache/<订阅名>.cache` | 各订阅的原始响应缓存（拉取失败时降级用） |
 | `cache/rules-<名>.cache` | 各规则源的原始内容缓存 |
+| `groups/<订阅名>.json` | 订阅自带策略组的用户覆盖项（手选出口与追加的出口节点，0600）；订阅删除后由启动清理回收 |
+| `ruleset/<订阅名>/<规则集名>.yaml` | 订阅自带 rule-provider 的下载缓存（由 mihomo 读写，路径固定以避免随启动目录漂移） |
 | `proxyd.pid` | 运行中实例的 pid 与单实例锁文件（serve 启动时持锁并写入 pid；锁随进程退出自动释放，文件永久保留；stop/status/防重复启动以锁为准，不受过期内容影响） |
 | `proxyd.log` | 后台模式（start）与开机自启的日志文件 |
 | `remote/server.private.json` | 远程连接服务端密钥（0600）：决定本机 token，文件在则 token 重启不变；删除即换全新 token。配置 `remote.key-file` 时改用指定路径，此文件不再使用 |

@@ -462,6 +462,35 @@ func cachePath(stateDir, subName string) string {
 	return filepath.Join(stateDir, "cache", sanitizeFileName(subName)+".cache")
 }
 
+// CachePath 返回订阅正文缓存的完整路径。
+//
+// 参数：
+//   - stateDir: string，状态目录根路径。
+//   - subName: string，订阅名（内部做文件名安全清洗）。
+//
+// 返回值：string，已确认订阅正文的缓存文件路径；文件不存在时调用方按「无缓存」处理。
+//
+// 错误情况：无。导出该路径是为了让应用层在启动、端口重算等禁止访问网络的路径上重新
+// 解析订阅自带的路由元信息（策略组/规则/规则集），而不是额外维护一份正文副本。
+func CachePath(stateDir, subName string) string {
+	return cachePath(stateDir, subName)
+}
+
+// SubscriptionOverridesPath 返回订阅策略组覆盖项存档的完整路径。
+//
+// 参数：
+//   - stateDir: string，状态目录根路径。
+//   - subName: string，订阅名（内部做文件名安全清洗）。
+//
+// 返回值：string，形如 <stateDir>/groups/<订阅名>.json 的路径。
+//
+// 错误情况：无。该文件只保存用户自己在导入策略组上做的选择（手选出口与追加节点），
+// 不含订阅正文、规则内容或节点凭据；启动与每轮刷新都会以订阅正文缓存重新规划，
+// 存档仅用于让用户选择跨轮保持。
+func SubscriptionOverridesPath(stateDir, subName string) string {
+	return filepath.Join(stateDir, "groups", sanitizeFileName(subName)+".json")
+}
+
 // InvalidateCache 删除订阅正文缓存，使 URL/解析类型变更后旧正文不能被本地调和误用。
 //
 // 参数：

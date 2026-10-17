@@ -4,16 +4,19 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"proxyd/internal/app"
 	"proxyd/internal/config"
 )
 
 // registerProxyRuleRoutes 注册自定义规则与远程规则源（rule-urls）路由。
 func (s *Server) registerProxyRuleRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/rules", s.handleListRules)
+	mux.HandleFunc("GET /api/rules/effective", s.handleListEffectiveRules)
 	mux.HandleFunc("POST /api/rules", s.handleAddRule)
 	mux.HandleFunc("POST /api/rules/reorder", s.handleMoveRule)
 	mux.HandleFunc("PUT /api/rules/{index}", s.handleUpdateRule)
@@ -26,6 +29,67 @@ func (s *Server) registerProxyRuleRoutes(mux *http.ServeMux) {
 
 func (s *Server) handleListRules(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, s.app.CustomRules())
+}
+
+// handleListEffectiveRules 返回当前生效配置里的规则（含来源标注），支持筛选与分页。
+//
+// 参数：
+//   - w: http.ResponseWriter，写出 app.EffectiveRulesStatus JSON 或 400 错误。
+//   - r: *http.Request，查询参数 source（来源键或中文名）、q（规则文本子串）、
+//     offset、limit。
+//
+// 返回值：无；成功返回 HTTP 200 与分页结果。
+//
+// 错误情况：offset/limit 非整数或为负、source 不是已知来源、规格超出上限时返回 400。
+// 代理未启动或已停用时不算错误，返回 available=false 的空快照，前端据此给出引导文案。
+func (s *Server) handleListEffectiveRules(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	offset, err := parseNonNegativeInt(query.Get("offset"), "offset")
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	limit, err := parseNonNegativeInt(query.Get("limit"), "limit")
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	status, err := s.app.EffectiveRules(app.EffectiveRulesQuery{
+		Source:  query.Get("source"),
+		Keyword: query.Get("q"),
+		Offset:  offset,
+		Limit:   limit,
+	})
+	if err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, status)
+}
+
+// parseNonNegativeInt 解析可选的非负整数查询参数。
+//
+// 参数：
+//   - raw: string，查询参数原值；空字符串视为未提供。
+//   - name: string，参数名，仅用于错误信息。
+//
+// 返回值：
+//   - int：解析结果；未提供时返回 0（由用例层决定默认值）。
+//   - error：不是整数或为负数时返回。
+//
+// 错误情况：错误信息不含请求体内容，只回显参数名与要求。
+func parseNonNegativeInt(raw, name string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s 必须是整数", name)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s 不能为负数", name)
+	}
+	return value, nil
 }
 
 // handleAddRule 追加自定义规则（前置到内置规则之前），持久化 + 热更新。

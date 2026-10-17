@@ -17,6 +17,10 @@ type Subscription struct {
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// PortMapping 使用指针区分旧配置缺失字段和用户显式关闭；缺失时保持历史默认参与端口映射。
 	PortMapping *bool `yaml:"port-mapping,omitempty" json:"port_mapping,omitempty"`
+	// ImportRules 使用指针区分旧配置缺失字段和用户显式开启；缺失时保持历史默认不导入，
+	// 因此升级 proxyd 不会改变既有分流行为。开启后该订阅的 proxy-groups/rules/
+	// rule-providers 会参与配置生成（见 internal/proxy/subscribe/routing.go）。
+	ImportRules *bool `yaml:"import-subscription-rules,omitempty" json:"import_subscription_rules,omitempty"`
 }
 
 // IsEnabled 返回该订阅是否参与拉取、合并、健康检测与端口监听生成。
@@ -41,6 +45,66 @@ func (s Subscription) IsEnabled() bool {
 // 错误情况：无；该开关只控制 listener 生成，不影响节点参与路由与稳定端口分配。
 func (s Subscription) PortMappingEnabled() bool {
 	return s.PortMapping == nil || *s.PortMapping
+}
+
+// 订阅自带策略组的默认出口策略（config.yaml 的 subscription-group-fallback）。
+//
+// 背景：机场订阅常把「AI/流媒体/社交」这类策略组的成员只写成 DIRECT（订阅作者留给自己
+// 在客户端里手选）。直接导入后，命中这些组的流量会静默直连，用户以为代理没生效。
+// 处理方式是把内置 PROXY 组放到这类组的成员首位——mihomo 的 select 组在未设置
+// default-selected 时取成员首位，所以未手选时该组跟随主端口默认出口。
+const (
+	// GroupFallbackAuto 让「没有任何可用代理成员」的订阅策略组默认走内置 PROXY 组，
+	// 也就是当前的主端口默认出口（含 AUTO/DIRECT）；用户手动选择出口时以手动值为准。
+	GroupFallbackAuto = "auto"
+	// GroupFallbackProxy 让所有订阅策略组的默认出口都走内置 PROXY 组，忽略成员列表里
+	// 是否存在可用节点（保守但不会漏掉任何分流组）。
+	GroupFallbackProxy = "proxy"
+	// GroupFallbackOff 完全尊重订阅作者的成员列表，不做任何改写。
+	GroupFallbackOff = "off"
+)
+
+// ReservedPolicyNames 是 proxyd 生成配置时自带、订阅路由元信息不能占用的策略名。
+//
+// 这些名字在核心配置里由 proxyd 固定生成（见 internal/proxy/core），订阅同名策略组
+// 必须改名，否则 mihomo 会以 "the duplicate name" 拒绝整份配置，订阅的 MATCH 兜底
+// 也会被误解成 proxyd 的默认出口组。
+var ReservedPolicyNames = []string{"PROXY", "AUTO", "GLOBAL"}
+
+// AdBlockProviderName 是广告拦截注入的 rule-provider 保留键名。
+const AdBlockProviderName = "adblock"
+
+// EffectiveGroupFallback 返回生效的订阅策略组兜底策略。
+//
+// 参数：无；接收者可为 nil。
+//
+// 返回值：
+//   - string：subscription-group-fallback 的生效值；未配置时返回 GroupFallbackAuto。
+//
+// 错误情况：无；非法值由 Validate 拦截，这里对未知值保守回退到 auto。
+func (c *Config) EffectiveGroupFallback() string {
+	if c == nil {
+		return GroupFallbackAuto
+	}
+	switch c.SubscriptionGroupFallback {
+	case GroupFallbackAuto, GroupFallbackProxy, GroupFallbackOff:
+		return c.SubscriptionGroupFallback
+	default:
+		return GroupFallbackAuto
+	}
+}
+
+// ImportRulesEnabled 返回该订阅自带的策略组与规则是否参与配置生成。
+//
+// 参数：无；接收者为待判断的订阅值对象。
+//
+// 返回值：
+//   - bool：import-subscription-rules 未配置时返回 false（保持历史行为），
+//     显式配置时返回对应值。
+//
+// 错误情况：无；该开关只控制路由元信息导入，节点拉取、健康检测与端口映射不受影响。
+func (s Subscription) ImportRulesEnabled() bool {
+	return s.ImportRules != nil && *s.ImportRules
 }
 
 // NodeGroup 把一组节点聚合到一个指定端口。

@@ -15,6 +15,7 @@ import (
 	"proxyd/internal/proxy/groupstate"
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
+	"proxyd/internal/proxy/routing"
 	"proxyd/internal/proxy/ruleurl"
 	"proxyd/internal/proxy/subscribe"
 )
@@ -33,17 +34,20 @@ func (a *App) configApplied(candidate []byte) bool {
 	return len(a.appliedConfig) > 0 && bytes.Equal(a.appliedConfig, candidate)
 }
 
-// markConfigApplied 记录一份已经成功热更新到 mihomo 的配置字节。
+// markConfigApplied 记录一份已经成功热更新到 mihomo 的配置字节及其规则来源标注。
 //
 // 参数：
 //   - applied: []byte，自检通过并成功 Reload 的最终配置字节。
+//   - rules: []core.RuleEntry，该配置里的规则与来源（顺序即匹配优先级）。
 //
 // 返回值：无。
 //
 // 错误情况：无；调用方必须确保 mihomo 已经生效，否则后续刷新会错误地跳过重试。
-func (a *App) markConfigApplied(applied []byte) {
+// 规则标注与配置字节同一次写入，避免控制台看到与运行态不匹配的规则集合。
+func (a *App) markConfigApplied(applied []byte, rules []core.RuleEntry) {
 	a.mu.Lock()
 	a.appliedConfig = applied
+	a.appliedRules = rules
 	a.mu.Unlock()
 }
 
@@ -54,9 +58,11 @@ func (a *App) markConfigApplied(applied []byte) {
 // 返回值：无。
 //
 // 错误情况：无；mihomo 被停用、被替换或热更新可能只应用了一半时都必须调用。
+// 规则来源标注同步清空：没有生效配置时不应继续展示上一份规则列表。
 func (a *App) clearAppliedConfig() {
 	a.mu.Lock()
 	a.appliedConfig = nil
+	a.appliedRules = nil
 	a.mu.Unlock()
 }
 
@@ -79,17 +85,21 @@ func (a *App) regenerateCurrentLocked() error {
 
 // regenerateLocked 是重新生成热更新的核心；调用方须已持有 refreshing 锁。
 func (a *App) regenerateLocked(assigns []pool.Assignment) error {
+	// 路由导入必须在生成配置之前按当前订阅与节点集合调和：配置生成会直接消费
+	// 调和结果（策略组、规则、规则集引用），顺序颠倒会用到上一轮的旧计划。
+	a.reconcileSubscriptionRouting()
 	a.mu.RLock()
 	cfg := a.cfg
 	imported := a.mergedImportedLocked()
+	plan := a.mergedRoutingLocked()
 	a.mu.RUnlock()
-	return a.regenerateWithLocked(cfg, assigns, imported)
+	return a.regenerateWithLocked(cfg, assigns, imported, plan)
 }
 
 // regenerateWithLocked 用指定配置生成并热应用；调用方须已持有 refreshing 锁。
 // cfg 为运行时副本（不与 a.cfg 同步修改），供启动快照恢复等场景使用。
-func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) error {
-	return a.applyConfigLocked(cfg, assigns, imported)
+func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment, imported []string, plan routing.Plan) error {
+	return a.applyConfigLocked(cfg, assigns, imported, plan)
 }
 
 // applyConfigLocked 生成并热应用一版 mihomo 配置。
@@ -98,13 +108,15 @@ func (a *App) regenerateWithLocked(cfg *config.Config, assigns []pool.Assignment
 //   - cfg: *config.Config，本次需要应用的运行配置副本。
 //   - assigns: []pool.Assignment，需要创建本地 listener 的节点端口映射。
 //   - imported: []string，已经合并清洗的远程规则。
+//   - plan: routing.Plan，订阅自带路由元信息的导入计划（策略组、规则与规则集引用）；
+//     零值表示不导入任何订阅策略。
 //
 // 返回值：error，生成、自检、mihomo 热加载或 TUN 实际状态不一致时返回。
 //
 // 错误情况：调用方必须持有 refreshing 锁，确保读取节点快照和 Reload 期间没有另一轮
 // 刷新并发修改。生成时同时传入完整健康节点集，使 dialer-proxy 依赖和策略组成员即使
 // 没有独立本地端口，也会作为 proxy-only 出站注册到 mihomo。
-func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, imported []string) (resultErr error) {
+func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, imported []string, plan routing.Plan) (resultErr error) {
 	generation := a.proxyLifecycle.Begin()
 	// 热更新和启动共用状态收尾；外围刷新另行记录拉取失败，不依赖仅在 HTTP 操作时更新。
 	defer func() {
@@ -159,7 +171,7 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	// 也是进程 RSS 高水位的主要来源。
 	// 字节比较是可靠的：配置由固定结构的 map 序列化，yaml.v3 对 map 键排序，相同输入
 	// 必然得到相同输出（见 core.BuildWithState 的文档契约）。
-	built, err := core.BuildWithState(cfg, assigns, a.Nodes(), imported, selected)
+	built, err := core.BuildWithRouting(cfg, assigns, a.Nodes(), imported, selected, plan)
 	if err != nil {
 		releaseOnError()
 		return fmt.Errorf("generate mihomo config: %w", err)
@@ -195,7 +207,7 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 		releaseOnError()
 		return fmt.Errorf("mihomo TUN 实际状态与请求不一致（期望 enable=%t，实际 active=%t）；请检查 TUN 日志、stack 与系统权限", cfg.TUN.Enable, active)
 	}
-	a.markConfigApplied(cfgYAML)
+	a.markConfigApplied(cfgYAML, built.Rules())
 	if !cfg.TUN.Enable {
 		// TUN 已随本次应用关闭，fd 由 mihomo 关闭（所有权已移交），只清持有状态。
 		a.releaseTUNFDLocked(false)
@@ -722,12 +734,17 @@ func (a *App) restoreSnapshot() error {
 	if err != nil {
 		log.Printf("[alloc] load snapshot: %v (ignored)", err)
 	}
+	// 先发布快照节点，再按快照节点与订阅正文缓存重建路由导入：开启了路由导入的
+	// 订阅不应因为进程重启而丢失分流策略，而这条路径不允许访问任何订阅地址。
+	a.mu.Lock()
+	a.nodes = nodes
+	a.mu.Unlock()
+	a.reconcileSubscriptionRouting()
 	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
 	if err := a.regenerateLocked(assigns); err != nil {
 		return fmt.Errorf("从节点快照生成启动配置失败: %w", err)
 	}
 	a.mu.Lock()
-	a.nodes = nodes
 	a.assigns = assigns
 	// 节点来自快照时内存用量为空，直接从用量 sidecar 恢复，让控制台在首次
 	// 健康检查之前就能展示订阅流量与到期信息；读取失败按无用量处理。
