@@ -55,6 +55,12 @@ type remotePingJSON struct {
 	CheckedAt  time.Time `json:"checked_at"`
 }
 
+// remoteRelayJSON 对应专用中继配置 API；完整地图 URL 不进入通用状态响应。
+type remoteRelayJSON struct {
+	Region     string `json:"region"`
+	DERPMapURL string `json:"derpmap_url"`
+}
+
 // remoteStatusJSON 对应 GET /api/remote 的响应（token 为打码摘要）。
 type remoteStatusJSON struct {
 	Enabled         bool                        `json:"enabled"`
@@ -152,6 +158,8 @@ func cmdRemote(args []string) error {
 		return nil
 	case "serve":
 		return cmdRemoteServe(c, rest[1:])
+	case "relay":
+		return cmdRemoteRelay(c, rest[1:])
 	case "allow":
 		return cmdRemoteAllow(c, rest[1:])
 	case "audit":
@@ -173,7 +181,7 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -282,6 +290,77 @@ func formatPorts(ports []int) string {
 		parts[i] = strconv.Itoa(p)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// cmdRemoteRelay 查看或更新 tailcat 的 DERP 中继选择。
+//
+// 功能说明：
+// 无参数时读取专用端点；有参数时先读取当前值，再只覆盖用户指定的字段，避免仅修改
+// region 时意外清空私有 DERP map URL。`reset` 同时恢复自动选区和默认公共地图。
+//
+// 参数说明：
+//   - c: *apiClient，连接运行中 proxyd 管理 API 的客户端。
+//   - args: []string，可包含一个 region/auto、--map-url URL、--map-url=URL、
+//     --default-map，或单独的 reset。
+//
+// 返回值说明：error，读取或事务更新成功时返回 nil。
+//
+// 错误情况：参数冲突、缺少 map URL、领域校验失败、DERP 探测/服务重建失败或 API
+// 不可达时返回错误。地图 URL 可能包含凭据，命令只在显式查询时打印完整值。
+func cmdRemoteRelay(c *apiClient, args []string) error {
+	var settings remoteRelayJSON
+	if err := c.do(http.MethodGet, "/api/remote/relay", nil, &settings); err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		region := settings.Region
+		if region == "" {
+			region = "自动"
+		}
+		derpMapURL := settings.DERPMapURL
+		if derpMapURL == "" {
+			derpMapURL = "默认公共地图"
+		}
+		fmt.Printf("DERP 区域：%s\nDERP 地图：%s\n", region, derpMapURL)
+		return nil
+	}
+	if len(args) == 1 && args[0] == "reset" {
+		settings = remoteRelayJSON{}
+	} else {
+		regionSet := false
+		for index := 0; index < len(args); index++ {
+			argument := args[index]
+			switch {
+			case argument == "--default-map":
+				settings.DERPMapURL = ""
+			case argument == "--map-url":
+				index++
+				if index >= len(args) {
+					return fmt.Errorf("--map-url 缺少 URL")
+				}
+				settings.DERPMapURL = args[index]
+			case strings.HasPrefix(argument, "--map-url="):
+				settings.DERPMapURL = strings.TrimPrefix(argument, "--map-url=")
+			case strings.HasPrefix(argument, "-"):
+				return fmt.Errorf("未知参数 %q", argument)
+			default:
+				if regionSet {
+					return fmt.Errorf("只能指定一个区域（用法: proxyd remote relay [auto|区域ID|derp主机] [--map-url URL|--default-map]）")
+				}
+				regionSet = true
+				if argument == "auto" {
+					settings.Region = ""
+				} else {
+					settings.Region = argument
+				}
+			}
+		}
+	}
+	if err := c.do(http.MethodPost, "/api/remote/relay", settings, &settings); err != nil {
+		return err
+	}
+	fmt.Println("DERP 中继配置已更新；运行中的服务端已重建，请重新复制 token 给客户端")
+	return nil
 }
 
 // formatRemotePath 把内部路径枚举转换为适合命令行阅读的中文文本。

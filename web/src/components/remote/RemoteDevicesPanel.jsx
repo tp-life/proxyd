@@ -19,6 +19,7 @@ import { RemoteProbeDetail } from "./RemoteConnectionTools";
  * RemoteDevicesPanel 渲染独立任务视图。
  * 参数：解构字段为状态对象、表单值或事件回调，沿用 RemotePage 的接口约定。
  * 返回：React 元素；网络错误由用例回调处理，本组件不直接写配置。
+ * 说明：文件传输已拆到独立的 remote/files 页面，本面板只保留设备档案与链路检测。
  */
 export function RemoteDevicesPanel({ expandedRemote, probeRemote, remoteColumns, remoteForm, remoteProbes, remotes, setRemoteForm, setSshSetEnvTerm, sshSetEnvTerm, submitRemote }) {
  return (<>            <section className="panel">
@@ -77,5 +78,6 @@ export function RemoteDevicesPanel({ expandedRemote, probeRemote, remoteColumns,
                   resizable
                 />
               )}
-            </section></>);
+            </section>
+            </>);
 }

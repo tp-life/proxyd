@@ -92,9 +92,9 @@ type App struct {
 	// StateDir、HealthURL、HealthTimeout 自 New 之后不再修改，允许只读路径免锁读取
 	// （如 snapshotPath、autostartOptions），新增配置项不得加入该不可变清单除非
 	// 确认无任何运行时写路径。
-	cfg                  *config.Config
-	cfgPath              string // 配置文件路径，配置变更时持久化；为空则不落盘
-	runner               *core.Runner
+	cfg     *config.Config
+	cfgPath string // 配置文件路径，配置变更时持久化；为空则不落盘
+	runner  *core.Runner
 
 	mu        sync.RWMutex
 	nodes     []*node.Node           // 最近一次订阅合并结果
@@ -102,6 +102,10 @@ type App struct {
 	imported  map[string][]string    // rule-url 名 -> 导入的规则行
 	ruleStats map[string]RuleURLStat // rule-url 名 -> 最近拉取状态
 	subInfos  map[string]subscribe.UserInfo
+	// subImports 是开启了 import-subscription-rules 的订阅当前生效的路由导入结果
+	// （策略组、规则与规则集引用）。它由 reconcileSubscriptionRouting 整表重建，
+	// 因此订阅停用/删除/改名后不会残留旧策略；仅在 mu 内替换与读取。
+	subImports map[string]*subscriptionImport
 	// subscriptionDrafts 保存每个订阅最后一份待确认刷新草稿。草稿包含解析后的私有
 	// 节点映射和原始订阅正文，可能带凭据，因此只驻留内存、绝不进入 overview 或配置文件；
 	// 所有访问都必须持有 mu，进程重启会自然清除未确认数据。
@@ -132,6 +136,10 @@ type App struct {
 	// 规则集，这是进程 RSS 高水位和周期性 CPU 尖峰的主要来源。
 	// 仅在 mu 内访问；mihomo 运行态被停用、替换或热更新可能只应用了一半时必须清空。
 	appliedConfig []byte
+	// appliedRules 与 appliedConfig 同步更新，记录当前生效配置里每条规则的来源标注。
+	// 来源无法从配置字节反推，因此必须随应用一起缓存；清空 appliedConfig 时一并清空，
+	// 保证控制台展示的规则集合与真正生效的配置严格对应。
+	appliedRules []core.RuleEntry
 
 	updateChecker          ReleaseChecker
 	versionStatus          VersionCheckStatus
@@ -208,6 +216,7 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 		imported:           map[string][]string{},
 		ruleStats:          map[string]RuleURLStat{},
 		subInfos:           map[string]subscribe.UserInfo{},
+		subImports:         map[string]*subscriptionImport{},
 		subscriptionDrafts: map[string]*subscriptionDraftState{},
 		systemProxy:        platformSystemProxy{},
 		proxyResume:        make(chan struct{}, 1),
@@ -550,6 +559,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer a.Shutdown()
 
 	go a.startVersionCheck(runCtx)
+	// 清理已删除订阅遗留的路由导入 sidecar；在快照恢复之前执行，避免启动阶段读到
+	// 不再对应任何订阅的规则集引用记录。
+	a.pruneOrphanImportSidecars()
 	startupErr := a.restoreSnapshot()
 	a.startRemote()
 	a.startGateway()

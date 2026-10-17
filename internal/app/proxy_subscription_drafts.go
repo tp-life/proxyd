@@ -218,13 +218,14 @@ func (a *App) ApplySubscriptionDraft(ctx context.Context, name, id string) error
 	oldNodes := append([]*node.Node(nil), a.nodes...)
 	oldAssignments := append([]pool.Assignment(nil), a.assigns...)
 	oldInfos := cloneSubscriptionInfos(a.subInfos)
+	oldImports := cloneSubscriptionImports(a.subImports)
 	a.mu.RUnlock()
 	// 使用深到 Mapping 顶层的克隆应用，避免 Runner 的链式验证修改草稿实体；若热更新
 	// 失败，用户仍可查看同一草稿，同时运行态通过旧快照回滚。
 	candidates := cloneSubscriptionDraftNodes(state.nodes)
 	if err := a.applyNodes(ctx, candidates); err != nil {
 		return a.rollbackSubscriptionLocked(
-			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, err, false,
+			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, oldImports, err, false,
 		)
 	}
 

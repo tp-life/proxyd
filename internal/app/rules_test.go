@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"proxyd/internal/config"
+	"proxyd/internal/proxy/core"
 )
 
 // TestCustomRuleEditAndReorder 验证自定义规则支持原位编辑和顺序调整，且变更会同步
@@ -91,5 +92,114 @@ func TestCustomRulePersistenceFailureRollsBack(t *testing.T) {
 	}
 	if got := a.CustomRules(); len(got) != 1 || got[0] != "DOMAIN-SUFFIX,old.example,DIRECT" {
 		t.Fatalf("持久化失败后规则未恢复: %#v", got)
+	}
+}
+
+// TestEffectiveRulesSnapshotAndQuery 验证「当前生效规则」快照的来源标注、筛选与分页。
+//
+// 覆盖点：
+//   - 未应用过配置时 Available 为 false，不把「代理停用」误报成错误。
+//   - 成功热更新后按匹配顺序返回全部规则，并带来源键与中文名。
+//   - 来源筛选同时接受来源键与中文展示名，未知名返回错误。
+//   - 关键字筛选大小写不敏感，Position 保持全局匹配位置。
+//   - offset/limit 正确切片，超界返回空页而不是报错。
+//
+// 参数：t 为 Go 测试上下文。
+// 返回值：无；任一断言不成立时测试失败。
+// 错误情况：规则顺序、来源、筛选结果或分页边界不符时失败。
+func TestEffectiveRulesSnapshotAndQuery(t *testing.T) {
+	cfg := &config.Config{
+		Listen:      "127.0.0.1",
+		Mode:        "rule",
+		LogLevel:    "silent",
+		StateDir:    t.TempDir(),
+		Rules:       []string{"MATCH,PROXY"},
+		CustomRules: []string{"DOMAIN-SUFFIX,first.example,DIRECT"},
+	}
+	a, err := New(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	if err != nil {
+		t.Fatalf("创建应用失败: %v", err)
+	}
+	t.Cleanup(a.Shutdown)
+
+	if status, err := a.EffectiveRules(EffectiveRulesQuery{}); err != nil || status.Available {
+		t.Fatalf("尚未应用配置时不应报告可用: %#v err=%v", status, err)
+	}
+	// 参数校验与可用性无关：代理没生效时来源名写错同样要报错，不能被「没有规则」掩盖。
+	if _, err := a.EffectiveRules(EffectiveRulesQuery{Source: "nope"}); err == nil {
+		t.Fatal("代理未生效时未知来源也必须报错")
+	}
+
+	// 一次规则事务会完成生成 + 热更新，从而写入生效规则快照。
+	if err := a.AddRule("DOMAIN-SUFFIX,second.example,PROXY"); err != nil {
+		t.Fatalf("添加自定义规则失败: %v", err)
+	}
+	status, err := a.EffectiveRules(EffectiveRulesQuery{})
+	if err != nil {
+		t.Fatalf("查询生效规则失败: %v", err)
+	}
+	if !status.Available || status.Total != 3 || status.Matched != 3 {
+		t.Fatalf("生效规则应为首条自定义 + 第二条自定义 + 内置 1 条: %#v", status)
+	}
+	if status.Rules[0].Line != "DOMAIN-SUFFIX,first.example,DIRECT" || status.Rules[0].Source != string(core.RuleSourceCustom) {
+		t.Fatalf("首条规则应为最早的自定义规则: %#v", status.Rules[0])
+	}
+	if status.Rules[0].SourceLabel != core.RuleSourceCustom.Label() {
+		t.Fatalf("来源应带中文展示名: %#v", status.Rules[0])
+	}
+	if status.Rules[2].Line != "MATCH,PROXY" || status.Rules[2].Source != string(core.RuleSourceBuiltin) {
+		t.Fatalf("内置规则应排在自定义规则之后: %#v", status.Rules[2])
+	}
+	counts := map[string]int{}
+	for _, source := range status.Sources {
+		counts[source.Source] = source.Count
+	}
+	if counts[string(core.RuleSourceCustom)] != 2 || counts[string(core.RuleSourceBuiltin)] != 1 {
+		t.Fatalf("来源条数不正确: %#v", status.Sources)
+	}
+
+	// 来源筛选：键与中文名等价；未知来源必须报错，便于 CLI 直接纠正拼写。
+	byKey, err := a.EffectiveRules(EffectiveRulesQuery{Source: "custom"})
+	if err != nil || byKey.Matched != 2 {
+		t.Fatalf("按来源键筛选失败: %#v err=%v", byKey, err)
+	}
+	byLabel, err := a.EffectiveRules(EffectiveRulesQuery{Source: core.RuleSourceCustom.Label()})
+	if err != nil || byLabel.Matched != 2 {
+		t.Fatalf("按来源中文名筛选失败: %#v err=%v", byLabel, err)
+	}
+	if _, err := a.EffectiveRules(EffectiveRulesQuery{Source: "nope"}); err == nil {
+		t.Fatal("未知来源必须返回错误")
+	}
+
+	// 关键字筛选大小写不敏感，且保留全局匹配位置（Position 不是筛选结果下标）。
+	filtered, err := a.EffectiveRules(EffectiveRulesQuery{Keyword: "SECOND.EXAMPLE"})
+	if err != nil || filtered.Matched != 1 {
+		t.Fatalf("关键字筛选失败: %#v err=%v", filtered, err)
+	}
+	if filtered.Rules[0].Position != 2 {
+		t.Fatalf("筛选结果应保留全局位置 2: %#v", filtered.Rules[0])
+	}
+
+	// 分页：offset 越界返回空页而不是错误；limit 被截断到上限。
+	page, err := a.EffectiveRules(EffectiveRulesQuery{Limit: 1, Offset: 1})
+	if err != nil || len(page.Rules) != 1 || page.Rules[0].Position != 2 {
+		t.Fatalf("分页切片不正确: %#v err=%v", page, err)
+	}
+	if page.Limit != 1 || page.Total != 3 {
+		t.Fatalf("分页元信息不正确: %#v", page)
+	}
+	beyond, err := a.EffectiveRules(EffectiveRulesQuery{Offset: 99})
+	if err != nil || len(beyond.Rules) != 0 || beyond.Matched != 3 {
+		t.Fatalf("越界 offset 应返回空页: %#v err=%v", beyond, err)
+	}
+	clamped, err := a.EffectiveRules(EffectiveRulesQuery{Limit: EffectiveRulesMaxLimit + 1})
+	if err != nil || clamped.Limit != EffectiveRulesMaxLimit {
+		t.Fatalf("limit 应被截断到上限: %#v err=%v", clamped, err)
+	}
+
+	// 核心被停用后不再有生效配置，快照必须同步清空。
+	a.clearAppliedConfig()
+	if status, err := a.EffectiveRules(EffectiveRulesQuery{}); err != nil || status.Available || status.Total != 0 {
+		t.Fatalf("清空生效配置后应报告不可用: %#v err=%v", status, err)
 	}
 }

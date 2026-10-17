@@ -43,6 +43,7 @@ function readSshSetEnvTerm() {
 
 export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   const [status, setStatus] = useState(null);
+  const [relay, setRelay] = useState({ region: "", derpmap_url: "" });
   const [remotes, setRemotes] = useState([]);
   const [remoteProbes, setRemoteProbes] = useState({});
   const [expandedRemote, setExpandedRemote] = useState("");
@@ -113,8 +114,9 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     }
 
     try {
-      const [nextStatus, nextRemotes, nextAudit] = await Promise.all([
+      const [nextStatus, nextRelay, nextRemotes, nextAudit] = await Promise.all([
         requestJSON("/api/remote", { signal: controller.signal }),
+        requestJSON("/api/remote/relay", { signal: controller.signal }),
         requestJSON("/api/remote/remotes", { signal: controller.signal }),
         requestJSON("/api/remote/audit?tail=100", { signal: controller.signal }),
       ]);
@@ -122,6 +124,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
         return;
       }
       setStatus(nextStatus);
+      setRelay(nextRelay || { region: "", derpmap_url: "" });
       setRemotes(nextRemotes?.remotes || []);
       setAuditEntries(nextAudit?.entries || []);
       setError("");
@@ -315,6 +318,37 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
       }
     },
     [showToast],
+  );
+
+  /**
+   * saveRelay 事务更新服务端使用的 DERP 区域与地图来源。
+   *
+   * 参数说明：
+   * - region: string，空值自动选区，或区域 ID / 逗号分隔自建 derper 主机名。
+   * - derpMapURL: string，空值使用默认公共地图，非空为自定义 DERP map URL。
+   *
+   * 返回值说明：返回 Promise<boolean>；运行态重建并持久化成功时为 true。
+   *
+   * 可能的异常/错误情况：格式校验、地图获取、服务端重建或落盘失败时展示后端错误；
+   * 失败事务不会改变原中继配置。成功后完整刷新状态，因为 token 可能随区域改变。
+   */
+  const saveRelay = useCallback(
+    async (region, derpMapURL) => {
+      try {
+        const payload = await requestJSON("/api/remote/relay", {
+          method: "POST",
+          body: JSON.stringify({ region, derpmap_url: derpMapURL }),
+        });
+        setRelay(payload || { region: "", derpmap_url: "" });
+        await loadRemote();
+        showToast("DERP 中继配置已更新；若 token 发生变化，请重新分发给客户端");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [loadRemote, showToast],
   );
 
   /**
@@ -892,6 +926,116 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     }
   }, [showToast, loadRemote]);
 
+  /**
+   * listRemoteFiles 通过本机 proxyd 建立 tailcat/SFTP 会话并列出远端目录。
+   *
+   * 参数说明：options 为 object，包含 remote、path、username、privateKey、passphrase。
+   * 返回值说明：Promise<object | null>，成功为 {path, entries}，失败为 null。
+   * 可能的异常/错误情况：远端离线、SSH 认证失败、SFTP 不可用或目录无权限时 toast，
+   * 私钥与口令仅进入本次请求体，不写入页面持久状态。
+   */
+  const listRemoteFiles = useCallback(async (options) => {
+    try {
+      return await requestJSON("/api/remote/files/list", {
+        method: "POST",
+        body: JSON.stringify({
+          remote: options.remote,
+          path: options.path || ".",
+          username: options.username || "proxyd",
+          private_key: options.privateKey || "",
+          passphrase: options.passphrase || "",
+        }),
+      });
+    } catch (listError) {
+      showToast(`远端目录读取失败：${listError.message}`, "err");
+      return null;
+    }
+  }, [showToast]);
+
+  /**
+   * uploadRemoteFile 把浏览器 File 直接流式提交给本机 proxyd，再经 tailcat/SFTP 上传。
+   *
+   * 参数说明：options 包含连接字段、远端 path、File 对象与可选 onProgress(number) 回调。
+   * 返回值说明：Promise<object>，成功解析 {written}；失败时 reject Error。
+   * 可能的异常/错误情况：XHR 网络错误、HTTP 非 2xx 或响应 JSON 非法时 reject；使用 XHR
+   * 是为了取得浏览器原生上传进度，FormData 字段顺序固定为元数据在前、文件在后。
+   */
+  const uploadRemoteFile = useCallback((options) => new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("remote", options.remote || "");
+    form.append("path", options.path || "");
+    form.append("username", options.username || "proxyd");
+    form.append("private_key", options.privateKey || "");
+    form.append("passphrase", options.passphrase || "");
+    form.append("file", options.file, options.file?.name || "upload.bin");
+
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/remote/files/upload");
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && options.onProgress) {
+        options.onProgress(Math.round((event.loaded / event.total) * 100));
+      }
+    });
+    request.addEventListener("error", () => reject(new Error("上传网络连接中断")));
+    request.addEventListener("abort", () => reject(new Error("上传已取消")));
+    request.addEventListener("load", () => {
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(request.responseText.trim() || `HTTP ${request.status}`));
+        return;
+      }
+      try {
+        resolve(request.responseText ? JSON.parse(request.responseText) : {});
+      } catch {
+        reject(new Error("上传响应格式无效"));
+      }
+    });
+    request.send(form);
+  }), []);
+
+  /**
+   * downloadRemoteFile 请求远端文件并触发浏览器保存。
+   *
+   * 参数说明：options 包含 remote、path、username、privateKey、passphrase 与可选文件名。
+   * 返回值说明：Promise<boolean>，成功触发下载为 true，失败 toast 并返回 false。
+   * 可能的异常/错误情况：连接、认证、读取或浏览器对象 URL 创建失败时返回 false。
+   * 浏览器 Fetch 无法把带 JSON 凭据的 POST 直接交给原生下载管理器，因此响应先落 Blob；
+   * 超大文件应优先使用页面提供的 proxyd scp 命令，避免浏览器内存峰值。
+   */
+  const downloadRemoteFile = useCallback(async (options) => {
+    try {
+      const response = await fetch("/api/remote/files/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          remote: options.remote,
+          path: options.path,
+          username: options.username || "proxyd",
+          private_key: options.privateKey || "",
+          passphrase: options.passphrase || "",
+        }),
+      });
+      if (!response.ok) {
+        throw new Error((await response.text()).trim() || `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const objectURL = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const filename = options.filename || options.path.split("/").filter(Boolean).pop() || "download.bin";
+      link.href = objectURL;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // 延后一轮事件循环释放 Blob，避免 Firefox 在下载导航接管前失去对象 URL。
+      window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+      showToast(`文件 ${filename} 已下载`);
+      return true;
+    } catch (downloadError) {
+      showToast(`文件下载失败：${downloadError.message}`, "err");
+      return false;
+    }
+  }, [showToast]);
+
   return {
     manageSSHKeys,
     auditEntries,
@@ -901,6 +1045,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     loading,
     refreshing,
     remotes,
+    relay,
     status,
     addForward,
     addRemote,
@@ -911,6 +1056,9 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     createSSHForward,
     fetchPeerToken,
     importKeyFile,
+    listRemoteFiles,
+    uploadRemoteFile,
+    downloadRemoteFile,
     probeRemote,
     refreshAudit,
     reload: loadRemote,
@@ -921,6 +1069,7 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     saveAllow,
     saveKeyFile,
     saveServe,
+    saveRelay,
     saveShellUser,
     setBuiltinSSH,
     setWebTerminal,

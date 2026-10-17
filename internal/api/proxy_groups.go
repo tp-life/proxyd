@@ -17,6 +17,34 @@ func (s *Server) registerProxyGroupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/groups/{name}", s.handleUpdateGroup)
 	mux.HandleFunc("DELETE /api/groups/{name}", s.handleDelGroup)
 	mux.HandleFunc("POST /api/groups/{name}/select", s.handleSelectGroupNode)
+	mux.HandleFunc("GET /api/imported-groups", s.handleListImportedGroups)
+	mux.HandleFunc("POST /api/imported-groups/{name}/select", s.handleSelectImportedGroupNode)
+	mux.HandleFunc("POST /api/subscription-group-fallback", s.handleSetSubscriptionGroupFallback)
+}
+
+// handleSetSubscriptionGroupFallback 设置订阅自带策略组的兜底出口策略。
+//
+// 参数：
+//   - w: http.ResponseWriter，写出提交结果或错误。
+//   - r: *http.Request，请求体 {"mode": "auto|proxy|off"}。
+//
+// 返回值：无；成功返回 HTTP 200 与生效值。
+//
+// 错误情况：取值非法、热更新或持久化失败时返回 400；失败时运行态与配置保持一致，
+// 不会只改一半。
+func (s *Server) handleSetSubscriptionGroupFallback(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Mode) == "" {
+		http.Error(w, "bad request: mode required", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetSubscriptionGroupFallback(strings.TrimSpace(req.Mode)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"group_fallback": s.app.Config().EffectiveGroupFallback()})
 }
 
 // GroupEntry 是分组列表的展示项：配置值之外附带 select 分组的持久化选中项。
@@ -50,6 +78,47 @@ func (s *Server) groupEntries() []GroupEntry {
 
 func (s *Server) handleListGroups(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, s.groupEntries())
+}
+
+// handleListImportedGroups 列出订阅自带并被导入的策略组。
+//
+// 参数：w 写出列表；请求本身不需要参数。
+//
+// 返回值：无；成功返回 HTTP 200 与导入策略组数组（含成员数、真实代理成员数与当前选中项）。
+//
+// 错误情况：无。列表来自内存中的导入结果，不访问订阅地址或磁盘。
+func (s *Server) handleListImportedGroups(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, s.app.ImportedGroups())
+}
+
+// handleSelectImportedGroupNode 为订阅导入的策略组手选出口。
+//
+// 参数：
+//   - w: http.ResponseWriter，写出提交结果或错误。
+//   - r: *http.Request，路径 name 是导入策略组的最终组名，请求体 {"node": "..."}。
+//
+// 返回值：无；成功返回 HTTP 200 与选中项。
+//
+// 错误情况：
+//   - 请求体缺 node、分组不存在/不在导入结果中、分组类型不支持手选、节点不可用，
+//     或覆盖存档/热更新失败时返回 400。
+//   - 选择会同时把该节点加入该组出口（订阅作者通常只给了 DIRECT），因此不需要用户
+//     先手工编辑组成员。
+func (s *Server) handleSelectImportedGroupNode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Node string `json:"node"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Node) == "" {
+		http.Error(w, "bad request: node required", http.StatusBadRequest)
+		return
+	}
+	name := r.PathValue("name")
+	node := strings.TrimSpace(req.Node)
+	if err := s.app.SetImportedGroupSelected(name, node); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"group": name, "selected": node, "imported_groups": s.app.ImportedGroups()})
 }
 
 // handleAddGroup 新增节点分组（组内 url-test 自动选优），持久化 + 热更新。

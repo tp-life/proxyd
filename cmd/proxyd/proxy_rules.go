@@ -3,11 +3,13 @@ package main
 // 代理域子命令：自定义规则（rules）与远程规则源（ruleurls）。
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 
 	"proxyd/internal/app"
@@ -87,9 +89,104 @@ func cmdRules(args []string) error {
 		}
 		fmt.Println("规则已删除")
 		return nil
+	case "effective":
+		return runEffectiveRules(c, rest[1:])
 	default:
-		return fmt.Errorf("未知操作 %q，用法: proxyd rules list|add \"<规则>\"|set <下标> \"<规则>\"|move <从> <到>|del <下标>", sub)
+		return fmt.Errorf("未知操作 %q，用法: proxyd rules list|effective|add \"<规则>\"|set <下标> \"<规则>\"|move <从> <到>|del <下标>", sub)
 	}
+}
+
+// effectiveRulesPageLimit 是查看生效规则时每页请求的条数（服务端上限 1000）。
+const effectiveRulesPageLimit = 500
+
+// runEffectiveRules 打印当前生效配置里的完整规则列表（含来源标注）。
+//
+// 参数：
+//   - c: *apiClient，已就绪的本地 API 客户端。
+//   - args: []string，`rules effective` 之后的参数：--source、--grep、--limit。
+//
+// 返回值：error，参数非法或接口失败时返回。
+//
+// 错误情况：结果可能上万条（订阅自带规则），因此按页循环拉取直到取完；每页请求失败
+// 立即返回错误，不打印半份列表之外的任何推测内容。来源名写错由服务端返回 400 并列出
+// 可选值，这里直接透传该错误。
+func runEffectiveRules(c *apiClient, args []string) error {
+	fs := flag.NewFlagSet("rules effective", flag.ContinueOnError)
+	source := fs.String("source", "", "按来源筛选（键或中文名，如 subscription / 订阅规则）")
+	grep := fs.String("grep", "", "按规则文本子串筛选（大小写不敏感）")
+	limit := fs.Int("limit", effectiveRulesPageLimit, "每页拉取条数（服务端上限 1000）")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("--limit 必须为正整数")
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("用法: proxyd rules effective [-c 配置] [--source 来源] [--grep 关键字] [--limit N]")
+	}
+	printed := 0
+	offset := 0
+	for {
+		path := fmt.Sprintf("/api/rules/effective?offset=%d&limit=%d", offset, *limit)
+		if *source != "" {
+			path += "&source=" + url.QueryEscape(*source)
+		}
+		if *grep != "" {
+			path += "&q=" + url.QueryEscape(*grep)
+		}
+		var status app.EffectiveRulesStatus
+		if err := c.do(http.MethodGet, path, nil, &status); err != nil {
+			return err
+		}
+		if offset == 0 {
+			if !status.Available {
+				fmt.Println("当前没有已生效的配置（代理可能未启动或已停用）")
+				return nil
+			}
+			fmt.Printf("生效规则 %d 条", status.Total)
+			if status.Matched != status.Total {
+				fmt.Printf("，筛选后 %d 条", status.Matched)
+			}
+			fmt.Println()
+			if sourceCounts := formatEffectiveRuleSources(status.Sources); sourceCounts != "" {
+				fmt.Printf("来源分布: %s\n", sourceCounts)
+			}
+			if status.Matched == 0 {
+				fmt.Println("没有匹配的规则")
+				return nil
+			}
+		}
+		writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		for _, rule := range status.Rules {
+			fmt.Fprintf(writer, "%d\t%s\t%s\n", rule.Position, rule.SourceLabel, rule.Line)
+		}
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+		printed += len(status.Rules)
+		offset += len(status.Rules)
+		if len(status.Rules) == 0 || offset >= status.Matched {
+			break
+		}
+	}
+	fmt.Printf("共列出 %d 条\n", printed)
+	return nil
+}
+
+// formatEffectiveRuleSources 把来源统计拼成一行「中文名 条数」摘要。
+//
+// 参数：sources 为服务端返回的来源统计（含 0 条来源）。
+// 返回值：string，形如「自定义规则 2 · 订阅规则 9475」；全部为 0 时返回空串。
+// 错误情况：无。
+func formatEffectiveRuleSources(sources []app.EffectiveRuleSource) string {
+	parts := make([]string, 0, len(sources))
+	for _, source := range sources {
+		if source.Count == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", source.Label, source.Count))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func cmdRuleURLs(args []string) error {

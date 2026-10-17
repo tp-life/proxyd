@@ -155,13 +155,16 @@ type tuiSnapshotMsg struct {
 	Remote      *tuiRemoteStatus
 	Peers       *tuiRemotePeersResponse
 	RuleURLs    *[]tuiRuleURLStat
-	System      *app.SystemStatus
-	Modules     *[]app.ModuleState
-	Gateway     *app.GatewayOverview
-	Desktop     *app.DesktopStatus
-	Audit       *tuiRemoteAuditResponse
-	Warnings    []string
-	LoadedAt    time.Time
+	// EffectiveRules 只取 limit=1 的一页，用于展示来源统计；完整规则列表在 Web 控制台
+	// 或 `proxyd rules effective` 里查看（终端表格不适合承载上万行）。
+	EffectiveRules *app.EffectiveRulesStatus
+	System         *app.SystemStatus
+	Modules        *[]app.ModuleState
+	Gateway        *app.GatewayOverview
+	Desktop        *app.DesktopStatus
+	Audit          *tuiRemoteAuditResponse
+	Warnings       []string
+	LoadedAt       time.Time
 }
 
 // tuiRefreshMsg 通知模型开始下一轮只读快照刷新。
@@ -194,17 +197,19 @@ type tuiModel struct {
 	remote      tuiRemoteStatus
 	peers       tuiRemotePeersResponse
 	ruleURLs    []tuiRuleURLStat
-	system      *app.SystemStatus
-	modules     []app.ModuleState
-	gateway     *app.GatewayOverview
-	desktop     *app.DesktopStatus
-	audit       []tuiAuditEntry
-	traffic     tuiTraffic
-	trafficUp   bool
-	trafficErr  string
-	lastError   string
-	warnings    []string
-	lastUpdated time.Time
+	// effectiveRules 是当前生效规则的来源统计（TUI 只展示统计，不承载完整列表）。
+	effectiveRules *app.EffectiveRulesStatus
+	system         *app.SystemStatus
+	modules        []app.ModuleState
+	gateway        *app.GatewayOverview
+	desktop        *app.DesktopStatus
+	audit          []tuiAuditEntry
+	traffic        tuiTraffic
+	trafficUp      bool
+	trafficErr     string
+	lastError      string
+	warnings       []string
+	lastUpdated    time.Time
 	// 动作执行状态：busy 期间忽略新动作键，结果反馈在告警行区域展示一行。
 	actionBusy  bool
 	actionLabel string
@@ -510,6 +515,9 @@ func (m *tuiModel) applySnapshot(message tuiSnapshotMsg) {
 	if message.RuleURLs != nil {
 		m.ruleURLs = append([]tuiRuleURLStat(nil), (*message.RuleURLs)...)
 	}
+	if message.EffectiveRules != nil {
+		m.effectiveRules = message.EffectiveRules
+	}
 	if message.System != nil {
 		m.system = message.System
 	}
@@ -586,6 +594,15 @@ func fetchTUISnapshotCmd(client *apiClient) tea.Cmd {
 			result.Warnings = append(result.Warnings, "规则源状态暂不可用: "+err.Error())
 		} else {
 			result.RuleURLs = &ruleURLs
+		}
+
+		// 只需来源统计，因此只取一页（limit=1）；完整规则列表在 Web 控制台或
+		// `proxyd rules effective` 查看，终端表格不适合承载上万行。
+		var effectiveRules app.EffectiveRulesStatus
+		if err := client.doTimeout(http.MethodGet, "/api/rules/effective?limit=1", nil, &effectiveRules, tuiRequestTimeout); err != nil {
+			result.Warnings = append(result.Warnings, "生效规则统计暂不可用: "+err.Error())
+		} else {
+			result.EffectiveRules = &effectiveRules
 		}
 
 		var system app.SystemStatus

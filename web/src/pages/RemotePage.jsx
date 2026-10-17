@@ -4,9 +4,10 @@ import { RemoteServicesPanel } from "@/components/remote/RemoteServicesPanel";
 import { RemoteAccessPanel } from "@/components/remote/RemoteAccessPanel";
 import { RemoteAuditPanel } from "@/components/remote/RemoteAuditPanel";
 import { RemoteDevicesPanel } from "@/components/remote/RemoteDevicesPanel";
+import { RemoteFilesPanel } from "@/components/remote/RemoteFilesPanel";
 import { RemoteForwardsPanel } from "@/components/remote/RemoteForwardsPanel";
 import { NAV_ITEMS } from "@/lib/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, CircleAlert, Copy, Link2, RefreshCw, SquareTerminal, Terminal, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,7 @@ import { classNames, formatBytes, maskRemoteSecret } from "@/lib/format";
  * RemotePage 渲染远程连接页。
  *
  * 功能说明：
- * 该页是 remote 任务页面的共享编排容器，通过 view 选择设备、服务、授权、转发或审计。
+ * 该页是 remote 任务页面的共享编排容器，通过 view 选择设备、文件传输、服务、授权、转发或审计。
  * 分页不会重置本容器中的未提交表单；导航注册表负责标题与 URL，业务写入仍由 hook 编排。
  * token 一律以摘要展示，完整值只在点击复制时显式从 `/api/remote/token` 获取。
  *
@@ -44,7 +45,10 @@ import { classNames, formatBytes, maskRemoteSecret } from "@/lib/format";
  * - saveAllow: Function，整体替换客户端公钥白名单。
  * - manageSSHKeys: Function，添加、导入、撤销 SSH 公钥及切换附加认证。
  * - saveKeyFile: Function，设置自定义服务端密钥文件（空串恢复内置托管密钥）。
+ * - relay/saveRelay: object/Function，当前 DERP 中继配置与事务保存用例。
  * - importKeyFile: Function，确认后上传并事务导入内置托管服务端私钥。
+ * - listRemoteFiles/uploadRemoteFile/downloadRemoteFile: Function，通过本机 proxyd 与
+ *   tailcat/SFTP 完成网页目录浏览、流式上传和下载。
  * - probeRemote/toggleRemoteDetails: Function，手动探测与切换远端详情行。
  * - refreshAudit: Function，单独刷新连接审计列表。
  * - setBuiltinSSH: Function，热切换内嵌 SSH 服务（隧道 22 端口进程内处理）。
@@ -73,6 +77,7 @@ export function RemotePage({
   view = "remote/devices",
   onOpenTerminal,
   status,
+  relay,
   remotes,
   remoteProbes,
   expandedRemote,
@@ -85,10 +90,14 @@ export function RemotePage({
   toggleEnabled,
   copyToken,
   saveServe,
+  saveRelay,
   saveAllow,
   manageSSHKeys,
   saveKeyFile,
   importKeyFile,
+  listRemoteFiles,
+  uploadRemoteFile,
+  downloadRemoteFile,
   probeRemote,
   refreshAudit,
   toggleRemoteDetails,
@@ -111,6 +120,8 @@ export function RemotePage({
   setSshSetEnvTerm,
 }) {
   const [serveInput, setServeInput] = useState("");
+  const [relayRegionInput, setRelayRegionInput] = useState("");
+  const [relayMapInput, setRelayMapInput] = useState("");
   const [allowInput, setAllowInput] = useState("");
   const [allowNameInput, setAllowNameInput] = useState("");
   const [allowTTL, setAllowTTL] = useState("permanent");
@@ -120,6 +131,13 @@ export function RemotePage({
   const [remoteForm, setRemoteForm] = useState({ name: "", token: "" });
   const [forwardForm, setForwardForm] = useState({ name: "", listen: "", remoteSource: "", remoteToken: "", remotePort: "" });
   const [connectTarget, setConnectTarget] = useState(null);
+
+  // 专用中继端点可能在通用状态之后返回；以服务端快照初始化表单。页面没有后台
+  // 全量轮询，因此这里只会在进入页面、手动刷新或成功保存后同步，不会持续覆盖输入。
+  useEffect(() => {
+    setRelayRegionInput(relay?.region || "");
+    setRelayMapInput(relay?.derpmap_url || "");
+  }, [relay?.derpmap_url, relay?.region]);
 
   const page = NAV_ITEMS.find((item) => item.id === view);
 
@@ -134,7 +152,7 @@ export function RemotePage({
 
   const remoteColumns = useMemo(
     () => [
-      { key: "name", header: "名称", sortable: true, width: "22%" },
+      { key: "name", header: "名称", sortable: true, width: "16%" },
       {
         key: "status",
         header: "状态",
@@ -164,15 +182,18 @@ export function RemotePage({
       {
         key: "token",
         header: "token 摘要",
-        width: "28%",
+        width: "24%",
         cell: (row) => <code className="font-mono text-xs text-muted-foreground">{maskRemoteSecret(row.token)}</code>,
       },
       {
         key: "actions",
         header: "操作",
         align: "right",
+        // 操作列固定占到整表 38%：五个按钮（连接/终端/复制 SSH 命令/复制诊断命令/删除）
+        // 的固有宽度约 400px，此前没有声明宽度时会被固定布局压缩并裁掉末尾按钮。
+        width: "38%",
         cell: (row) => (
-          <div className="flex items-center justify-end gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-1 whitespace-nowrap">
             <Button size="sm" variant="outline" type="button" onClick={() => setConnectTarget(row.name)}>
               <Link2 size={14} aria-hidden="true" />
               <span>连接</span>
@@ -339,6 +360,31 @@ export function RemotePage({
     if (await saveServe([...serve, port].sort((a, b) => a - b))) {
       setServeInput("");
     }
+  }
+
+  /**
+   * submitRelay 保存 DERP 区域和地图 URL；两项为空即恢复自动选区与默认公共地图。
+   *
+   * 参数说明：event 为表单提交事件。
+   * 返回值说明：返回 Promise<void>；提交成功后表单由最新服务端快照同步。
+   * 可能的异常/错误情况：格式、网络探测、服务重建或落盘失败由 saveRelay toast，
+   * 页面保留用户输入以便修正后重试。
+   */
+  async function submitRelay(event) {
+    event.preventDefault();
+    await saveRelay(relayRegionInput.trim(), relayMapInput.trim());
+  }
+
+  /**
+   * resetRelay 恢复 tailcat 自动选区与默认公共 DERP 地图。
+   *
+   * 参数说明：无。
+   * 返回值说明：返回 Promise<void>；事务成功后输入框由服务端空值快照清空。
+   * 可能的异常/错误情况：运行中服务端无法在默认地图重建时由 saveRelay toast，
+   * 原配置与表单输入保持不变。
+   */
+  async function resetRelay() {
+    await saveRelay("", "");
   }
 
   /**
@@ -524,7 +570,8 @@ export function RemotePage({
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
 <>
-{view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} removeServePort={removeServePort} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setServeInput={setServeInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitServePort={submitServePort} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
+{view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} relayMapInput={relayMapInput} relayRegionInput={relayRegionInput} removeServePort={removeServePort} resetRelay={resetRelay} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setRelayMapInput={setRelayMapInput} setRelayRegionInput={setRelayRegionInput} setServeInput={setServeInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitRelay={submitRelay} submitServePort={submitServePort} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
+{view === "remote/files" && <RemoteFilesPanel apiLoopback={status?.api_loopback} downloadRemoteFile={downloadRemoteFile} listRemoteFiles={listRemoteFiles} remotes={remotes} uploadRemoteFile={uploadRemoteFile} />}
 {view === "remote/access" && <RemoteAccessPanel activity={activity} allow={allow} allowInput={allowInput} allowNameInput={allowNameInput} allowPortsInput={allowPortsInput} allowTTL={allowTTL} copyTempKey={copyTempKey} copyText={copyText} importKeyFile={importKeyFile} keyFileInput={keyFileInput} manageSSHKeys={manageSSHKeys} peers={peers} removeAllowKey={removeAllowKey} resetTempKey={resetTempKey} saveKeyFile={saveKeyFile} setAllowInput={setAllowInput} setAllowNameInput={setAllowNameInput} setAllowPortsInput={setAllowPortsInput} setAllowTTL={setAllowTTL} setKeyFileInput={setKeyFileInput} status={status} submitAllowKey={submitAllowKey} submitKeyFile={submitKeyFile} tempPeer={tempPeer} />}
 {view === "remote/audit" && <RemoteAuditPanel auditColumns={auditColumns} auditEntries={auditEntries} refreshAudit={refreshAudit} />}
 {view === "remote/devices" && <RemoteDevicesPanel expandedRemote={expandedRemote} probeRemote={probeRemote} remoteColumns={remoteColumns} remoteForm={remoteForm} remoteProbes={remoteProbes} remotes={remotes} setRemoteForm={setRemoteForm} setSshSetEnvTerm={setSshSetEnvTerm} sshSetEnvTerm={sshSetEnvTerm} submitRemote={submitRemote} />}

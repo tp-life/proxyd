@@ -75,14 +75,15 @@ func cmdSubs(args []string) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tSTATE\tURL\tNODES(alive/total)\tMAPPING\tUSAGE\tEXPIRE")
+		fmt.Fprintln(tw, "NAME\tSTATE\tURL\tNODES(alive/total)\tMAPPING\tRULES\tUSAGE\tEXPIRE")
 		for _, s := range ov.Subs {
 			usage, expire := formatSubUserInfo(s.UserInfo)
 			mapping := "on"
 			if !s.PortMapping {
 				mapping = "off"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%d\t%s\t%s\t%s\n", s.Name, subStateText(s.State), s.URL, s.Alive, s.Total, mapping, usage, expire)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%d\t%s\t%s\t%s\t%s\n",
+				s.Name, subStateText(s.State), s.URL, s.Alive, s.Total, mapping, subImportText(s), usage, expire)
 		}
 		_ = tw.Flush()
 		return nil
@@ -161,10 +162,11 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	enable := setFS.Bool("enable", false, "启用订阅")
 	disable := setFS.Bool("disable", false, "禁用订阅")
 	mapping := setFS.String("mapping", "", "订阅级端口映射开关（on|off）")
+	importRules := setFS.String("import-rules", "", "导入订阅自带策略组与规则（on|off）")
 	_ = setFS.Parse(args)
 	items := setFS.Args()
 	if len(items) != 1 {
-		return fmt.Errorf("用法: proxyd subs set [-c 配置] [--rename 新名] [--url 地址] [--type 类型] [--enable|--disable] [--mapping on|off] <name>")
+		return fmt.Errorf("用法: proxyd subs set [-c 配置] [--rename 新名] [--url 地址] [--type 类型] [--enable|--disable] [--mapping on|off] [--import-rules on|off] <name>")
 	}
 	if *enable && *disable {
 		return fmt.Errorf("--enable 与 --disable 不能同时使用")
@@ -172,8 +174,11 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	if *mapping != "" && *mapping != "on" && *mapping != "off" {
 		return fmt.Errorf("--mapping 只接受 on 或 off")
 	}
-	if *rename == "" && *newURL == "" && *newType == "" && !*enable && !*disable && *mapping == "" {
-		return fmt.Errorf("未给出任何修改项（--rename/--url/--type/--enable/--disable/--mapping）")
+	if *importRules != "" && *importRules != "on" && *importRules != "off" {
+		return fmt.Errorf("--import-rules 只接受 on 或 off")
+	}
+	if *rename == "" && *newURL == "" && *newType == "" && !*enable && !*disable && *mapping == "" && *importRules == "" {
+		return fmt.Errorf("未给出任何修改项（--rename/--url/--type/--enable/--disable/--mapping/--import-rules）")
 	}
 	ov, err := c.overview()
 	if err != nil {
@@ -209,11 +214,41 @@ func cmdSubsSet(c *apiClient, args []string) error {
 	if *mapping != "" {
 		body["port_mapping"] = *mapping == "on"
 	}
+	if *importRules != "" {
+		body["import_rules"] = *importRules == "on"
+	}
 	if err := c.do(http.MethodPut, "/api/subscriptions/"+url.PathEscape(items[0]), body, nil); err != nil {
 		return err
 	}
 	fmt.Printf("订阅 %q 已更新\n", items[0])
 	return nil
+}
+
+// subImportText 把订阅自带规则的导入状态格式化为 CLI 列表字段。
+//
+// 参数：
+//   - s: api.SubEntry，overview 返回的订阅条目。
+//
+// 返回值：string，`off` 表示未开启导入；成功时为「组/规则/规则集」计数，有跳过的
+// 规则时追加 `(跳过 N)`；失败时为 `failed`，具体原因需要看 Web 控制台或服务日志
+// （避免把订阅名与长错误文本挤进表格）。
+//
+// 错误情况：无。
+func subImportText(s api.SubEntry) string {
+	if !s.ImportRules {
+		return "off"
+	}
+	if s.Import == nil {
+		return "pending"
+	}
+	if s.Import.Error != "" {
+		return "failed"
+	}
+	text := fmt.Sprintf("%d/%d/%d", s.Import.Groups, s.Import.Rules, s.Import.Providers)
+	if s.Import.SkippedRules > 0 {
+		text += fmt.Sprintf("(跳过 %d)", s.Import.SkippedRules)
+	}
+	return text
 }
 
 // formatSubUserInfo 把订阅用量信息格式化为 CLI 列表字段。

@@ -215,6 +215,41 @@ func TestSetRemoteEnabledLinksBuiltinSSH(t *testing.T) {
 	}
 }
 
+// TestSetRemoteRelay 验证中继配置通过 remote 统一事务写入，并在校验失败时保持旧快照。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；有效配置落盘、专用读取一致且非法更新不污染聚合时测试通过。
+//
+// 错误情况：应用构造、配置事务或断言失败时调用 t.Fatal/t.Fatalf 终止测试。
+func TestSetRemoteRelay(t *testing.T) {
+	directory := t.TempDir()
+	configuration := &config.Config{StateDir: directory}
+	application, err := New(configuration, filepath.Join(directory, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer application.stopRemote()
+
+	const region = "derp.example.com"
+	const derpMapURL = "https://control.example.com/derpmap/default?token=private"
+	if err := application.SetRemoteRelay(region, derpMapURL); err != nil {
+		t.Fatalf("SetRemoteRelay: %v", err)
+	}
+	gotRegion, gotDERPMapURL := application.RemoteRelaySettings()
+	if gotRegion != region || gotDERPMapURL != derpMapURL {
+		t.Fatalf("RemoteRelaySettings = %q, %q; want %q, %q", gotRegion, gotDERPMapURL, region, derpMapURL)
+	}
+	if err := application.SetRemoteRelay("derp.example.com:8443", derpMapURL); err == nil {
+		t.Fatal("携带端口的自建 DERP 主机应被拒绝")
+	}
+	gotRegion, gotDERPMapURL = application.RemoteRelaySettings()
+	if gotRegion != region || gotDERPMapURL != derpMapURL {
+		t.Fatalf("非法更新污染配置: %q, %q", gotRegion, gotDERPMapURL)
+	}
+}
+
 // TestSetRemoteWebTerminalSafety 验证应用层持久化开关并强制非回环暴露确认。
 //
 // 参数说明：

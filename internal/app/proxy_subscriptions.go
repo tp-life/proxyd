@@ -161,6 +161,7 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	oldNodes := append([]*node.Node(nil), a.nodes...)
 	oldAssignments := append([]pool.Assignment(nil), a.assigns...)
 	oldInfos := cloneSubscriptionInfos(a.subInfos)
+	oldImports := cloneSubscriptionImports(a.subImports)
 	stateDir := a.cfg.StateDir
 	a.mu.RUnlock()
 	if index < 0 {
@@ -178,6 +179,9 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	}
 	if next.PortMapping == nil {
 		next.PortMapping = current.PortMapping
+	}
+	if next.ImportRules == nil {
+		next.ImportRules = current.ImportRules
 	}
 	if err := validateSubscriptionFields(next); err != nil {
 		return config.Subscription{}, err
@@ -265,6 +269,9 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	a.cfg.Groups = nextGroups
 	a.nodes = nextNodes
 	a.assigns = nextAssignments
+	// 路由导入与订阅配置同属一次事务：开启了导入的订阅改名/改地址后，旧计划必须在
+	// 本轮重新生成前失效，否则会用到已不存在的策略组与规则集引用。
+	a.subImports = map[string]*subscriptionImport{}
 	// 先清除旧名和目标名的用量，再按“同一来源且仍启用”的条件恢复，避免 URL
 	// 变化后界面继续展示旧订阅套餐信息。
 	delete(a.subInfos, current.Name)
@@ -274,9 +281,10 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	}
 	a.mu.Unlock()
 
+	a.reconcileSubscriptionRouting()
 	if err := a.regenerateLocked(nextAssignments); err != nil {
 		return config.Subscription{}, a.rollbackSubscriptionLocked(
-			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, err, false,
+			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, oldImports, err, false,
 		)
 	}
 	a.mu.Lock()
@@ -284,7 +292,7 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	a.mu.Unlock()
 	if persistErr != nil {
 		return config.Subscription{}, a.rollbackSubscriptionLocked(
-			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, persistErr, true,
+			oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, oldImports, persistErr, true,
 		)
 	}
 	// 同名订阅改变 URL 或解析类型后，旧缓存无法证明属于新来源。正文缓存若无法
@@ -292,7 +300,7 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	if sourceChanged && current.Name == next.Name {
 		if err := subscribe.InvalidateCache(stateDir, current.Name); err != nil {
 			return config.Subscription{}, a.rollbackSubscriptionLocked(
-				oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, err, true,
+				oldSubscriptions, oldGroups, oldNodes, oldAssignments, oldInfos, oldImports, err, true,
 			)
 		}
 	}
@@ -321,6 +329,7 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 //   - nodes: []*node.Node，事务前节点快照。
 //   - assignments: []pool.Assignment，事务前稳定端口分配。
 //   - infos: map[string]subscribe.UserInfo，事务前订阅用量缓存。
+//   - imports: map[string]*subscriptionImport，事务前订阅路由导入结果。
 //   - cause: error，触发回滚的原始错误。
 //   - restoreDisk: bool，是否额外把旧配置重写回磁盘。
 //
@@ -333,6 +342,7 @@ func (a *App) rollbackSubscriptionLocked(
 	nodes []*node.Node,
 	assignments []pool.Assignment,
 	infos map[string]subscribe.UserInfo,
+	imports map[string]*subscriptionImport,
 	cause error,
 	restoreDisk bool,
 ) error {
@@ -342,6 +352,7 @@ func (a *App) rollbackSubscriptionLocked(
 	a.nodes = nodes
 	a.assigns = assignments
 	a.subInfos = infos
+	a.subImports = imports
 	a.mu.Unlock()
 
 	joined := cause
@@ -398,6 +409,19 @@ func cloneSubscriptionInfos(infos map[string]subscribe.UserInfo) map[string]subs
 	return out
 }
 
+// cloneSubscriptionImports 复制订阅路由导入状态表，供事务失败时完整恢复。
+//
+// 参数：imports 为应用层当前的路由导入状态。
+// 返回值：map[string]*subscriptionImport，可独立替换的浅拷贝（条目本身只读）。
+// 错误情况：无；nil 输入返回空 map，保持后续写入安全。
+func cloneSubscriptionImports(imports map[string]*subscriptionImport) map[string]*subscriptionImport {
+	out := make(map[string]*subscriptionImport, len(imports))
+	for name, item := range imports {
+		out[name] = item
+	}
+	return out
+}
+
 // RemoveSubscription 按名字删除订阅并持久化；不允许删除最后一个订阅。
 func (a *App) RemoveSubscription(name string) error {
 	a.mu.Lock()
@@ -408,6 +432,12 @@ func (a *App) RemoveSubscription(name string) error {
 				return fmt.Errorf("不能删除最后一个订阅")
 			}
 			a.cfg.Subscriptions = append(a.cfg.Subscriptions[:i], a.cfg.Subscriptions[i+1:]...)
+			// 订阅已删除：它的路由导入计划与覆盖存档必须一起消失，否则下一轮配置
+			// 生成仍会写入指向该订阅的策略组与规则集引用。
+			delete(a.subImports, name)
+			if err := a.writeGroupOverrides(name, nil, nil); err != nil {
+				log.Printf("[subscribe] %v", err)
+			}
 			return a.persistLocked()
 		}
 	}

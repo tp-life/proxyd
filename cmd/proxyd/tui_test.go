@@ -41,7 +41,7 @@ func (roundTrip tuiRoundTripFunc) RoundTrip(request *http.Request) (*http.Respon
 // 错误情况：缺少预期接口、解析失败或出现非 GET 方法时测试失败。
 func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 	var mutex sync.Mutex
-	methods := make([]string, 0, 11)
+	methods := make([]string, 0, 12)
 	oldTransport := http.DefaultTransport
 	// 纯内存 transport 记录方法并返回与真实 API 同形的 JSON，避免测试依赖本机端口权限。
 	http.DefaultTransport = tuiRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -62,6 +62,13 @@ func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 			payload = map[string]any{"remotes": []any{}}
 		case "/api/rule-urls":
 			payload = []any{}
+		case "/api/rules/effective":
+			payload = map[string]any{
+				"available": true,
+				"total":     3,
+				"sources":   []any{map[string]any{"source": "custom", "label": "自定义规则", "count": 2}},
+				"rules":     []any{},
+			}
 		case "/api/system/status":
 			payload = map[string]any{"uptime_seconds": 3600, "pending_restart": false}
 		case "/api/modules":
@@ -108,13 +115,16 @@ func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 	if message.System == nil || message.Modules == nil || message.Gateway == nil || message.Desktop == nil || message.Audit == nil {
 		t.Fatalf("快照存在未加载的新数据块: %#v", message)
 	}
+	if message.EffectiveRules == nil || message.EffectiveRules.Total != 3 {
+		t.Fatalf("快照缺少生效规则统计: %#v", message.EffectiveRules)
+	}
 	if len(message.Warnings) != 0 {
 		t.Fatalf("正常 GET 快照不应产生告警: %v", message.Warnings)
 	}
 	mutex.Lock()
 	defer mutex.Unlock()
-	if len(methods) != 11 {
-		t.Fatalf("请求数=%d，期望 11：%v", len(methods), methods)
+	if len(methods) != 12 {
+		t.Fatalf("请求数=%d，期望 12：%v", len(methods), methods)
 	}
 	for _, method := range methods {
 		if !strings.HasPrefix(method, http.MethodGet+" ") {
@@ -155,6 +165,15 @@ func TestTUIRenderIncludesAllSections(t *testing.T) {
 		CustomRules: []string{"DOMAIN-SUFFIX,example.com,DIRECT"},
 	}
 	model.ruleURLs = []tuiRuleURLStat{{Name: "gfw", URL: "https://rules.example.com/secret", Count: 100}}
+	model.effectiveRules = &app.EffectiveRulesStatus{
+		Available: true,
+		Total:     9483,
+		Sources: []app.EffectiveRuleSource{
+			{Source: "custom", Label: "自定义规则", Count: 3},
+			{Source: "subscription", Label: "订阅规则", Count: 9476},
+			{Source: "builtin", Label: "内置规则", Count: 4},
+		},
+	}
 	model.connections = connListResponse{Connections: []connEntry{{ID: "0123456789", Rule: "MATCH"}}}
 	model.peers = tuiRemotePeersResponse{Remotes: []tuiRemotePeer{{Name: "nas", Token: "tcomFw…DRYQ8u"}}}
 	model.modules = []app.ModuleState{{ID: "proxy", Name: "代理", Enabled: true}}
@@ -174,6 +193,12 @@ func TestTUIRenderIncludesAllSections(t *testing.T) {
 		if !strings.Contains(rendered, marker) {
 			t.Errorf("页面 %d 缺少结构标题 %q", page+1, marker)
 		}
+	}
+	// 规则页除自定义规则外，还要给出当前生效规则的来源统计（完整列表在 Web 控制台
+	// 或 `proxyd rules effective` 中查看，终端表格不承载上万行）。
+	model.page = tuiPageRules
+	if rendered, _ := model.renderCurrentPage(118); !strings.Contains(rendered, "当前生效规则") || !strings.Contains(rendered, "订阅规则") {
+		t.Errorf("规则页应展示生效规则来源统计")
 	}
 	view := model.View()
 	if !view.AltScreen {

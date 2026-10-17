@@ -51,6 +51,23 @@ func (a *App) RemoteStatus() remote.Status {
 	return a.remote.Status()
 }
 
+// RemoteRelaySettings 返回 remote 聚合当前的中继选择配置。
+//
+// 功能说明：
+// 专用读取用例允许管理端编辑可能带查询凭据的 DERP map URL；通用状态接口不返回
+// 完整 URL，避免凭据意外进入状态轮询、日志或普通列表响应。
+//
+// 参数说明：无。
+//
+// 返回值说明：两个 string，依次为 region 与 derp-map-url 的配置原值。
+//
+// 错误情况：无；读取由 App 配置读锁保护，返回字符串副本。
+func (a *App) RemoteRelaySettings() (region, derpMapURL string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Remote.Region, a.cfg.Remote.DERPMapURL
+}
+
 // RemoteAPIExposure 返回 Web 终端安全提示所需的管理 API 监听信息。
 //
 // 参数说明：无。
@@ -83,6 +100,30 @@ func (a *App) PingRemote(ctx context.Context, nameOrToken string) (remote.ProbeR
 		return remote.ProbeResult{}, err
 	}
 	return a.remote.ProbeRemote(ctx, token)
+}
+
+// OpenRemoteFileClient 为一次网页文件用例解析远端并建立 SFTP 会话。
+//
+// 功能说明：application 层只负责“远端名称 → token”的用例编排；tailcat、SSH 与 SFTP
+// 协议细节全部留在 remote bounded context。凭据不会写入配置或日志。
+//
+// 参数说明：
+//   - ctx: context.Context，绑定当前 HTTP 请求，浏览器断开后取消文件传输。
+//   - nameOrToken: string，已保存远端名称或完整 tc... token。
+//   - credentials: remote.FileCredentials，本次连接使用的可选 SSH 凭据。
+//
+// 返回值说明：*remote.FileClient 和 error；成功对象由 API 层在请求结束时关闭。
+//
+// 错误情况：远端不存在、token 非法、模块禁用、隧道/SSH/SFTP 建连失败时返回错误。
+func (a *App) OpenRemoteFileClient(ctx context.Context, nameOrToken string, credentials remote.FileCredentials) (*remote.FileClient, error) {
+	a.mu.RLock()
+	remotes := append([]config.RemotePeer(nil), a.cfg.Remote.Remotes...)
+	a.mu.RUnlock()
+	token, err := remote.ResolveToken(remotes, nameOrToken)
+	if err != nil {
+		return nil, err
+	}
+	return a.remote.OpenFileClient(ctx, token, credentials)
 }
 
 // RemoteAudit 返回 remote 专用连接审计环的最近记录。
@@ -190,6 +231,34 @@ func (a *App) rollbackRemote(old config.RemoteConfig, cause error) error {
 func (a *App) SetRemoteEnabled(enabled bool) error {
 	return a.mutateRemote(func(r *config.RemoteConfig) error {
 		setRemoteServiceEnabled(r, enabled)
+		return nil
+	})
+}
+
+// SetRemoteRelay 事务更新 tailcat 的区域与 DERP map 来源。
+//
+// 功能说明：
+// 该用例属于 remote 配置聚合；它只编排“校验 → 克隆配置 → 调和运行态 → 落盘 →
+// 失败回滚”。区域解析、DERP 探测和 tailcat Server 重建仍由 remote 领域适配层负责。
+// 中继变化会重建运行中的服务端，并可能生成包含新区域信息的新 token。
+//
+// 参数说明：
+//   - region: string，空值自动选区，正整数固定区域，自建场景为逗号分隔主机名。
+//   - derpMapURL: string，可选的自定义 DERP map HTTP(S) URL。
+//
+// 返回值说明：error，运行态和配置文件均提交成功时返回 nil。
+//
+// 错误情况：配置结构非法、地图不可达、指定区域不存在、服务端重启失败或配置落盘
+// 失败时返回错误；统一事务会恢复旧配置及旧运行态。
+func (a *App) SetRemoteRelay(region, derpMapURL string) error {
+	region = strings.TrimSpace(region)
+	derpMapURL = strings.TrimSpace(derpMapURL)
+	if err := config.ValidateRemoteRelay(region, derpMapURL); err != nil {
+		return err
+	}
+	return a.mutateRemote(func(remoteConfig *config.RemoteConfig) error {
+		remoteConfig.Region = region
+		remoteConfig.DERPMapURL = derpMapURL
 		return nil
 	})
 }

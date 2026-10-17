@@ -32,6 +32,7 @@ import (
 	"proxyd/internal/proxy/pool"
 	"proxyd/internal/proxy/subscribe"
 	"proxyd/internal/proxy/sysproxy"
+	"proxyd/internal/remote"
 	"proxyd/internal/updatecheck"
 )
 
@@ -135,6 +136,10 @@ func main() {
 			err = cmdSSH(os.Args[2:])
 		case "scp":
 			err = cmdSCP(os.Args[2:])
+		case "__remote-sftp":
+			// 内部子命令：内嵌 SSH 在需要从 root 降权时启动本进程作为 SFTP
+			// 子进程。该入口不写协议数据之外的 stdout，避免破坏 SFTP 数据帧。
+			err = remote.ServeSFTP(os.Stdin, os.Stdout)
 		case "desk", "desktop":
 			err = cmdDesk(os.Args[2:])
 		case "traffic":
@@ -208,6 +213,7 @@ usage:
   proxyd nodes add --proxy '<出站JSON>' [名称]   添加隧道类（VPN）手动节点（tailscale/openvpn 等）
   proxyd nodes del <名称|下标>          删除手动节点
   proxyd rules list|add "<规则>"|set <下标> "<规则>"|move <从> <到>|del <下标>   自定义规则
+  proxyd rules effective [--source 来源] [--grep 关键字] [--limit N]   当前生效的全部规则（含订阅导入，按匹配顺序）
   proxyd rule-urls list|add <名> <url>|del <名>|show <名>   远程规则源（show 查看原始内容）
   proxyd groups list|add <名> <端口> <节点...>|del <名>   节点分组
   proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点...]   修改分组
@@ -227,6 +233,7 @@ usage:
 远程连接（tailcat 隧道，与代理功能独立）:
   proxyd remote status|on|off|token      查看状态/联动开关服务端与 builtin-ssh/打印完整 token
   proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
+  proxyd remote relay [auto|区域ID|derp主机] [--map-url URL|--default-map]  查看/设置 DERP 中继
   proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del <别名|公钥>   客户端最小权限白名单
   proxyd remote audit [--tail N]       查看连接建立、拒绝与断开审计记录
   proxyd remote tempkey [reset]          查看/重置临时身份（保留手动白名单与客户端 nodekey）

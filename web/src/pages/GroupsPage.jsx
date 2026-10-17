@@ -57,6 +57,8 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
   const [nodeQuery, setNodeQuery] = useState("");
   const [expandedGroups, setExpandedGroups] = useState(() => new Set());
   const [pickerGroup, setPickerGroup] = useState(null);
+  // 订阅导入的策略组：成员由订阅作者给定（只读），但出口可以被用户指定。
+  const [importedPicker, setImportedPicker] = useState(null);
   const pickerTrigger = useRef(null);
   const nodes = groupSort === "delay" ? sortByDelay(overview.nodes, "delay") : overview.nodes;
   const sourceOptions = useMemo(() => {
@@ -288,6 +290,31 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
   }
 
 
+  /**
+   * selectImportedGroupNode 为订阅导入的策略组指定出口节点。
+   *
+   * 功能说明：
+   * 导入组的成员来自订阅作者，通常只写了 DIRECT；用户在这里选择某个节点后，后端会把
+   * 该节点加入该组出口并写入 default-selected，因此命中该组的规则会真正走代理。
+   *
+   * 参数说明：
+   * - group: object，overview.imported_groups 中的条目。
+   * - nodeName: string，目标出口（节点名或 DIRECT/REJECT）。
+   *
+   * 返回值说明：返回 Promise<boolean>；成功返回 true，失败返回 false 以便弹窗保留选择。
+   *
+   * 可能的异常/错误情况：节点在提交前失效或热更新失败时由 onPost 展示后端错误，
+   * 分组保持原出口。
+   */
+  async function selectImportedGroupNode(group, nodeName) {
+    if (!group || !nodeName || nodeName === group.selected) return true;
+    return onPost(
+      `/api/imported-groups/${encodeURIComponent(group.name)}/select`,
+      { node: nodeName },
+      `订阅分组 ${group.name} 出口已切换到「${selectExitLabel(nodeName)}」`,
+    );
+  }
+
   return (
     <div className="stack">
       <PageHeader eyebrow="访问策略" title="策略分组" detail="为指定场景提供独立入口，并查看候选节点健康度。">
@@ -393,6 +420,77 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
           })}
         </ul>
       </section>
+      {(overview.imported_groups || []).length > 0 && (
+        <section className="panel">
+          <PanelTitle
+            title="订阅自带策略组"
+            detail="成员由订阅作者决定（只读）；未指定出口时按成员首位出站，标有「默认跟随主端口出口」的组首位是内置 PROXY"
+          />
+          <ul className="item-list">
+            {(overview.imported_groups || []).map((group) => (
+              <li className="group-item" key={`${group.subscription}:${group.name}`}>
+                <div className="group-row">
+                  <span className="group-toggle as-static">
+                    <b>{group.name}</b>
+                    <Badge variant="outline">{group.subscription}</Badge>
+                  </span>
+                  <span>{GROUP_TYPE_LABELS[group.type] || group.type || "手动选择"}</span>
+                  <span>
+                    {group.proxy_members === 0
+                      ? `成员均为直连/拒绝（${group.members} 个）${group.fallback_applied ? "，未指定出口时走主端口默认出口" : ""}`
+                      : `${group.proxy_members}/${group.members} 个代理节点`}
+                  </span>
+                  <StatusBadge
+                    ok={group.proxy_members > 0 || group.fallback_applied}
+                    text={group.proxy_members > 0 ? "可走代理" : group.fallback_applied ? "默认走主端口出口" : "仅有直连"}
+                  />
+                  {group.select_enabled ? (
+                    <div className="group-select">
+                      <span className="group-select-label">当前出口</span>
+                      <button
+                        aria-haspopup="dialog"
+                        aria-label={`选择订阅分组 ${group.name} 的出口节点`}
+                        className="group-select-trigger"
+                        title={group.selected ? selectExitLabel(group.selected) : group.fallback_applied ? "未指定，走主端口默认出口" : "未指定，按成员首位"}
+                        type="button"
+                        onClick={(event) => {
+                          pickerTrigger.current = event.currentTarget;
+                          setImportedPicker(group);
+                        }}
+                      >
+                        <span>
+                          {group.selected
+                            ? selectExitLabel(group.selected)
+                            : group.fallback_applied
+                              ? "主端口默认出口"
+                              : "未指定（成员首位）"}
+                        </span>
+                        <ArrowRightLeft size={13} aria-hidden="true" />
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="delay-muted">该类型由订阅作者定义，不支持手选出口</span>
+                  )}
+                  {group.selected && !group.selection_active && (
+                    <span className="delay-muted">{`已选择的节点当前不可用，mihomo 会回退成员首位${group.fallback_applied ? "（主端口默认出口）" : ""}`}</span>
+                  )}
+                </div>
+                {(group.added_nodes || []).length > 0 && (
+                  <ul className="group-node-list">
+                    {group.added_nodes.map((name) => (
+                      <li className="group-node" key={name}>
+                        <i className="on" aria-hidden="true" />
+                        <span className="group-node-name">{name}</span>
+                        <span className="group-node-selected">你添加的出口</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="group-dialog">
         <DialogClose className="dialog-close" aria-label="关闭新建分组对话框"><X size={16} aria-hidden="true" /></DialogClose>
@@ -478,6 +576,20 @@ export function GroupsPage({ forms, groupSort, overview, selectedNodes, onCopy, 
        * 分组出口弹窗：内置 PROXY 组沿用默认出口文案并附 AUTO / DIRECT 保留出口，其余
        * select 分组只列出该分组当前存活的成员。
        */}
+      {importedPicker && (
+        <FixedNodeDialog
+          currentBadge="当前出口"
+          currentNode={importedPicker.selected}
+          description={`订阅分组 ${importedPicker.name} 的出口；订阅作者只提供了 ${importedPicker.members} 个成员，选中的节点会被追加为该组出口并持久保留。`}
+          invalidHint="请选择一个当前可用的节点。"
+          nodes={overview.nodes.filter((node) => node.alive && !node.tunnel)}
+          specials={EXIT_SPECIALS}
+          title={`选择出口 · ${importedPicker.name}`}
+          triggerElement={pickerTrigger.current}
+          onClose={() => setImportedPicker(null)}
+          onSelect={(value) => selectImportedGroupNode(importedPicker, value)}
+        />
+      )}
       {pickerGroup && (
         <FixedNodeDialog
           canAuto={canAuto}

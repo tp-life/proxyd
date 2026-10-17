@@ -40,29 +40,32 @@ type NodeEntry struct {
 
 // Overview 是 /api/overview 的响应。
 type Overview struct {
-	Mode               string                  `json:"mode"`
-	Listen             string                  `json:"listen"`
-	MixedPort          int                     `json:"mixed_port"`
-	AutoPort           int                     `json:"auto_port"`            // 0 表示关闭
-	PortMappingEnabled bool                    `json:"port_mapping_enabled"` // 一对一节点端口 listener 是否实际启用
-	AdBlockEnabled     bool                    `json:"adblock_enabled"`      // 广告拦截是否开启（规则模式恒生效）
-	SystemProxy        bool                    `json:"system_proxy"`         // 配置状态（是否启用系统代理）
-	TUN                app.TUNStatus           `json:"tun"`                  // TUN 开关与当前进程权限状态
-	DNSPreset          string                  `json:"dns_preset"`           // off|fake-ip|redir-host
-	DNSCustom          bool                    `json:"dns_custom"`           // true 表示手写 dns 段优先，预设暂不生效
-	Version            app.VersionCheckStatus  `json:"version_check"`        // 启动异步检查的缓存状态，不在 overview 请求中联网
-	Autostart          bool                    `json:"autostart"`            // OS 级开机自启项是否存在（实时查询）
-	AutostartRuntime   autostart.RuntimeStatus `json:"autostart_runtime"`    // 注册与托管进程状态分开，启动失败不会隐藏在开关后
-	ServerTime         string                  `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
-	PortRange          [2]int                  `json:"port_range"`
-	Testing            bool                    `json:"testing"` // 任一轮健康检测进行中；前端据此加密轮询，逐节点的延迟列以 NodeEntry.Testing 为准
-	Subs               []SubEntry              `json:"subscriptions"`
-	ManualNodes        []app.ManualNodeEntry   `json:"manual_nodes"`
-	Ports              []PortEntry             `json:"ports"`            // 当前实际监听的一对一节点端口
-	PortAssignments    []PortEntry             `json:"port_assignments"` // 稳定分配快照；关闭映射时仍保留
-	Nodes              []NodeEntry             `json:"nodes"`
-	CustomRules        []string                `json:"custom_rules"`
-	Groups             []GroupEntry            `json:"groups"`
+	Mode               string                   `json:"mode"`
+	Listen             string                   `json:"listen"`
+	MixedPort          int                      `json:"mixed_port"`
+	AutoPort           int                      `json:"auto_port"`            // 0 表示关闭
+	PortMappingEnabled bool                     `json:"port_mapping_enabled"` // 一对一节点端口 listener 是否实际启用
+	AdBlockEnabled     bool                     `json:"adblock_enabled"`      // 广告拦截是否开启（规则模式恒生效）
+	SystemProxy        bool                     `json:"system_proxy"`         // 配置状态（是否启用系统代理）
+	TUN                app.TUNStatus            `json:"tun"`                  // TUN 开关与当前进程权限状态
+	DNSPreset          string                   `json:"dns_preset"`           // off|fake-ip|redir-host
+	DNSCustom          bool                     `json:"dns_custom"`           // true 表示手写 dns 段优先，预设暂不生效
+	Version            app.VersionCheckStatus   `json:"version_check"`        // 启动异步检查的缓存状态，不在 overview 请求中联网
+	Autostart          bool                     `json:"autostart"`            // OS 级开机自启项是否存在（实时查询）
+	AutostartRuntime   autostart.RuntimeStatus  `json:"autostart_runtime"`    // 注册与托管进程状态分开，启动失败不会隐藏在开关后
+	ServerTime         string                   `json:"server_time"`          // 服务器本地时间（RFC3339，带时区偏移），供概览"更新于"显示
+	PortRange          [2]int                   `json:"port_range"`
+	Testing            bool                     `json:"testing"` // 任一轮健康检测进行中；前端据此加密轮询，逐节点的延迟列以 NodeEntry.Testing 为准
+	Subs               []SubEntry               `json:"subscriptions"`
+	ImportedGroups     []app.ImportedGroupEntry `json:"imported_groups"`
+	// GroupFallback 是订阅自带策略组的兜底出口策略（auto|proxy|off）。
+	GroupFallback   string                `json:"group_fallback"`
+	ManualNodes     []app.ManualNodeEntry `json:"manual_nodes"`
+	Ports           []PortEntry           `json:"ports"`            // 当前实际监听的一对一节点端口
+	PortAssignments []PortEntry           `json:"port_assignments"` // 稳定分配快照；关闭映射时仍保留
+	Nodes           []NodeEntry           `json:"nodes"`
+	CustomRules     []string              `json:"custom_rules"`
+	Groups          []GroupEntry          `json:"groups"`
 }
 
 // handleOverview 聚合应用内存快照，返回控制台一次轮询所需的完整只读状态。
@@ -88,6 +91,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	subs := map[string]int{} // 订阅名 -> ov.Subs 下标
+	imports := s.app.SubscriptionImportStatuses()
 	autostartRuntime := s.app.AutostartRuntime()
 	ov := Overview{
 		Mode:               s.app.Mode(),
@@ -111,12 +115,22 @@ func (s *Server) handleOverview(w http.ResponseWriter, _ *http.Request) {
 		Nodes:              []NodeEntry{},
 		CustomRules:        s.app.CustomRules(),
 		Groups:             s.groupEntries(),
+		GroupFallback:      cfg.EffectiveGroupFallback(),
+		ImportedGroups:     s.app.ImportedGroups(),
 	}
 	for _, sub := range s.app.Subscriptions() {
 		subs[sub.Name] = len(ov.Subs)
-		entry := SubEntry{Name: sub.Name, URL: sub.URL, Type: sub.Type, Enabled: sub.IsEnabled(), PortMapping: sub.PortMappingEnabled()}
+		entry := SubEntry{
+			Name: sub.Name, URL: sub.URL, Type: sub.Type,
+			Enabled: sub.IsEnabled(), PortMapping: sub.PortMappingEnabled(),
+			ImportRules: sub.ImportRulesEnabled(),
+		}
 		if info, ok := subInfos[sub.Name]; ok {
 			entry.UserInfo = &info
+		}
+		if status, ok := imports[sub.Name]; ok {
+			imported := status
+			entry.Import = &imported
 		}
 		ov.Subs = append(ov.Subs, entry)
 	}

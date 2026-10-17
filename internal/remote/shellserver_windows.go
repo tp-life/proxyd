@@ -48,6 +48,28 @@ func newShellSessionCommand(su *sessionUser, rawCmd string) *exec.Cmd {
 	return cmd
 }
 
+// needsSFTPSubprocess 判断 Windows SFTP 是否需要独立降权子进程。
+// 参数说明：su 为 *sessionUser，Windows 当前只允许 proxyd 进程用户。
+// 返回值说明：固定为 false，可直接在当前进程按相同身份处理。
+// 错误情况：无。
+func needsSFTPSubprocess(_ *sessionUser) bool { return false }
+
+// newSFTPServerCommand 创建隐藏 SFTP helper 命令，保留跨平台编译所需实现。
+// 参数说明：su 为 *sessionUser，提供工作目录。
+// 返回值说明：*exec.Cmd，继承 Windows 进程环境且尚未启动。
+// 错误情况：os.Executable 失败时退回 os.Args[0]；当前实现通常不会被调用，
+// 因为 Windows 不支持按 shell-user 动态降权。
+func newSFTPServerCommand(su *sessionUser) *exec.Cmd {
+	executable, err := os.Executable()
+	if err != nil {
+		executable = os.Args[0]
+	}
+	cmd := exec.Command(executable, "__remote-sftp")
+	cmd.Dir = su.user.HomeDir
+	cmd.Env = os.Environ()
+	return cmd
+}
+
 // newShellDiagnosticCommand 通过 PowerShell 的命令参数执行服务端固定诊断脚本。
 // 参数说明：su 为 *sessionUser，服务端确认的会话身份；script 为 string，固定只读脚本。
 // 返回值说明：*exec.Cmd，尚未启动，保留用户 profile 加载和 ConPTY 执行环境。

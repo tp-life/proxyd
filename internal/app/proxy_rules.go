@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"proxyd/internal/config"
+	"proxyd/internal/proxy/core"
 	"proxyd/internal/proxy/ruleurl"
 )
 
@@ -185,6 +186,183 @@ func (a *App) rollbackCustomRulesLocked(old []string, cause error, restoreDisk b
 		}
 	}
 	return joined
+}
+
+// EffectiveRulesDefaultLimit 是查询当前生效规则时未指定 limit 的默认条数。
+const EffectiveRulesDefaultLimit = 200
+
+// EffectiveRulesMaxLimit 是查询当前生效规则时单次允许返回的最大条数。
+//
+// 订阅自带规则动辄上万条，接口必须分页：一次性把全部规则发给浏览器既浪费带宽，
+// 也会让前端渲染卡顿。
+const EffectiveRulesMaxLimit = 1000
+
+// EffectiveRulesQuery 是「当前生效规则」的筛选与分页条件。
+type EffectiveRulesQuery struct {
+	// Source 按来源筛选，可传来源键（custom/subscription/…）或中文展示名；空表示全部。
+	Source string
+	// Keyword 按规则文本子串筛选，大小写不敏感；空表示不过滤。
+	Keyword string
+	// Offset 是筛选结果里的起始下标（从 0 起）。
+	Offset int
+	// Limit 是本次返回条数；<=0 用 EffectiveRulesDefaultLimit，超过上限被截断到上限。
+	Limit int
+}
+
+// EffectiveRule 是一条当前生效的规则（带全局匹配位置与来源）。
+type EffectiveRule struct {
+	// Position 是它在整份生效规则里的 1 起顺序，越小越先匹配。
+	Position int `json:"position"`
+	// Line 是规则原文。
+	Line string `json:"line"`
+	// Source 是来源键。
+	Source string `json:"source"`
+	// SourceLabel 是来源的中文展示名。
+	SourceLabel string `json:"source_label"`
+}
+
+// EffectiveRuleSource 是某个来源在整份生效规则里的条数。
+type EffectiveRuleSource struct {
+	Source string `json:"source"`
+	Label  string `json:"label"`
+	Count  int    `json:"count"`
+}
+
+// EffectiveRulesStatus 是「当前生效规则」快照：全部来源统计 + 筛选后的一页规则。
+type EffectiveRulesStatus struct {
+	// Available 表示是否有一份已成功热更新到 mihomo 的配置；false 时其余字段均为空，
+	// 说明代理被停用或尚未生成过配置。
+	Available bool `json:"available"`
+	// Total 是整份生效规则的条数（不受筛选影响）。
+	Total int `json:"total"`
+	// Matched 是当前筛选条件下的条数。
+	Matched int `json:"matched"`
+	// Offset/Limit 是本次分页参数（Limit 为服务端生效值）。
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
+	// Sources 按匹配顺序给出全部来源及其条数（含 0 条来源），供界面渲染筛选器。
+	Sources []EffectiveRuleSource `json:"sources"`
+	// Rules 是本次返回的规则页。
+	Rules []EffectiveRule `json:"rules"`
+}
+
+// EffectiveRules 返回当前生效配置里的规则（含来源标注），支持按来源与文本筛选、分页。
+//
+// 参数：
+//   - query: EffectiveRulesQuery，来源/关键字筛选与分页条件。
+//
+// 返回值：
+//   - EffectiveRulesStatus：来源统计与一页规则；没有生效配置时 Available 为 false。
+//   - error：Source 既不是已知来源键也不是其展示名时返回，供 API 直接回 400。
+//
+// 错误情况：无生效配置不算错误，返回 Available=false 的空快照；这样「代理被停用」
+// 与「来源名写错」在接口层可以区分开。数据源是随最近一次成功热更新缓存的规则标注，
+// 因此展示结果与真正交给 mihomo 的配置严格一致（含 GEO 降级后的剔除结果）。
+func (a *App) EffectiveRules(query EffectiveRulesQuery) (EffectiveRulesStatus, error) {
+	a.mu.RLock()
+	entries := a.appliedRules
+	available := len(a.appliedConfig) > 0
+	a.mu.RUnlock()
+
+	limit := query.Limit
+	if limit <= 0 {
+		limit = EffectiveRulesDefaultLimit
+	}
+	if limit > EffectiveRulesMaxLimit {
+		limit = EffectiveRulesMaxLimit
+	}
+	offset := query.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	// 来源参数先校验再判断可用性：代理停用时写错的来源名同样要报 400，而不是让
+	// 调用方把「参数错误」误读成「没有生效规则」。
+	sourceFilter, err := resolveRuleSource(query.Source)
+	if err != nil {
+		return EffectiveRulesStatus{}, err
+	}
+	status := EffectiveRulesStatus{
+		Available: available,
+		Total:     len(entries),
+		Offset:    offset,
+		Limit:     limit,
+		Sources:   ruleSourceCounts(entries),
+		Rules:     []EffectiveRule{},
+	}
+	if !available {
+		return status, nil
+	}
+	keyword := strings.ToLower(strings.TrimSpace(query.Keyword))
+	matched := make([]EffectiveRule, 0, len(entries))
+	for index, entry := range entries {
+		if sourceFilter != "" && entry.Source != sourceFilter {
+			continue
+		}
+		if keyword != "" && !strings.Contains(strings.ToLower(entry.Line), keyword) {
+			continue
+		}
+		matched = append(matched, EffectiveRule{
+			Position:    index + 1,
+			Line:        entry.Line,
+			Source:      string(entry.Source),
+			SourceLabel: entry.Source.Label(),
+		})
+	}
+	status.Matched = len(matched)
+	if offset >= len(matched) {
+		return status, nil
+	}
+	end := offset + limit
+	if end > len(matched) {
+		end = len(matched)
+	}
+	status.Rules = matched[offset:end]
+	return status, nil
+}
+
+// ruleSourceCounts 统计每个来源的规则条数，按固定拼接顺序返回（含 0 条来源）。
+//
+// 参数：entries 为当前生效规则及其来源。
+// 返回值：[]EffectiveRuleSource，界面筛选器可直接渲染。
+// 错误情况：无。
+func ruleSourceCounts(entries []core.RuleEntry) []EffectiveRuleSource {
+	counts := map[core.RuleSource]int{}
+	for _, entry := range entries {
+		counts[entry.Source]++
+	}
+	sources := core.RuleSources()
+	out := make([]EffectiveRuleSource, 0, len(sources))
+	for _, source := range sources {
+		out = append(out, EffectiveRuleSource{Source: string(source), Label: source.Label(), Count: counts[source]})
+	}
+	return out
+}
+
+// resolveRuleSource 把用户给出的来源筛选值解析成来源键。
+//
+// 参数：value 为来源键或中文展示名，首尾空白与大小写不敏感；空值返回空键。
+//
+// 返回值：
+//   - core.RuleSource：匹配到的来源键；value 为空时返回空字符串（表示不筛选）。
+//   - error：value 非空且不匹配任何来源键或展示名时返回。
+//
+// 错误情况：报错信息列出可选值，便于 CLI 用户直接纠正拼写。
+func resolveRuleSource(value string) (core.RuleSource, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	sources := core.RuleSources()
+	for _, source := range sources {
+		if strings.EqualFold(trimmed, string(source)) || trimmed == source.Label() {
+			return source, nil
+		}
+	}
+	options := make([]string, 0, len(sources))
+	for _, source := range sources {
+		options = append(options, string(source))
+	}
+	return "", fmt.Errorf("未知的规则来源 %q；可选值：%s", value, strings.Join(options, "、"))
 }
 
 // RuleURLs 返回规则源列表及最近拉取状态（供 API 展示）。

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,8 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/remote", s.handleGetRemote)
 	mux.HandleFunc("POST /api/remote", s.handleSetRemote)
 	mux.HandleFunc("GET /api/remote/token", s.handleGetRemoteToken)
+	mux.HandleFunc("GET /api/remote/relay", s.handleGetRemoteRelay)
+	mux.HandleFunc("POST /api/remote/relay", s.handleSetRemoteRelay)
 	mux.HandleFunc("POST /api/remote/serve", s.handleSetRemoteServe)
 	mux.HandleFunc("POST /api/remote/allow", s.handleSetRemoteAllow)
 	mux.HandleFunc("POST /api/remote/ping", s.handlePingRemote)
@@ -47,9 +51,190 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/remote/remotes", s.handleAddRemote)
 	mux.HandleFunc("DELETE /api/remote/remotes/{name}", s.handleDelRemote)
 	mux.HandleFunc("GET /api/remote/remotes/{name}/token", s.handleGetRemotePeerToken)
+	mux.HandleFunc("POST /api/remote/files/list", s.handleListRemoteFiles)
+	mux.HandleFunc("POST /api/remote/files/download", s.handleDownloadRemoteFile)
+	mux.HandleFunc("POST /api/remote/files/upload", s.handleUploadRemoteFile)
 	mux.HandleFunc("POST /api/remote/forwards", s.handleAddRemoteForward)
 	mux.HandleFunc("PUT /api/remote/forwards/{name}", s.handleSetRemoteForward)
 	mux.HandleFunc("DELETE /api/remote/forwards/{name}", s.handleDelRemoteForward)
+}
+
+// remoteFileRequest 是文件浏览与下载端点共享的请求值对象。
+// PrivateKey/Passphrase 只用于当前请求建立 SSH，会在请求结束后随内存释放，绝不落盘。
+type remoteFileRequest struct {
+	Remote     string `json:"remote"`
+	Path       string `json:"path"`
+	Username   string `json:"username"`
+	PrivateKey string `json:"private_key"`
+	Passphrase string `json:"passphrase"`
+}
+
+// credentials 把 API DTO 转换为 remote 领域值对象。
+// 参数说明：无，接收者中的字符串来自当前受认证管理 API 请求体。
+// 返回值说明：remote.FileCredentials，字节切片只在当前请求生命周期使用。
+// 错误情况：无；私钥格式与口令正确性在 SSH 建连时校验。
+func (r remoteFileRequest) credentials() remote.FileCredentials {
+	return remote.FileCredentials{
+		Username: strings.TrimSpace(r.Username), PrivateKey: []byte(r.PrivateKey), Passphrase: []byte(r.Passphrase),
+	}
+}
+
+// decodeRemoteFileRequest 读取有界 JSON 文件请求，避免凭据或路径字段无限占用内存。
+// 参数说明：w 用于 MaxBytesReader 的超限处理；r 为当前 HTTP 请求。
+// 返回值说明：remoteFileRequest 和 error；成功时字段已去除必要的首尾空白。
+// 错误情况：请求超过 128 KiB、JSON 非法或 remote/path 缺失时返回错误。
+func decodeRemoteFileRequest(w http.ResponseWriter, r *http.Request) (remoteFileRequest, error) {
+	var request remoteFileRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return request, fmt.Errorf("文件请求格式无效或超过 128 KiB")
+	}
+	request.Remote = strings.TrimSpace(request.Remote)
+	request.Path = strings.TrimSpace(request.Path)
+	if request.Remote == "" {
+		return request, fmt.Errorf("远程设备不能为空")
+	}
+	if request.Path == "" {
+		request.Path = "."
+	}
+	return request, nil
+}
+
+// handleListRemoteFiles 通过 tailcat 隧道和 SFTP 列出远端目录。
+//
+// 参数说明：w 输出 remote.FileListing；r 的 JSON 包含远端名称、路径和可选 SSH 凭据。
+// 返回值说明：无；成功返回 200 JSON，条目中不包含 token 或私钥。
+// 错误情况：请求非法、远端不存在、SSH 认证失败或目录无权限时返回 400。
+func (s *Server) handleListRemoteFiles(w http.ResponseWriter, r *http.Request) {
+	request, err := decodeRemoteFileRequest(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	client, err := s.app.OpenRemoteFileClient(r.Context(), request.Remote, request.credentials())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer client.Close()
+	listing, err := client.List(r.Context(), request.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, listing)
+}
+
+// handleDownloadRemoteFile 把远端普通文件流式写入浏览器下载响应。
+//
+// 参数说明：w 接收 attachment 响应；r 的 JSON 包含远端名称、文件路径和可选 SSH 凭据。
+// 返回值说明：无；成功时返回 application/octet-stream，并在已知时设置 Content-Length。
+// 错误情况：请求/连接/文件打开失败在写响应头前返回 400；开始传输后的断连只能终止流，
+// 不再尝试把文本错误混入二进制响应。
+func (s *Server) handleDownloadRemoteFile(w http.ResponseWriter, r *http.Request) {
+	request, err := decodeRemoteFileRequest(w, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	client, err := s.app.OpenRemoteFileClient(r.Context(), request.Remote, request.credentials())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer client.Close()
+	download, err := client.OpenDownload(request.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer download.Reader.Close()
+	filename := download.Name
+	if filename == "" || filename == "." || filename == "/" {
+		filename = path.Base(request.Path)
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+	w.Header().Set("Cache-Control", "no-store")
+	if download.Size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(download.Size, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, download.Reader)
+}
+
+// remoteFileUploadLimit 是单次网页上传（含 multipart 元数据）的硬上限。
+// 使用 int64 常量避免 32 位平台溢出；超限由 net/http 在继续读取前中断。
+const remoteFileUploadLimit = int64(8 << 30)
+
+// handleUploadRemoteFile 流式接收 multipart 文件并原子替换远端目标路径。
+//
+// 参数说明：w 返回写入字节数；r 为 multipart/form-data，请求字段 remote/path/username/
+// private_key/passphrase 必须位于 file part 之前，便于不落本机临时文件地直接转发上传流。
+// 返回值说明：无；成功返回 {"written":N}。
+// 错误情况：请求超过 8 GiB、字段顺序/内容非法、SSH/SFTP 连接或远端写入失败时返回 400。
+// 上限包含 multipart 开销，防止管理 API 被无限请求占用；失败的远端临时文件由领域层清理。
+func (s *Server) handleUploadRemoteFile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, remoteFileUploadLimit)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		http.Error(w, "文件上传必须使用 multipart/form-data", http.StatusBadRequest)
+		return
+	}
+	request := remoteFileRequest{}
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			http.Error(w, "读取上传数据失败或超过 8 GiB", http.StatusBadRequest)
+			return
+		}
+		name := part.FormName()
+		if name != "file" {
+			value, readErr := io.ReadAll(io.LimitReader(part, 128<<10))
+			_ = part.Close()
+			if readErr != nil {
+				http.Error(w, "读取上传字段失败", http.StatusBadRequest)
+				return
+			}
+			switch name {
+			case "remote":
+				request.Remote = strings.TrimSpace(string(value))
+			case "path":
+				request.Path = strings.TrimSpace(string(value))
+			case "username":
+				request.Username = strings.TrimSpace(string(value))
+			case "private_key":
+				request.PrivateKey = string(value)
+			case "passphrase":
+				request.Passphrase = string(value)
+			}
+			continue
+		}
+		if request.Remote == "" || request.Path == "" {
+			_ = part.Close()
+			http.Error(w, "remote 与 path 字段必须位于 file 之前", http.StatusBadRequest)
+			return
+		}
+		client, openErr := s.app.OpenRemoteFileClient(r.Context(), request.Remote, request.credentials())
+		if openErr != nil {
+			_ = part.Close()
+			http.Error(w, openErr.Error(), http.StatusBadRequest)
+			return
+		}
+		written, uploadErr := client.Upload(request.Path, part)
+		_ = part.Close()
+		_ = client.Close()
+		if uploadErr != nil {
+			http.Error(w, uploadErr.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]int64{"written": written})
+		return
+	}
+	http.Error(w, "缺少 file 上传字段", http.StatusBadRequest)
 }
 
 // maskToken 把 tc... token 折叠为首尾摘要（如 tcomFw…DRYQ8u），用于列表展示。
@@ -86,6 +271,52 @@ func (s *Server) handleGetRemote(w http.ResponseWriter, _ *http.Request) {
 // handleGetRemoteToken 显式返回完整本机 token（供复制分享）。
 func (s *Server) handleGetRemoteToken(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]string{"token": s.app.RemoteStatus().Token})
+}
+
+// remoteRelayResponse 是专用中继配置端点的响应。
+//
+// DERP map URL 可能携带私有查询凭据，因此完整值不进入通用状态响应，只由这个受
+// 管理 API 认证保护的专用 GET 端点返回。
+type remoteRelayResponse struct {
+	Region     string `json:"region"`
+	DERPMapURL string `json:"derpmap_url"`
+}
+
+// handleGetRemoteRelay 返回可编辑的 tailcat 中继配置原值。
+//
+// 参数说明：
+//   - w: http.ResponseWriter，用于输出 region 与完整 derpmap_url。
+//   - r: *http.Request，当前未读取请求参数，由统一管理 API 中间件完成认证。
+//
+// 返回值说明：无；成功写入 200 JSON。
+//
+// 错误情况：无；配置读取是内存快照，不触发网络探测。
+func (s *Server) handleGetRemoteRelay(w http.ResponseWriter, _ *http.Request) {
+	region, derpMapURL := s.app.RemoteRelaySettings()
+	writeJSON(w, remoteRelayResponse{Region: region, DERPMapURL: derpMapURL})
+}
+
+// handleSetRemoteRelay 事务更新 tailcat 中继选择并热重建运行中的服务端。
+//
+// 参数说明：
+//   - w: http.ResponseWriter，成功时输出已经提交的中继配置。
+//   - r: *http.Request，请求体为 {"region":"...","derpmap_url":"..."}。
+//
+// 返回值说明：无；成功写入 200 JSON。
+//
+// 错误情况：JSON 非法、配置校验失败、DERP 探测失败、服务端重建失败或落盘失败时
+// 返回 400；应用层事务会恢复旧配置与运行态。
+func (s *Server) handleSetRemoteRelay(w http.ResponseWriter, r *http.Request) {
+	var request remoteRelayResponse
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteRelay(request.Region, request.DERPMapURL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemoteRelay(w, r)
 }
 
 // handleSetRemote 热切换远程连接服务端总开关，并由应用层原子联动 builtin-ssh。

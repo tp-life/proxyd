@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   X,
@@ -20,7 +21,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Switch as UISwitch } from "@/components/ui/switch";
+import { EmptyState } from "@/components/EmptyState";
 import { Field } from "@/components/Field";
 import { PageHeader } from "@/components/PageHeader";
 import { PanelTitle } from "@/components/PanelTitle";
@@ -31,6 +34,7 @@ import { PanelTitle } from "@/components/PanelTitle";
  * 参数说明：
  * - forms/ruleContent/ruleUrls/overview: object，页面数据。
  * - adblock: object，广告拦截状态（enable/rule_url/effective）；加载失败时为 null。
+ * - effective: object，当前生效规则分页数据（见 useEffectiveRules），含来源统计与筛选操作。
  * - onDelete/onForm/onPost/onViewContent: Function，操作回调。
  *
  * 返回值说明：
@@ -45,6 +49,7 @@ export function RulesPage({
   ruleUrls,
   overview,
   adblock,
+  effective,
   onDelete,
   onForm,
   onPost,
@@ -60,6 +65,19 @@ export function RulesPage({
         (item) => !normalized || item.rule.toLowerCase().includes(normalized),
       );
   }, [overview.custom_rules, query]);
+  // 生效规则的来源筛选项带上各来源条数，用户不必先选一次才知道某一层有多少条规则。
+  const sourceOptions = useMemo(
+    () => [
+      { value: "", label: `全部来源（${effective.total}）` },
+      ...(effective.sources || [])
+        .filter((item) => item.count > 0)
+        .map((item) => ({
+          value: item.source,
+          label: `${item.label}（${item.count}）`,
+        })),
+    ],
+    [effective.sources, effective.total],
+  );
 
   /**
    * saveEditedRule 原位保存自定义规则。
@@ -105,7 +123,7 @@ export function RulesPage({
       <PageHeader
         eyebrow="访问策略"
         title="规则管理"
-        detail="维护自定义访问规则与远程规则源，列表顺序即匹配优先级。"
+        detail="维护自定义访问规则与远程规则源；「当前生效规则」列出 mihomo 真正在用的全部规则"
       />
       <section className="panel">
         <PanelTitle
@@ -214,6 +232,111 @@ export function RulesPage({
             </li>
           ))}
         </ul>
+      </section>
+      <section className="panel">
+        <PanelTitle
+          title="当前生效规则"
+          detail="mihomo 实际按从上到下的顺序匹配，首条命中后停止；本列表只读，含订阅导入的规则"
+        />
+        {effective.error ? (
+          <p className="text-sm text-destructive" role="alert">
+            {effective.error}
+          </p>
+        ) : null}
+        {!effective.loaded ? (
+          <p className="text-sm text-muted-foreground">正在加载生效规则…</p>
+        ) : !effective.available ? (
+          <EmptyState
+            compact
+            title={effective.error ? "暂时读不到生效规则" : "当前没有已生效的配置"}
+            detail={
+              effective.error
+                ? "接口不可用；若刚升级过 proxyd，请重启进程后重试。"
+                : "代理已停用或尚未生成过配置；启动代理或同步订阅后即可在此查看全部规则。"
+            }
+          />
+        ) : (
+          <>
+            <div className="toolbar mb-3">
+              <Field compact label="来源筛选">
+                <Select
+                  ariaLabel="生效规则来源筛选"
+                  options={sourceOptions}
+                  value={effective.source}
+                  onValueChange={effective.setSource}
+                />
+              </Field>
+              <Field compact label="搜索生效规则">
+                <div className="input-with-icon">
+                  <Search size={15} aria-hidden="true" />
+                  <Input
+                    className="h-9"
+                    placeholder="类型、域名或策略"
+                    value={effective.query}
+                    onChange={(event) => effective.setQuery(event.target.value)}
+                  />
+                </div>
+              </Field>
+              <Badge variant="outline">
+                已显示 {effective.rows.length}/{effective.matched} 条
+              </Badge>
+              <Button
+                disabled={effective.loading}
+                size="sm"
+                type="button"
+                variant="outline"
+                onClick={effective.reload}
+              >
+                <RefreshCw
+                  aria-hidden="true"
+                  className={effective.loading ? "animate-spin" : undefined}
+                  size={15}
+                />
+                <span>刷新</span>
+              </Button>
+            </div>
+            {effective.rows.length === 0 ? (
+              effective.loading ? (
+                <p className="text-sm text-muted-foreground">
+                  正在加载生效规则…
+                </p>
+              ) : (
+                <EmptyState
+                  compact
+                  title="没有匹配的规则"
+                  detail="换个来源或关键字再试；清空关键字可查看全部规则。"
+                />
+              )
+            ) : (
+              <ul className="item-list rule-list">
+                {effective.rows.map((rule) => (
+                  <li key={`${rule.position}:${rule.line}`}>
+                    <span className="rule-index">{rule.position}</span>
+                    <code title={rule.line}>{rule.line}</code>
+                    <Badge variant="outline">{rule.source_label}</Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {effective.hasMore ? (
+              <Button
+                disabled={effective.loading}
+                type="button"
+                variant="outline"
+                onClick={effective.loadMore}
+              >
+                {effective.loading
+                  ? "加载中…"
+                  : `加载更多（还有 ${effective.matched - effective.rows.length} 条）`}
+              </Button>
+            ) : null}
+            <small className="rule-form-hint">
+              生效规则总 {effective.total} 条。顺序即优先级：网关设备规则 →
+              自定义规则 → 远程规则源 → 订阅规则 → 广告拦截 → 内置规则 →
+              订阅兜底规则；需要调整顺序时请编辑上方自定义规则。
+            </small>
+          </>
+        )}
       </section>
       <section className="panel">
         <PanelTitle

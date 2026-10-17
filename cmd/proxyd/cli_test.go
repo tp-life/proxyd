@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,5 +131,88 @@ func TestConnAge(t *testing.T) {
 	}
 	if got := connAge(time.Now().Add(-2*time.Hour - 3*time.Minute).Format(time.RFC3339Nano)); got != "2h3m" {
 		t.Errorf("2h3m: %q", got)
+	}
+}
+
+// TestRulesEffectiveCommandPaginates 验证 `proxyd rules effective` 按页取完结果，
+// 透传来源/关键字筛选，并打印来源分布与序号。
+//
+// 参数说明：t 为 *testing.T，提供模拟 API 与标准输出捕获。
+// 返回值说明：无。
+// 错误情况：请求参数未透传、分页未取完或输出缺少来源/序号时测试失败。
+func TestRulesEffectiveCommandPaginates(t *testing.T) {
+	var queries []string
+	pages := map[string][]map[string]any{
+		"0": {
+			{"position": 1, "line": "DOMAIN-SUFFIX,first.example,DIRECT", "source": "subscription", "source_label": "订阅规则"},
+			{"position": 2, "line": "DOMAIN-SUFFIX,second.example,PROXY", "source": "subscription", "source_label": "订阅规则"},
+		},
+		"2": {
+			{"position": 3, "line": "MATCH,PROXY", "source": "subscription-fallback", "source_label": "订阅兜底规则"},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/rules/effective" {
+			http.NotFound(w, r)
+			return
+		}
+		queries = append(queries, r.URL.RawQuery)
+		offset := r.URL.Query().Get("offset")
+		if offset != "0" && offset != "2" {
+			t.Errorf("分页 offset 异常: %q", offset)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"available": true,
+			"total":     3,
+			"matched":   3,
+			"offset":    0,
+			"limit":     2,
+			"sources": []map[string]any{
+				{"source": "subscription", "label": "订阅规则", "count": 2},
+				{"source": "subscription-fallback", "label": "订阅兜底规则", "count": 1},
+			},
+			"rules": pages[offset],
+		})
+	}))
+	defer server.Close()
+
+	client := &apiClient{base: server.URL}
+	out := captureStdout(t, func() {
+		if err := runEffectiveRules(client, []string{"--source", "订阅规则", "--grep", "example", "--limit", "2"}); err != nil {
+			t.Errorf("rules effective 失败: %v", err)
+		}
+	})
+	if len(queries) != 2 {
+		t.Fatalf("应分两页取完: %v", queries)
+	}
+	if !strings.Contains(queries[0], "source=") || !strings.Contains(queries[0], "q=example") || !strings.Contains(queries[0], "limit=2") {
+		t.Fatalf("筛选参数未透传: %v", queries)
+	}
+	for _, want := range []string{"生效规则 3 条", "来源分布: 订阅规则 2 · 订阅兜底规则 1", "1  订阅规则", "DOMAIN-SUFFIX,first.example,DIRECT", "3  订阅兜底规则", "MATCH,PROXY", "共列出 3 条"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("输出缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRulesEffectiveCommandReportsUnavailable 验证没有生效配置时给出明确提示而不是空表。
+//
+// 参数说明：t 为 *testing.T，提供模拟 API 与标准输出捕获。
+// 返回值说明：无。
+// 错误情况：未给出提示或返回错误时测试失败。
+func TestRulesEffectiveCommandReportsUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "total": 0, "matched": 0, "sources": []any{}, "rules": []any{}})
+	}))
+	defer server.Close()
+
+	client := &apiClient{base: server.URL}
+	out := captureStdout(t, func() {
+		if err := runEffectiveRules(client, nil); err != nil {
+			t.Errorf("rules effective 失败: %v", err)
+		}
+	})
+	if !strings.Contains(out, "当前没有已生效的配置") {
+		t.Fatalf("应提示代理未生效: %q", out)
 	}
 }
