@@ -3,7 +3,10 @@ package remote
 // 本文件验证 serve 语义下本机目标端口的回环兜底拨号。
 
 import (
+	"io"
 	"net"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -117,5 +120,80 @@ func TestDialLoopbackReportsFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "127.0.0.1") {
 		t.Fatalf("错误应包含 127.0.0.1 的失败原因: %v", err)
+	}
+}
+
+// TestDialServeTarget 验证自定义暴露映射支持本机异端口、TCP host:port 与 Unix 域套接字。
+func TestDialServeTarget(t *testing.T) {
+	tcpLn, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听 TCP 失败: %v", err)
+	}
+	defer tcpLn.Close()
+	go func() {
+		for {
+			c, err := tcpLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+	tcpPort := strconv.Itoa(tcpLn.Addr().(*net.TCPAddr).Port)
+
+	for _, tc := range []struct {
+		name    string
+		network string
+		addr    string
+	}{
+		{"loopback异端口", "loopback", tcpPort},
+		{"tcp地址", "tcp", tcpLn.Addr().String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := dialServeTarget(tc.network, tc.addr)
+			if err != nil {
+				t.Fatalf("dialServeTarget(%q, %q): %v", tc.network, tc.addr, err)
+			}
+			defer conn.Close()
+			if _, err := conn.Write([]byte("ok")); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 2)
+			if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ok" {
+				t.Fatalf("回显失败: %q err=%v", buf, err)
+			}
+		})
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	sockPath := filepath.Join(t.TempDir(), "app.sock")
+	unixLn, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("监听 Unix 套接字失败: %v", err)
+	}
+	defer unixLn.Close()
+	go func() {
+		c, err := unixLn.Accept()
+		if err == nil {
+			defer c.Close()
+			_, _ = io.Copy(c, c)
+		}
+	}()
+	conn, err := dialServeTarget("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dialServeTarget(unix): %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ux")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != "ux" {
+		t.Fatalf("Unix 套接字回显失败: %q err=%v", buf, err)
 	}
 }

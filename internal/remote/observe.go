@@ -13,6 +13,7 @@ import (
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
 	"proxyd/internal/config"
@@ -71,13 +72,30 @@ func Probe(ctx context.Context, token string, clientKey key.NodePrivate) (ProbeR
 	if err := ValidateToken(token); err != nil {
 		return ProbeResult{}, err
 	}
-	client := tailcat.NewClient(tailcat.ConnBlob(token))
+	client := tailcat.NewClient(tailcat.Addr(token))
 	client.Logf = func(string, ...any) {}
 	if !clientKey.IsZero() {
 		client.Key = clientKey
 	}
 	defer client.Close()
 	return probeWithClient(ctx, client)
+}
+
+// formatDERPRegion 将 tailcat Client.DERPRegion 返回的区域格式化为紧凑可读标识。
+func formatDERPRegion(region *tailcfg.DERPRegion) string {
+	if region == nil {
+		return ""
+	}
+	if code := strings.TrimSpace(region.RegionCode); code != "" {
+		return code
+	}
+	if name := strings.TrimSpace(region.RegionName); name != "" {
+		return name
+	}
+	if region.RegionID > 0 {
+		return fmt.Sprintf("%d", region.RegionID)
+	}
+	return ""
 }
 
 // probeWithClient 在已有 tailcat 客户端上执行 disco ping。
@@ -115,6 +133,11 @@ func probeWithClient(ctx context.Context, client *tailcat.Client) (ProbeResult, 
 		if result.DERPRegion == "" {
 			result.DERPRegion = fmt.Sprintf("%d", ping.DERPRegionID)
 		}
+	}
+	// tailcat v0.8.0 新增 Client.DERPRegion()：即使当前已经升级为直连路径，也能
+	// 展示客户端实际锚定的引导/兜底 DERP 区域，便于排查跨区连接质量。
+	if result.DERPRegion == "" {
+		result.DERPRegion = formatDERPRegion(client.DERPRegion())
 	}
 	return result, nil
 }

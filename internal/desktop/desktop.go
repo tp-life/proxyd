@@ -58,6 +58,7 @@ type SessionSpec struct {
 	Protocol       Protocol
 	RemotePort     int
 	Username       string
+	Quality        string
 }
 
 // Validate 校验创建会话所需的业务不变量。
@@ -102,6 +103,22 @@ type Forward interface {
 // 失败过程中创建的资源。
 type ForwardFactory func(spec SessionSpec) (Forward, error)
 
+// TransportStatus 描述桌面会话底层隧道的实时传输质量。
+type TransportStatus struct {
+	Path       string
+	Endpoint   string
+	DERPRegion string
+	RTTMillis  int64
+	Warming    bool
+	UDPEnabled bool
+	Error      string
+}
+
+// TransportReporter 是 Forward 的可选扩展接口，供真实隧道适配器上报实时路径与 RTT。
+type TransportReporter interface {
+	Transport() TransportStatus
+}
+
 // Session 是对 API/Web 可见的桌面会话快照。
 type Session struct {
 	ID                string
@@ -109,9 +126,11 @@ type Session struct {
 	Protocol          Protocol
 	RemotePort        int
 	Username          string
+	Quality           string
 	LocalAddress      string
 	StartedAt         time.Time
 	ActiveConnections int64
+	Transport         TransportStatus
 }
 
 // Options 控制遗忘会话的自动回收边界。
@@ -255,6 +274,7 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 			Protocol:       spec.Protocol,
 			RemotePort:     spec.RemotePort,
 			Username:       strings.TrimSpace(spec.Username),
+			Quality:        NormalizeQuality(spec.Quality),
 			LocalAddress:   forward.Address(),
 			StartedAt:      now,
 		},
@@ -447,6 +467,9 @@ func (m *Manager) findByConnectionLocked(name string) *managedSession {
 func (m *Manager) snapshotLocked(session *managedSession) Session {
 	snapshot := session.Session
 	snapshot.ActiveConnections = session.forward.ActiveConnections()
+	if reporter, ok := session.forward.(TransportReporter); ok {
+		snapshot.Transport = reporter.Transport()
+	}
 	return snapshot
 }
 

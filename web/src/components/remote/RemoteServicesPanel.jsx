@@ -26,7 +26,7 @@ import { StatusBadge } from "@/components/StatusBadge";
  * 可能的异常/错误情况：网络、校验与服务端重建错误由上层用例 toast；状态缺失时以
  * 安全的关闭态和空值渲染。
  */
-export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpenTerminal, openSSHPort, relayMapInput, relayRegionInput, removeServePort, resetRelay, serve, serveInput, setBuiltinSSH, setRelayMapInput, setRelayRegionInput, setServeInput, setShellUserInput, setWebTerminal, shellUserInput, status, submitRelay, submitServePort, submitShellUser, terminalAvailable, toggleEnabled }) {
+export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpenTerminal, openSSHPort, relayMapInput, relayRegionInput, removeServePort, removeServeTarget, resetRelay, serve, serveInput, serveTargetAddrInput, serveTargetPortInput, serveTargets = [], setBuiltinSSH, setHybrid, setRelayMapInput, setRelayRegionInput, setServeInput, setServeTargetAddrInput, setServeTargetPortInput, setShellUserInput, setWebTerminal, shellUserInput, status, submitRelay, submitServePort, submitServeTarget, submitShellUser, terminalAvailable, toggleEnabled }) {
  return (<>            <section className="panel">
               <PanelTitle
                 title="服务状态"
@@ -56,8 +56,12 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                 )}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                <UISwitch checked={Boolean(status?.builtin_ssh)} className="mt-0 border-0 pt-0" label="内嵌 SSH 服务（隧道 22 端口，无需系统 sshd）" onCheckedChange={setBuiltinSSH} />
-                <span className="text-xs text-muted-foreground">{status?.ssh_auth_required ? "隧道认证 + SSH 公钥认证" : "隧道免密模式；在「访问授权」可额外启用 SSH 公钥认证"}</span>
+                <UISwitch checked={Boolean(status?.builtin_ssh)} className="mt-0 border-0 pt-0" label="内嵌 SSH 服务（隧道 22 端口，支持本地回环端口转发）" onCheckedChange={setBuiltinSSH} />
+                <span className="text-xs text-muted-foreground">{status?.ssh_auth_required ? "隧道认证 + SSH 公钥认证" : "隧道免密模式；支持 ssh -L/-D 与 VS Code Remote-SSH"}</span>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <UISwitch checked={Boolean(status?.hybrid)} className="mt-0 border-0 pt-0" label="后量子混合握手（实验性 · ML-KEM-768）" onCheckedChange={setHybrid} />
+                <span className="text-xs text-muted-foreground">需 tailcat / proxyd v0.8.0+ 客户端；切换会更新本机 token</span>
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <UISwitch
@@ -222,5 +226,45 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                   ))}
                 </ul>
               )}
+              <div className="mt-4 grid gap-2 border-t pt-3">
+                <span className="text-xs font-medium text-muted-foreground">自定义目标映射（异端口 / 局域网主机 / Unix Socket）</span>
+                <form className="form-grid" onSubmit={submitServeTarget}>
+                  <Field label="隧道端口">
+                    <input
+                      aria-label="自定义映射隧道端口"
+                      max="65535"
+                      min="1"
+                      type="number"
+                      value={serveTargetPortInput}
+                      onChange={(event) => setServeTargetPortInput(event.target.value)}
+                      placeholder="例如：8080"
+                    />
+                  </Field>
+                  <Field label="转发目标" hint="本机端口（80）、局域网地址（10.0.0.2:5555）或套接字（/run/app.sock）">
+                    <input
+                      aria-label="自定义映射转发目标"
+                      type="text"
+                      value={serveTargetAddrInput}
+                      onChange={(event) => setServeTargetAddrInput(event.target.value)}
+                      placeholder="80 或 10.2.200.213:5555 或 /run/app.sock"
+                    />
+                  </Field>
+                  <Button className="form-submit" type="submit"><Plus size={16} aria-hidden="true" /><span>添加映射</span></Button>
+                </form>
+                {serveTargets.length > 0 && (
+                  <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
+                    {serveTargets.map((item) => (
+                      <li key={item.port}>
+                        <Badge className="gap-1.5 px-2.5 py-1 font-mono text-xs" variant="outline">
+                          {item.port} → {item.target}
+                          <button aria-label={`移除映射 ${item.port}`} className="inline-flex items-center" type="button" onClick={() => removeServeTarget(item.port)}>
+                            <X size={13} aria-hidden="true" />
+                          </button>
+                        </Badge>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </section></>);
 }

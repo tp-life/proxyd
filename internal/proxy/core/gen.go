@@ -438,9 +438,14 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	//
 	// 这里同时记录每条规则的来源（ruleEntries）：来源只存在于生成阶段，最终配置里没有
 	// 任何字段可以反推它，控制台「当前生效规则」直接消费这份标注。
-	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(plan.Rules)+len(cfg.Rules)+len(plan.FallbackRules)+1)
+	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(plan.Rules)+len(cfg.Rules)+len(plan.FallbackRules)+2)
 	if gatewayActive(cfg) {
 		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceGateway, gatewayDeviceRules(cfg, groups))
+	}
+	// 开启 TUN 时把 proxyd 自身进程标记为 DIRECT，避免内嵌 tailcat 的 STUN、
+	// WireGuard UDP 打洞包与 DERP 中继连接被本机 TUN 劫持进代理节点，导致直连失败或 TCP-over-TCP 卡顿。
+	if tunConfig.Enable && !cfg.Remote.Disabled {
+		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceBuiltin, []string{selfProcessDirectRule()})
 	}
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceCustom, cfg.CustomRules)
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceRuleURL, imported)
@@ -830,6 +835,14 @@ func resolveGroupMembersFromNodes(g config.NodeGroup, nodes []*node.Node, nodeSe
 }
 
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。
+// selfProcessDirectRule 返回开启 TUN 时放行 proxyd 自身进程直连的规则。
+func selfProcessDirectRule() string {
+	if runtime.GOOS == "windows" {
+		return "PROCESS-NAME,proxyd.exe,DIRECT"
+	}
+	return "PROCESS-NAME,proxyd,DIRECT"
+}
+
 func hasGeoRules(rules []string) bool {
 	for _, r := range rules {
 		if isGeoRule(r) {

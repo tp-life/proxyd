@@ -15,7 +15,7 @@ func newSCPTestToken(t *testing.T) string {
 	priv := tailcat.NewPrivateKey()
 	ci := priv.Public
 	ci.RegionID = 1
-	return string(ci.ConnBlob())
+	return string(ci.Addr())
 }
 
 // TestFindTunnelToken 验证 scp 参数中隧道 token 操作数的识别规则：
@@ -154,5 +154,33 @@ func TestResolveDesktopToken(t *testing.T) {
 	}
 	if _, err := resolveDesktopToken("/path/that/does/not/exist", "tc-invalid"); err == nil {
 		t.Fatal("非法直接 token 应被拒绝")
+	}
+}
+
+// TestParseServeMappingArg 验证 CLI 自定义端口映射参数解析。
+func TestParseServeMappingArg(t *testing.T) {
+	for _, tc := range []struct {
+		raw        string
+		wantPort   int
+		wantTarget string
+		wantErr    bool
+	}{
+		{"8080:80", 8080, "80", false},
+		{"5555:10.2.200.213:5555", 5555, "10.2.200.213:5555", false},
+		{"5556:android.lan:5555", 5556, "android.lan:5555", false},
+		{"8022:/run/app.sock", 8022, "/run/app.sock", false},
+		{"8023:unix:/tmp/demo.sock", 8023, "unix:/tmp/demo.sock", false},
+		{"8080", 0, "", true},
+		{"0:80", 0, "", true},
+		{"8080:0", 0, "", true},
+	} {
+		got, err := parseServeMappingArg(tc.raw)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseServeMappingArg(%q) err=%v wantErr=%v", tc.raw, err, tc.wantErr)
+			continue
+		}
+		if !tc.wantErr && (got.Port != tc.wantPort || got.Target != tc.wantTarget) {
+			t.Errorf("parseServeMappingArg(%q) = %+v, want %d -> %q", tc.raw, got, tc.wantPort, tc.wantTarget)
+		}
 	}
 }

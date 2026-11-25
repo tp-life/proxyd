@@ -17,7 +17,7 @@ const dialTimeout = 30 * time.Second
 
 // ValidateToken 校验一个 tc... 连接 token 的格式（仅本地解析，不发起网络连接）。
 func ValidateToken(token string) error {
-	if _, err := tailcat.ParseConnBlob(tailcat.ConnBlob(token)); err != nil {
+	if _, err := tailcat.ParseAddr(tailcat.Addr(token)); err != nil {
 		return fmt.Errorf("token 无效: %w", err)
 	}
 	return nil
@@ -31,7 +31,7 @@ func Dial(ctx context.Context, token string, port int, clientKey key.NodePrivate
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("端口 %d 超出 1-65535", port)
 	}
-	cl := tailcat.NewClient(tailcat.ConnBlob(token))
+	cl := tailcat.NewClient(tailcat.Addr(token))
 	cl.Logf = logger.Discard
 	if !clientKey.IsZero() {
 		cl.Key = clientKey
@@ -129,7 +129,7 @@ func pipeConnection(ctx context.Context, conn net.Conn, stdin io.ReadCloser, std
 
 // Ping 测量到远端隧道的握手往返延迟（经 DERP 中继）。clientKey 语义同 Dial。
 func Ping(ctx context.Context, token string, clientKey key.NodePrivate) (time.Duration, error) {
-	cl := tailcat.NewClient(tailcat.ConnBlob(token))
+	cl := tailcat.NewClient(tailcat.Addr(token))
 	cl.Logf = logger.Discard
 	if !clientKey.IsZero() {
 		cl.Key = clientKey

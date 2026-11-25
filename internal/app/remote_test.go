@@ -22,7 +22,7 @@ func newRemoteTestToken(t *testing.T) string {
 	priv := tailcat.NewPrivateKey()
 	ci := priv.Public
 	ci.RegionID = 1
-	return string(ci.ConnBlob())
+	return string(ci.Addr())
 }
 
 // remoteForwardPort 取出规范化 listen 地址（127.0.0.1:<port>）中的端口号。
@@ -497,5 +497,62 @@ func TestAssignRemoteForwardPortSkipUsed(t *testing.T) {
 	}
 	if p := remoteForwardPort(t, listen); p < 10022 || p > 10121 {
 		t.Fatalf("分配端口 %d 超出候选段", p)
+	}
+}
+
+// TestSetRemoteHybridAndServeTargets 验证混合握手、自定义端口映射与主动断开客户端用例。
+func TestSetRemoteHybridAndServeTargets(t *testing.T) {
+	directory := t.TempDir()
+	cfg, err := config.Quick([]string{"https://example.invalid/tailcat-v080-test"}, "")
+	if err != nil {
+		t.Fatalf("构造测试配置失败: %v", err)
+	}
+	cfg.StateDir = directory
+	configPath := filepath.Join(directory, "config.yaml")
+	a, err := New(cfg, configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.stopRemote()
+
+	if err := a.SetRemoteHybrid(true); err != nil {
+		t.Fatalf("开启 Hybrid 失败: %v", err)
+	}
+	if !a.RemoteStatus().Hybrid {
+		t.Fatal("Hybrid 状态应为 true")
+	}
+
+	if err := a.SetRemoteServe([]int{22}); err != nil {
+		t.Fatalf("设置普通端口失败: %v", err)
+	}
+	if err := a.SetRemoteServeTargets([]config.RemoteServeTarget{{Port: 22, Target: "2222"}}); err == nil {
+		t.Fatal("与普通暴露端口冲突的映射应被拒绝")
+	}
+	wantTargets := []config.RemoteServeTarget{
+		{Port: 8080, Target: "80"},
+		{Port: 5555, Target: "10.2.200.213:5555"},
+		{Port: 8022, Target: "/run/app.sock"},
+	}
+	if err := a.SetRemoteServeTargets(wantTargets); err != nil {
+		t.Fatalf("设置自定义端口映射失败: %v", err)
+	}
+	if err := a.SetRemoteServe([]int{22, 8080}); err == nil {
+		t.Fatal("普通暴露端口与已有映射冲突时应被拒绝")
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("重载配置失败: %v", err)
+	}
+	if !loaded.Remote.Hybrid || len(loaded.Remote.ServeTargets) != 3 {
+		t.Fatalf("持久化结果不符: hybrid=%v targets=%+v", loaded.Remote.Hybrid, loaded.Remote.ServeTargets)
+	}
+
+	pub := tailcat.NewPrivateKey().Private.Public().String()
+	disconnected, closedConns, err := a.DisconnectRemoteClient(pub)
+	if err != nil || disconnected || closedConns != 0 {
+		t.Fatalf("断开未连接客户端返回异常: disconnected=%v closed=%d err=%v", disconnected, closedConns, err)
+	}
+	if _, _, err := a.DisconnectRemoteClient("nodekey:bad"); err == nil {
+		t.Fatal("非法公钥应返回错误")
 	}
 }

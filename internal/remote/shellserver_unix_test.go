@@ -7,8 +7,11 @@ package remote
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +19,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // TestShellHostKeyPersistsSecurely 验证 Web Terminal 与 builtin-ssh 共用的 host key
@@ -119,4 +124,119 @@ func TestWebTerminalDisconnectReapsShell(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("Web Terminal 断开后 shell 进程 %d 仍存活", pid)
+}
+
+// TestBuiltinSSHLocalForwardingAndPeerKey 验证内嵌 SSH 支持到本机回环 IP 的
+// 本地端口转发（ssh -L / VS Code Remote-SSH），同时拒绝主机名和非回环地址，
+// 并将隧道节点公钥注入 TAILCAT_PEER_KEY；Web Terminal 默认不开放端口转发。
+func TestBuiltinSSHLocalForwardingAndPeerKey(t *testing.T) {
+	echoLn, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听回环回显服务失败: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, err := echoLn.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+	echoPort := echoLn.Addr().(*net.TCPAddr).Port
+
+	stateDir := t.TempDir()
+	const wantPeerKey = "nodekey:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	handler, err := managedShellSSHHandlerWithOptions(stateDir, newSSHAccess(newAuditLog(16)), "", shellSSHOptions{
+		allowLocalForwarding: true,
+		peerKeyLookup:        func(net.Addr) string { return wantPeerKey },
+	})
+	if err != nil {
+		t.Fatalf("构造内嵌 SSH 处理器失败: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	clientSide, err := openAuthenticatedLoopback(ctx, handler)
+	if err != nil {
+		t.Fatalf("建立回环测试传输失败: %v", err)
+	}
+	defer clientSide.Close()
+
+	cc, chans, reqs, err := gossh.NewClientConn(clientSide, "tailcat", &gossh.ClientConfig{
+		User:            "proxyd",
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+	})
+	if err != nil {
+		t.Fatalf("SSH 握手失败: %v", err)
+	}
+	client := gossh.NewClient(cc, chans, reqs)
+	defer client.Close()
+
+	// 1. 回环 IP 字面量转发应放行。
+	fwdConn, err := client.Dial("tcp", echoAddr)
+	if err != nil {
+		t.Fatalf("回环 IP 本地转发应成功: %v", err)
+	}
+	if _, err := fwdConn.Write([]byte("vsc")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(fwdConn, buf); err != nil || string(buf) != "vsc" {
+		t.Fatalf("本地转发回显错误: %q err=%v", buf, err)
+	}
+	_ = fwdConn.Close()
+
+	// 2. 主机名（含 localhost）与非回环 IP 必须被拒绝。
+	if denied, err := client.Dial("tcp", fmt.Sprintf("localhost:%d", echoPort)); err == nil {
+		_ = denied.Close()
+		t.Fatal("不应允许通过主机名 localhost 进行本地转发")
+	}
+	if denied, err := client.Dial("tcp", "192.0.2.1:80"); err == nil {
+		_ = denied.Close()
+		t.Fatal("不应允许转发到非回环 IP")
+	}
+
+	// 3. 验证 TAILCAT_PEER_KEY 已注入到会话环境。
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("创建 SSH 会话失败: %v", err)
+	}
+	defer sess.Close()
+	out, err := sess.CombinedOutput("printf '%s' \"$TAILCAT_PEER_KEY\"")
+	if err != nil {
+		t.Fatalf("执行环境检查命令失败: %v (%s)", err, string(out))
+	}
+	if strings.TrimSpace(string(out)) != wantPeerKey {
+		t.Fatalf("TAILCAT_PEER_KEY = %q, want %q", strings.TrimSpace(string(out)), wantPeerKey)
+	}
+
+	// 4. Web Terminal 使用的 localShellSSHHandler 不应开启 direct-tcpip。
+	localHandler, err := localShellSSHHandler(stateDir, "")
+	if err != nil {
+		t.Fatalf("构造 Web Terminal 处理器失败: %v", err)
+	}
+	c2, err := openAuthenticatedLoopback(ctx, localHandler)
+	if err != nil {
+		t.Fatalf("建立 Web Terminal 测试传输失败: %v", err)
+	}
+	defer c2.Close()
+	cc2, chans2, reqs2, err := gossh.NewClientConn(c2, "local", &gossh.ClientConfig{
+		User:            "proxyd",
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+	})
+	if err != nil {
+		t.Fatalf("local SSH 握手失败: %v", err)
+	}
+	localClient := gossh.NewClient(cc2, chans2, reqs2)
+	defer localClient.Close()
+	if denied, err := localClient.Dial("tcp", echoAddr); err == nil {
+		_ = denied.Close()
+		t.Fatal("Web Terminal SSH 不应开启本地端口转发")
+	}
 }

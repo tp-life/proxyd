@@ -37,7 +37,7 @@ func (m *Manager) DiagnoseNetwork(ctx context.Context) []DiagnosticCheck {
 	}
 	sources := []string{cfg.DERPMapURL}
 	if cfg.DERPMapURL == "" {
-		sources = []string{"https://tailcat.dev/derpmap.json", fallbackDERPMapURL}
+		sources = []string{tailcat.DefaultDERPMapURL, fallbackDERPMapURL}
 	}
 	result := []DiagnosticCheck{}
 	for i, source := range sources {

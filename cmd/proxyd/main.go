@@ -232,9 +232,10 @@ usage:
 
 远程连接（tailcat 隧道，与代理功能独立）:
   proxyd remote status|on|off|token      查看状态/联动开关服务端与 builtin-ssh/打印完整 token
-  proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
+  proxyd remote serve [端口,...] | map [list|add <端口:目标>|del <端口>]   暴露本机端口或自定义目标映射（异端口/局域网/Unix Socket）
+  proxyd remote hybrid [on|off]          查看/开关实验性后量子混合握手（ML-KEM-768，需 v0.8.0+ 客户端）
   proxyd remote relay [auto|区域ID|derp主机] [--map-url URL|--default-map]  查看/设置 DERP 中继
-  proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del <别名|公钥>   客户端最小权限白名单
+  proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del|disconnect <别名|公钥>   客户端最小权限白名单与主动断开
   proxyd remote audit [--tail N]       查看连接建立、拒绝与断开审计记录
   proxyd remote tempkey [reset]          查看/重置临时身份（保留手动白名单与客户端 nodekey）
   proxyd remote keyfile [路径|-]|export <路径>|import <路径>   设置、导出或导入服务端身份密钥

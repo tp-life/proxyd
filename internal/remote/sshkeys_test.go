@@ -78,7 +78,7 @@ func TestTailcatIdentityPSKPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.Public.RegionID, second.Public.RegionID = 1, 1
-	if first.Public.ConnBlob() != second.Public.ConnBlob() || !first.Private.Equal(second.Private) {
+	if first.Public.Addr() != second.Public.Addr() || !first.Private.Equal(second.Private) {
 		t.Fatal("新身份在重新加载后发生变化")
 	}
 	// 旧文件缺少 PSK，保持字节与身份不变，不能让升级成为隐式密钥轮换。
@@ -91,7 +91,7 @@ func TestTailcatIdentityPSKPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy, err := loadOrCreateTailcatKey(path)
-	if err != nil || !legacy.Public.PresharedKey.IsZero() || legacy.Public.ConnBlob() != first.Public.ConnBlob() {
+	if err != nil || !legacy.Public.PresharedKey.IsZero() || legacy.Public.Addr() != first.Public.Addr() {
 		t.Fatalf("旧身份未保持兼容：%v", err)
 	}
 	actual, err := os.ReadFile(path)

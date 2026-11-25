@@ -51,7 +51,7 @@ func TestLiveServerStatusPeer(t *testing.T) {
 	defer srv.Close()
 
 	clientKey := key.NewNode()
-	client := tailcat.NewClient(srv.ConnBlob())
+	client := tailcat.NewClient(srv.TailcatAddr())
 	client.Logf = func(string, ...any) {}
 	client.Key = clientKey
 	defer client.Close()

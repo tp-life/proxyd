@@ -64,12 +64,14 @@ type remoteRelayJSON struct {
 // remoteStatusJSON 对应 GET /api/remote 的响应（token 为打码摘要）。
 type remoteStatusJSON struct {
 	Enabled         bool                        `json:"enabled"`
+	Hybrid          bool                        `json:"hybrid"`
 	Running         bool                        `json:"running"`
 	Error           string                      `json:"error,omitempty"`
 	Token           string                      `json:"token,omitempty"`
 	ClientKey       string                      `json:"client_key,omitempty"`
 	Region          string                      `json:"region,omitempty"`
 	Serve           []int                       `json:"serve"`
+	ServeTargets    []config.RemoteServeTarget  `json:"serve_targets"`
 	Allow           []allowEntryJSON            `json:"allow"`
 	AllowRestricted bool                        `json:"allow_restricted"`
 	TempKey         string                      `json:"temp_key,omitempty"`
@@ -91,6 +93,7 @@ type remoteStatusJSON struct {
 		Enabled    bool   `json:"enabled"`
 		Running    bool   `json:"running"`
 		Active     int64  `json:"active"`
+		DERPRegion string `json:"derp_region,omitempty"`
 		LastError  string `json:"last_error,omitempty"`
 	} `json:"forwards"`
 }
@@ -158,6 +161,8 @@ func cmdRemote(args []string) error {
 		return nil
 	case "serve":
 		return cmdRemoteServe(c, rest[1:])
+	case "hybrid":
+		return cmdRemoteHybrid(c, rest[1:])
 	case "relay":
 		return cmdRemoteRelay(c, rest[1:])
 	case "allow":
@@ -181,7 +186,7 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|hybrid|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -247,7 +252,13 @@ func remotePrintStatus(c *apiClient) error {
 	if st.WebTerminal {
 		fmt.Printf("Web 终端：已开启（管理 API %s；proxyd remote web-terminal off 可立即关闭）\n", st.APIListen)
 	}
+	if st.Hybrid {
+		fmt.Println("后量子混合握手：已开启（ML-KEM-768，实验性，需 tailcat v0.8.0+ 客户端）")
+	}
 	fmt.Printf("暴露端口：%s\n", formatPorts(st.Serve))
+	if len(st.ServeTargets) > 0 {
+		fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+	}
 	if len(st.Peers) > 0 {
 		fmt.Println("\n入站客户端：")
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -434,7 +445,49 @@ func formatRemoteExpiry(expiresAt *time.Time, now time.Time) string {
 	return remaining.Truncate(time.Minute).String()
 }
 
-// cmdRemoteServe 查看或设置经隧道暴露的本机端口。
+// formatServeTargets 把自定义端口映射列表格式化为可读文本。
+func formatServeTargets(targets []config.RemoteServeTarget) string {
+	if len(targets) == 0 {
+		return "（无）"
+	}
+	parts := make([]string, len(targets))
+	for i, t := range targets {
+		parts[i] = fmt.Sprintf("%d → %s", t.Port, t.Target)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// cmdRemoteHybrid 查看或切换 tailcat v0.8.0 实验性后量子混合握手（ML-KEM-768）。
+func cmdRemoteHybrid(c *apiClient, args []string) error {
+	if len(args) == 0 {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return err
+		}
+		if st.Hybrid {
+			fmt.Println("后量子混合握手：已开启（ML-KEM-768，实验性，需 tailcat v0.8.0+ 客户端）")
+		} else {
+			fmt.Println("后量子混合握手：关闭")
+		}
+		return nil
+	}
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		return fmt.Errorf("用法: proxyd remote hybrid [on|off]")
+	}
+	enabled := args[0] == "on"
+	var st remoteStatusJSON
+	if err := c.do(http.MethodPost, "/api/remote/hybrid", map[string]bool{"enabled": enabled}, &st); err != nil {
+		return err
+	}
+	if enabled {
+		fmt.Println("后量子混合握手（ML-KEM-768）已开启；token 已更新，客户端需升级至 tailcat/proxyd v0.8.0+")
+	} else {
+		fmt.Println("后量子混合握手已关闭；token 已更新")
+	}
+	return nil
+}
+
+// cmdRemoteServe 查看或设置经隧道暴露的本机端口，或通过 map 子命令管理自定义目标映射。
 func cmdRemoteServe(c *apiClient, args []string) error {
 	if len(args) == 0 {
 		var st remoteStatusJSON
@@ -442,10 +495,16 @@ func cmdRemoteServe(c *apiClient, args []string) error {
 			return err
 		}
 		fmt.Printf("暴露端口：%s\n", formatPorts(st.Serve))
+		if len(st.ServeTargets) > 0 {
+			fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+		}
 		return nil
 	}
+	if args[0] == "map" {
+		return cmdRemoteServeMap(c, args[1:])
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("用法: proxyd remote serve [端口,端口...]（空串清空）")
+		return fmt.Errorf("用法: proxyd remote serve [端口,端口...] | map [list|add <端口:目标>|del <端口>]")
 	}
 	var ports []int
 	if strings.TrimSpace(args[0]) != "" {
@@ -463,6 +522,110 @@ func cmdRemoteServe(c *apiClient, args []string) error {
 	}
 	fmt.Printf("暴露端口已更新：%s\n", formatPorts(st.Serve))
 	return nil
+}
+
+// parseServeMappingArg 解析 <端口:目标> 参数，例如 8080:80、5555:10.0.0.2:5555、8022:/run/app.sock。
+func parseServeMappingArg(raw string) (config.RemoteServeTarget, error) {
+	portText, target, ok := strings.Cut(strings.TrimSpace(raw), ":")
+	if !ok {
+		return config.RemoteServeTarget{}, fmt.Errorf("映射 %q 格式无效（应为 端口:目标，如 8080:80、5555:10.0.0.2:5555 或 8022:/run/app.sock）", raw)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil || port <= 0 || port > 65535 {
+		return config.RemoteServeTarget{}, fmt.Errorf("隧道端口 %q 超出 1-65535", portText)
+	}
+	target = strings.TrimSpace(target)
+	if _, _, err := config.ParseRemoteServeTarget(target); err != nil {
+		return config.RemoteServeTarget{}, err
+	}
+	return config.RemoteServeTarget{Port: port, Target: target}, nil
+}
+
+// cmdRemoteServeMap 管理自定义暴露端口映射（本机异端口、局域网主机或 Unix Socket）。
+func cmdRemoteServeMap(c *apiClient, args []string) error {
+	load := func() (remoteStatusJSON, error) {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return remoteStatusJSON{}, err
+		}
+		return st, nil
+	}
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list":
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+		return nil
+	case "add":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote serve map add <端口:目标>（如 8080:80、5555:10.0.0.2:5555、8022:/run/app.sock）")
+		}
+		entry, err := parseServeMappingArg(args[1])
+		if err != nil {
+			return err
+		}
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		next := make([]config.RemoteServeTarget, 0, len(st.ServeTargets)+1)
+		replaced := false
+		for _, item := range st.ServeTargets {
+			if item.Port == entry.Port {
+				next = append(next, entry)
+				replaced = true
+			} else {
+				next = append(next, item)
+			}
+		}
+		if !replaced {
+			next = append(next, entry)
+		}
+		var updated remoteStatusJSON
+		if err := c.do(http.MethodPost, "/api/remote/serve-targets", map[string]any{"targets": next}, &updated); err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射已更新：%s\n", formatServeTargets(updated.ServeTargets))
+		return nil
+	case "del":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote serve map del <隧道端口>")
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(args[1]))
+		if err != nil || port <= 0 || port > 65535 {
+			return fmt.Errorf("隧道端口 %q 无效", args[1])
+		}
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		next := make([]config.RemoteServeTarget, 0, len(st.ServeTargets))
+		found := false
+		for _, item := range st.ServeTargets {
+			if item.Port == port {
+				found = true
+				continue
+			}
+			next = append(next, item)
+		}
+		if !found {
+			return fmt.Errorf("未找到隧道端口 %d 的自定义映射", port)
+		}
+		var updated remoteStatusJSON
+		if err := c.do(http.MethodPost, "/api/remote/serve-targets", map[string]any{"targets": next}, &updated); err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射已更新：%s\n", formatServeTargets(updated.ServeTargets))
+		return nil
+	default:
+		return fmt.Errorf("未知子命令 %q（list|add|del）", sub)
+	}
 }
 
 // cmdRemoteAllow 查看或增删客户端授权；add 支持 --ttl 与 --ports 最小权限。
@@ -576,8 +739,39 @@ func cmdRemoteAllow(c *apiClient, args []string) error {
 			fmt.Println("已移出白名单")
 		}
 		return nil
+	case "disconnect":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote allow disconnect <别名|nodekey:... 公钥>")
+		}
+		target := strings.TrimSpace(args[1])
+		if !strings.HasPrefix(target, "nodekey:") {
+			st, err := load()
+			if err != nil {
+				return err
+			}
+			resolved := ""
+			for _, e := range st.Allow {
+				if e.Name == target {
+					resolved = e.Key
+					break
+				}
+			}
+			if resolved == "" {
+				return fmt.Errorf("白名单中没有别名为 %q 的客户端（可直接传 nodekey:... 公钥）", target)
+			}
+			target = resolved
+		}
+		var result struct {
+			Disconnected      bool `json:"disconnected"`
+			ClosedConnections int  `json:"closed_connections"`
+		}
+		if err := c.do(http.MethodPost, "/api/remote/clients/disconnect", map[string]string{"key": target}, &result); err != nil {
+			return err
+		}
+		fmt.Printf("已请求断开客户端（隧道移除=%v，关闭活动连接=%d）；授权配置未变更\n", result.Disconnected, result.ClosedConnections)
+		return nil
 	}
-	return fmt.Errorf("未知子命令 %q（list|add|del）", sub)
+	return fmt.Errorf("未知子命令 %q（list|add|del|disconnect）", sub)
 }
 
 // parseRemoteAllowAdd 解析 allow add 的位置参数、TTL 和端口限制。
@@ -787,6 +981,8 @@ func formatRemoteAuditAction(action string) string {
 		return "SSH 结束"
 	case "ssh_disconnect_requested":
 		return "请求断开"
+	case remote.AuditActionClientDisconnect:
+		return "断开客户端"
 	default:
 		return action
 	}

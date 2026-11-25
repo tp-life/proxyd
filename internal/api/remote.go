@@ -34,8 +34,11 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/remote/token", s.handleGetRemoteToken)
 	mux.HandleFunc("GET /api/remote/relay", s.handleGetRemoteRelay)
 	mux.HandleFunc("POST /api/remote/relay", s.handleSetRemoteRelay)
+	mux.HandleFunc("POST /api/remote/hybrid", s.handleSetRemoteHybrid)
 	mux.HandleFunc("POST /api/remote/serve", s.handleSetRemoteServe)
+	mux.HandleFunc("POST /api/remote/serve-targets", s.handleSetRemoteServeTargets)
 	mux.HandleFunc("POST /api/remote/allow", s.handleSetRemoteAllow)
+	mux.HandleFunc("POST /api/remote/clients/disconnect", s.handleDisconnectRemoteClient)
 	mux.HandleFunc("POST /api/remote/ping", s.handlePingRemote)
 	mux.HandleFunc("GET /api/remote/audit", s.handleGetRemoteAudit)
 	mux.HandleFunc("POST /api/remote/keyfile", s.handleSetRemoteKeyFile)
@@ -343,6 +346,22 @@ func (s *Server) handleSetRemote(w http.ResponseWriter, r *http.Request) {
 	s.handleGetRemote(w, r)
 }
 
+// handleSetRemoteHybrid 热切换 tailcat v0.8.0 实验性后量子混合握手（ML-KEM-768）。
+func (s *Server) handleSetRemoteHybrid(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteHybrid(req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
 // handleSetRemoteServe 修改经隧道暴露的本机端口列表。
 func (s *Server) handleSetRemoteServe(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -353,6 +372,22 @@ func (s *Server) handleSetRemoteServe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.app.SetRemoteServe(req.Ports); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.handleGetRemote(w, r)
+}
+
+// handleSetRemoteServeTargets 修改经隧道暴露的自定义端口映射（本机异端口、局域网主机或 Unix Socket）。
+func (s *Server) handleSetRemoteServeTargets(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Targets []config.RemoteServeTarget `json:"targets"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := s.app.SetRemoteServeTargets(req.Targets); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -373,6 +408,26 @@ func (s *Server) handleSetRemoteAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.handleGetRemote(w, r)
+}
+
+// handleDisconnectRemoteClient 主动断开指定隧道客户端（nodekey:...）及其活动 TCP 连接。
+func (s *Server) handleDisconnectRemoteClient(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	disconnected, closedConns, err := s.app.DisconnectRemoteClient(req.Key)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"disconnected":       disconnected,
+		"closed_connections": closedConns,
+	})
 }
 
 // handlePingRemote 对一个已保存远端或完整 token 执行一次隧道内 disco ping。

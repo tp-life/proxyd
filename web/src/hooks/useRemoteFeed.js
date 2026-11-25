@@ -321,6 +321,70 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
   );
 
   /**
+   * saveServeTargets 整体替换自定义暴露端口映射（异端口 / 局域网主机 / Unix Socket）。
+   */
+  const saveServeTargets = useCallback(
+    async (targets) => {
+      try {
+        const payload = await requestJSON("/api/remote/serve-targets", {
+          method: "POST",
+          body: JSON.stringify({ targets }),
+        });
+        if (payload) setStatus(payload);
+        showToast("自定义端口映射已更新");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
+   * setHybrid 切换 tailcat v0.8.0 实验性后量子混合握手（ML-KEM-768）。
+   */
+  const setHybrid = useCallback(
+    async (enabled) => {
+      try {
+        const payload = await requestJSON("/api/remote/hybrid", {
+          method: "POST",
+          body: JSON.stringify({ enabled }),
+        });
+        if (payload) setStatus(payload);
+        showToast(enabled ? "已开启后量子混合握手（token 已更新，需 v0.8.0+ 客户端）" : "已关闭后量子混合握手（token 已更新）");
+        return true;
+      } catch (saveError) {
+        showToast(`操作失败：${saveError.message}`, "err");
+        return false;
+      }
+    },
+    [showToast],
+  );
+
+  /**
+   * disconnectClient 主动断开指定隧道客户端及其活动连接（不修改白名单）。
+   */
+  const disconnectClient = useCallback(
+    async (key) => {
+      try {
+        const payload = await requestJSON("/api/remote/clients/disconnect", {
+          method: "POST",
+          body: JSON.stringify({ key }),
+        });
+        await loadRemote();
+        const closed = payload?.closed_connections || 0;
+        showToast(closed > 0 ? `已断开客户端并关闭 ${closed} 条活动连接` : "已请求断开客户端隧道会话");
+        return true;
+      } catch (disconnectError) {
+        showToast(`断开失败：${disconnectError.message}`, "err");
+        return false;
+      }
+    },
+    [loadRemote, showToast],
+  );
+
+  /**
    * saveRelay 事务更新服务端使用的 DERP 区域与地图来源。
    *
    * 参数说明：
@@ -1069,10 +1133,13 @@ export function useRemoteFeed(activeView, requestConfirmation, showToast) {
     saveAllow,
     saveKeyFile,
     saveServe,
+    saveServeTargets,
     saveRelay,
     saveShellUser,
     setBuiltinSSH,
+    setHybrid,
     setWebTerminal,
+    disconnectClient,
     setSshSetEnvTerm,
     sshSetEnvTerm,
     toggleEnabled,

@@ -39,6 +39,34 @@ const protocolOptions = [
   { value: "rdp", label: "RDP（Windows / Linux）" },
   { value: "vnc", label: "VNC（macOS / 通用）" },
 ];
+const qualityOptions = [
+  { value: "balanced", label: "均衡（推荐 · 开启压缩）" },
+  { value: "smooth", label: "流畅优先（弱网 / DERP 中继）" },
+  { value: "high", label: "原画（直连高速）" },
+];
+const qualityLabels = {
+  smooth: "流畅优先",
+  balanced: "均衡",
+  high: "原画",
+};
+
+/**
+ * renderSessionTransportBadge 展示活动桌面会话的实时隧道路径（预热/直连/DERP）与 RTT。
+ */
+function renderSessionTransportBadge(session) {
+  if (!session) return null;
+  if (session.warming) {
+    return <Badge variant="secondary">隧道预热中…</Badge>;
+  }
+  const rtt = session.rtt_ms > 0 ? ` · ${session.rtt_ms}ms` : "";
+  if (session.path === "direct") {
+    return <Badge variant="success">直连{rtt}</Badge>;
+  }
+  if (session.path === "derp") {
+    return <Badge variant="destructive">DERP 中继{session.derp_region ? `(${session.derp_region})` : ""}{rtt}</Badge>;
+  }
+  return <Badge variant="outline">路径检测中</Badge>;
+}
 
 /**
  * readDesktopTab 恢复用户上次查看的桌面页签。
@@ -63,7 +91,7 @@ function readDesktopTab() {
  * 可能的异常/错误情况：无；远端为空时提交按钮会保持禁用。
  */
 function emptyConnectionForm(remote = "") {
-  return { name: "", remote, protocol: "rdp", remote_port: "3389", username: "" };
+  return { name: "", remote, protocol: "rdp", remote_port: "3389", username: "", quality: "balanced" };
 }
 
 /**
@@ -144,6 +172,10 @@ export function DesktopPage({
     const connectionNames = new Set((status?.connections || []).map((connection) => connection.name));
     return (status?.sessions || []).filter((session) => !connectionNames.has(session.connection_name));
   }, [status?.connections, status?.sessions]);
+  const relayedSessions = useMemo(
+    () => (status?.sessions || []).filter((session) => session.path === "derp"),
+    [status?.sessions],
+  );
 
   useEffect(() => {
     const nextPorts = {};
@@ -227,6 +259,7 @@ export function DesktopPage({
       protocol: connection.protocol,
       remote_port: String(connection.remote_port),
       username: connection.username || "",
+      quality: connection.quality || "balanced",
     });
     setShowForm(true);
   }
@@ -259,6 +292,7 @@ export function DesktopPage({
       protocol: form.protocol,
       remote_port: Number(form.remote_port),
       username: form.username.trim(),
+      quality: form.protocol === "rdp" ? (form.quality || "balanced") : "",
     }, editingName);
     if (saved) cancelConnectionForm();
   }
@@ -443,6 +477,15 @@ export function DesktopPage({
                   <span>当前 API 允许非本机访问。一键打开只在浏览器与 proxyd 位于同一台机器时有效，因为临时转发只监听 proxyd 主机的 127.0.0.1。</span>
                 </div>
               )}
+              {relayedSessions.length > 0 && (
+                <div className="notice-row">
+                  <CircleAlert size={16} aria-hidden="true" />
+                  <span>
+                    当前有 {relayedSessions.length} 个桌面会话正在走 DERP 中继（TCP），远程桌面容易卡顿。
+                    建议检查双方 UDP 防火墙是否放行、在「远程连接 → 本机服务」配置就近自建 DERP，或将 RDP 画质预设切为「流畅优先」。
+                  </span>
+                </div>
+              )}
 
               <section className="panel">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -466,7 +509,7 @@ export function DesktopPage({
                       <h3 className="m-0 text-sm font-semibold">{editingName ? `编辑：${editingName}` : "添加桌面连接"}</h3>
                       <Badge variant="outline">不保存密码</Badge>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                       <Field label="连接名称" hint="用于列表识别，可修改">
                         <input aria-label="桌面连接名称" value={form.name} onChange={(event) => updateFormField("name", event.target.value)} placeholder="例如：办公室 Windows" />
                       </Field>
@@ -482,6 +525,11 @@ export function DesktopPage({
                       <Field label="登录用户名" hint="可选，不保存密码">
                         <input aria-label="桌面登录用户名" value={form.username} onChange={(event) => updateFormField("username", event.target.value)} placeholder="例如：DOMAIN\\user" />
                       </Field>
+                      {form.protocol === "rdp" && (
+                        <Field label="RDP 画质预设" hint="写入 .rdp 压缩与带宽参数，避免客户端按局域网满带宽发包">
+                          <Select ariaLabel="RDP 画质预设" value={form.quality || "balanced"} onValueChange={(value) => updateFormField("quality", value)} options={qualityOptions} />
+                        </Field>
+                      )}
                     </div>
                     <div className="flex justify-end gap-2">
                       <Button variant="outline" type="button" onClick={cancelConnectionForm}>取消</Button>
@@ -511,7 +559,12 @@ export function DesktopPage({
                                 <div className="flex flex-wrap items-center gap-2">
                                   <h3 className="m-0 text-sm font-semibold">{connection.name}</h3>
                                   <Badge variant="outline">{connection.protocol.toUpperCase()}</Badge>
+                                  {connection.protocol === "rdp" && (
+                                    <Badge variant="secondary">{qualityLabels[connection.quality || "balanced"] || "均衡"}</Badge>
+                                  )}
                                   {session && <Badge variant="success">会话已建立</Badge>}
+                                  {session && renderSessionTransportBadge(session)}
+                                  {session?.udp_enabled && <Badge variant="outline">TCP+UDP</Badge>}
                                 </div>
                                 <p className="m-0 mt-1 text-xs text-muted-foreground">
                                   {connection.remote} · 远端端口 {connection.remote_port}{connection.username ? ` · 用户 ${connection.username}` : ""}
@@ -549,6 +602,11 @@ export function DesktopPage({
                             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                               <span>本地地址 <code className="font-mono text-foreground">{session.local_address}</code></span>
                               <span>活动连接 {session.active_connections}</span>
+                              {(session.endpoint || session.derp_region) && (
+                                <span className="break-all">
+                                  链路 <code className="font-mono text-foreground">{session.endpoint ? `${session.endpoint}${session.derp_region ? `（DERP: ${session.derp_region}）` : ""}` : `DERP ${session.derp_region}`}</code>
+                                </span>
+                              )}
                               <span>启动于 {formatSessionTime(session.started_at)}</span>
                               <Button size="sm" variant="ghost" type="button" onClick={() => copyText(session.local_address, "本地桌面地址已复制")}>
                                 <Copy size={13} aria-hidden="true" />

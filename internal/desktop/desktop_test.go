@@ -222,3 +222,37 @@ func TestManagerCloseDoesNotHoldLockDuringForwardClose(t *testing.T) {
 		t.Fatalf("退出时底层转发关闭次数 = %d，期望 1", forward.closeCount())
 	}
 }
+
+// TestRenderRDPFileQualityPresets 验证 .rdp 生成包含防局域网误判压缩参数及三档画质预设。
+func TestRenderRDPFileQualityPresets(t *testing.T) {
+	balanced := RenderRDPFile("127.0.0.1:41000", "alice", "")
+	for _, want := range []string{
+		"full address:s:127.0.0.1:41000\r\n",
+		"username:s:alice\r\n",
+		"compression:i:1\r\n",
+		"networkautodetect:i:1\r\n",
+		"connection type:i:3\r\n",
+		"disable wallpaper:i:1\r\n",
+	} {
+		if !containsLine(balanced, want) {
+			t.Errorf("balanced .rdp 缺少 %q:\n%s", want, balanced)
+		}
+	}
+	smooth := RenderRDPFile("127.0.0.1:41000", "", QualitySmooth)
+	if !containsLine(smooth, "session bpp:i:16\r\n") || !containsLine(smooth, "connection type:i:2\r\n") {
+		t.Errorf("smooth .rdp 参数错误:\n%s", smooth)
+	}
+	high := RenderRDPFile("127.0.0.1:41000", "", QualityHigh)
+	if !containsLine(high, "session bpp:i:32\r\n") || !containsLine(high, "disable wallpaper:i:0\r\n") {
+		t.Errorf("high .rdp 参数错误:\n%s", high)
+	}
+}
+
+func containsLine(content, line string) bool {
+	for i := 0; i+len(line) <= len(content); i++ {
+		if content[i:i+len(line)] == line {
+			return true
+		}
+	}
+	return false
+}

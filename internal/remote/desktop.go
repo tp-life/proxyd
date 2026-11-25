@@ -5,11 +5,27 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 )
+
+// desktopWarmupRefreshInterval 是活动桌面会话刷新路径与 RTT 的周期。
+const desktopWarmupRefreshInterval = 15 * time.Second
+
+// TransportSnapshot 是临时桌面转发的实时隧道质量快照（直连/DERP、RTT、是否启用 UDP）。
+type TransportSnapshot struct {
+	Path       string    `json:"path"`
+	Endpoint   string    `json:"endpoint,omitempty"`
+	DERPRegion string    `json:"derp_region,omitempty"`
+	RTTMillis  int64     `json:"rtt_ms,omitempty"`
+	Warming    bool      `json:"warming"`
+	UDPEnabled bool      `json:"udp_enabled"`
+	Error      string    `json:"error,omitempty"`
+	CheckedAt  time.Time `json:"checked_at,omitempty"`
+}
 
 // TransientForward 是不写入配置文件的临时本地转发。
 //
@@ -17,59 +33,44 @@ import (
 // 客户端关闭后监听端口和 tailcat 客户端会一起释放，不会留下隐藏的长期入口。
 type TransientForward struct {
 	runner *forwardRunner
+	udp    *udpForwardRunner
 	once   sync.Once
+
+	transportMu sync.Mutex
+	transport   TransportSnapshot
 }
 
 // StartTransientForward 在随机回环端口启动一条临时 tailcat TCP 转发。
-//
-// 参数说明：
-//   - token: string，远端完整 tailcat 连接 token。
-//   - remotePort: int，远端 RDP/VNC 等服务监听端口。
-//   - clientKey: key.NodePrivate，本机稳定客户端身份；零值表示使用临时身份。
-//
-// 返回值说明：*TransientForward 和 error；成功对象可通过 Address 获取本地地址，
-// 使用结束必须调用 Close。
-//
-// 错误情况：token 非法、端口越界或本机无法绑定回环监听时返回错误；失败时不会留下
-// listener 或 tailcat 客户端资源。
 func StartTransientForward(token string, remotePort int, clientKey key.NodePrivate) (*TransientForward, error) {
+	return StartTransientForwardWithOptions(token, remotePort, clientKey, false)
+}
+
+// StartTransientForwardWithOptions 启动临时转发，可选在同回环端口同步启用 UDP 转发（RDP 8+）
+// 并异步预热 tailcat 隧道以提前完成 NAT 直连打洞。
+func StartTransientForwardWithOptions(token string, remotePort int, clientKey key.NodePrivate, enableUDP bool) (*TransientForward, error) {
 	if err := ValidateToken(token); err != nil {
 		return nil, err
 	}
 	if remotePort <= 0 || remotePort > 65535 {
 		return nil, fmt.Errorf("端口 %d 超出 1-65535", remotePort)
 	}
-	return startTransientForward("127.0.0.1:0", token, remotePort, clientKey, nil)
+	client := tailcat.NewClient(tailcat.Addr(token))
+	client.Logf = logger.Discard
+	if !clientKey.IsZero() {
+		client.Key = clientKey
+	}
+	release := func() { _ = client.Close() }
+	return startTransientForwardWithClient(token, remotePort, clientKey, client, release, enableUDP, logger.Discard)
 }
 
 // startTransientForward 使用可注入拨号器启动临时转发，供生产入口与单元测试复用。
-//
-// 参数说明：
-//   - listen: string，本地监听地址；生产固定为随机回环端口。
-//   - token: string，已校验或测试注入的远端 token。
-//   - remotePort: int，目标 TCP 端口。
-//   - clientKey: key.NodePrivate，tailcat 客户端身份。
-//   - dial: func，可选测试拨号器；nil 时使用独立 tailcat 客户端。
-//
-// 返回值说明：*TransientForward 和 error；成功时 accept loop 已经启动。
-//
-// 错误情况：本地监听失败时返回错误，runner 不会进入运行状态。
 func startTransientForward(listen, token string, remotePort int, clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) (*TransientForward, error) {
 	return startTransientForwardWithDial(listen, token, remotePort, clientKey, dial, nil)
 }
 
 // startTransientForwardWithDial 启动临时转发，并接管共享客户端的释放回调。
-//
-// 参数说明：
-//   - listen/token/remotePort/clientKey: 同 startTransientForward。
-//   - dial: 可选拨号器；非 nil 时 runner 不会再创建自己的客户端。
-//   - release: 可选共享客户端释放函数；启动失败或 runner 停止时调用一次。
-//
-// 返回值说明：*TransientForward 和 error；成功时 accept loop 已经启动。
-//
-// 错误情况：本地监听失败时先归还共享客户端引用再返回错误。
 func startTransientForwardWithDial(listen, token string, remotePort int, clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error), release func()) (*TransientForward, error) {
-	runner := newForwardRunner("desktop", listen, tailcat.ConnBlob(token), uint16(remotePort), logger.Discard, clientKey, dial)
+	runner := newForwardRunner("desktop", listen, tailcat.Addr(token), uint16(remotePort), logger.Discard, clientKey, dial)
 	runner.release = release
 	if err := runner.start(); err != nil {
 		if release != nil {
@@ -80,37 +81,129 @@ func startTransientForwardWithDial(listen, token string, remotePort int, clientK
 	return &TransientForward{runner: runner}, nil
 }
 
+// startTransientForwardWithClient 使用真实 tailcat 客户端启动临时转发：
+// 1. 若 enableUDP=true，尝试在同一回环端口号上同步绑定 UDP 转发（供 RDP 3389 UDP 使用）；
+// 2. 启动后台异步预热（DiscoPing），在用户打开桌面客户端期间提前完成 DERP 与 NAT 直连打洞。
+func startTransientForwardWithClient(token string, remotePort int, clientKey key.NodePrivate, client *tailcat.Client, release func(), enableUDP bool, logf func(string, ...any)) (*TransientForward, error) {
+	if logf == nil {
+		logf = logger.Discard
+	}
+	maxAttempts := 1
+	if enableUDP {
+		maxAttempts = 4
+	}
+	var runner *forwardRunner
+	var udpRunner *udpForwardRunner
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		r := newForwardRunner("desktop", "127.0.0.1:0", tailcat.Addr(token), uint16(remotePort), logf, clientKey, sharedClientDial(client, uint16(remotePort)))
+		r.sharedClient = client
+		if err := r.start(); err != nil {
+			lastErr = err
+			continue
+		}
+		if !enableUDP {
+			runner = r
+			break
+		}
+		u, uerr := startUDPForwardRunner(r.ln.Addr().String(), sharedClientDialUDP(client, uint16(remotePort)), logf)
+		if uerr == nil {
+			runner = r
+			udpRunner = u
+			break
+		}
+		// 仅在还有重试次数时释放 TCP 重挑端口；最后一次降级为纯 TCP，不阻断连接。
+		if attempt+1 < maxAttempts {
+			r.stop()
+			lastErr = uerr
+			continue
+		}
+		logf("[remote] 远程桌面 UDP 伴随转发监听失败（%v），自动降级为纯 TCP", uerr)
+		runner = r
+	}
+	if runner == nil {
+		if release != nil {
+			release()
+		}
+		return nil, lastErr
+	}
+	runner.release = release
+	forward := &TransientForward{
+		runner: runner,
+		udp:    udpRunner,
+		transport: TransportSnapshot{
+			Path:       PathUnknown,
+			Warming:    true,
+			UDPEnabled: udpRunner != nil,
+		},
+	}
+	go forward.warmupLoop(client)
+	return forward, nil
+}
+
+// warmupLoop 在临时桌面会话启动后立即执行一次 DiscoPing 预热 NAT 直连，并定期刷新链路质量。
+func (f *TransientForward) warmupLoop(client *tailcat.Client) {
+	probeOnce := func() {
+		ctx, cancel := context.WithTimeout(f.runner.ctx, 10*time.Second)
+		res, err := probeWithClient(ctx, client)
+		cancel()
+		if f.runner.ctx.Err() != nil {
+			return
+		}
+		f.transportMu.Lock()
+		f.transport.Warming = false
+		if err != nil {
+			f.transport.Error = err.Error()
+			if reg := client.DERPRegion(); reg != nil && f.transport.DERPRegion == "" {
+				f.transport.DERPRegion = formatDERPRegion(reg)
+			}
+		} else {
+			f.transport.Path = res.Path
+			f.transport.Endpoint = res.Endpoint
+			f.transport.DERPRegion = res.DERPRegion
+			f.transport.RTTMillis = res.RTTMillis
+			f.transport.CheckedAt = res.CheckedAt
+			f.transport.Error = ""
+		}
+		f.transportMu.Unlock()
+	}
+
+	probeOnce()
+	ticker := time.NewTicker(desktopWarmupRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-f.runner.ctx.Done():
+			return
+		case <-ticker.C:
+			probeOnce()
+		}
+	}
+}
+
+// Transport 返回当前临时桌面转发的最新隧道质量快照（直连/DERP、RTT、是否启用 UDP）。
+func (f *TransientForward) Transport() TransportSnapshot {
+	f.transportMu.Lock()
+	defer f.transportMu.Unlock()
+	return f.transport
+}
+
 // Address 返回桌面客户端应连接的本地回环地址。
-//
-// 参数说明：无。
-//
-// 返回值说明：string，格式为 127.0.0.1:<系统分配端口>。
-//
-// 错误情况：无；该对象只能由成功的 StartTransientForward 构造，因此 listener 必然存在。
 func (f *TransientForward) Address() string {
 	return f.runner.ln.Addr().String()
 }
 
 // ActiveConnections 返回当前正在通过临时转发传输的本地连接数。
-//
-// 参数说明：无。
-//
-// 返回值说明：int64；accept 已建立但仍在拨远端的连接也计入活动数。
-//
-// 错误情况：无；计数使用原子变量读取，允许桌面会话清扫器并发调用。
 func (f *TransientForward) ActiveConnections() int64 {
 	return f.runner.active.Load()
 }
 
-// Close 停止监听并释放 tailcat 客户端及活动转发连接。
-//
-// 参数说明：无。
-//
-// 返回值说明：error；当前实现的关闭动作均为尽力而为，因此始终返回 nil。
-//
-// 错误情况：重复调用是安全的，不会重复关闭 done channel 或触发 panic。
+// Close 停止监听并释放 tailcat 客户端、伴随 UDP 转发及活动连接。
 func (f *TransientForward) Close() error {
 	f.once.Do(func() {
+		if f.udp != nil {
+			f.udp.stop()
+		}
 		f.runner.stop()
 	})
 	return nil

@@ -9,6 +9,7 @@ import (
 
 	"proxyd/internal/proxy/node"
 	"proxyd/internal/proxy/pool"
+	"proxyd/internal/remote"
 )
 
 // Assignments 返回当前端口映射的只读快照（供 API 使用）。
@@ -39,7 +40,11 @@ func (a *App) SetAutoPort(port int) error {
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
+	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
+	if err == nil {
+		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	}
 	return err
 }
 
@@ -77,7 +82,11 @@ func (a *App) SetMainPort(port int) error {
 	}
 	a.mu.Lock()
 	persistErr := a.persistLocked()
+	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
+	if persistErr == nil {
+		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	}
 	if persistErr != nil {
 		return a.rollbackMainPortLocked(old, sysOn, persistErr)
 	}
@@ -137,7 +146,11 @@ func (a *App) SetPortRange(lo, hi int) error {
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
+	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
+	if err == nil {
+		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	}
 	return err
 }
 
@@ -171,7 +184,11 @@ func (a *App) SetPortMapping(enabled bool) error {
 	}
 	a.mu.Lock()
 	persistErr := a.persistLocked()
+	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
+	if persistErr == nil {
+		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	}
 	if persistErr != nil {
 		return a.rollbackPortMappingLocked(old, persistErr, true)
 	}

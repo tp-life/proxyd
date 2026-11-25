@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -185,23 +186,53 @@ func cmdDesk(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := resolveDesktopToken(options.configFile, options.remoteTarget)
-	if err != nil {
-		return err
+	var (
+		localAddress string
+		closeForward func()
+		reusedDaemon bool
+	)
+	// 未显式指定临时 --client-key 时优先复用运行中的本机 proxyd 守护进程共享客户端，
+	// 避免 CLI 与守护进程以同一 nodekey 并发连接同一远端互相覆盖 WireGuard 握手。
+	if options.clientKey == "" {
+		if apiClient, aerr := newAPIClient(options.configFile); aerr == nil {
+			var session struct {
+				ID           string `json:"id"`
+				LocalAddress string `json:"local_address"`
+				UDPEnabled   bool   `json:"udp_enabled"`
+			}
+			if derr := apiClient.do(http.MethodPost, "/api/desktop/sessions/adhoc", map[string]any{
+				"remote":      options.remoteTarget,
+				"protocol":    string(options.protocol),
+				"remote_port": options.protocol.port(),
+			}, &session); derr == nil && session.LocalAddress != "" {
+				localAddress = session.LocalAddress
+				reusedDaemon = true
+				closeForward = func() {
+					_ = apiClient.do(http.MethodDelete, "/api/desktop/sessions/"+session.ID, nil, nil)
+				}
+			}
+		}
 	}
-	clientKey, err := desktopClientKey(options)
-	if err != nil {
-		return err
+	if localAddress == "" {
+		token, err := resolveDesktopToken(options.configFile, options.remoteTarget)
+		if err != nil {
+			return err
+		}
+		clientKey, err := desktopClientKey(options)
+		if err != nil {
+			return err
+		}
+		forward, err := remote.StartTransientForwardWithOptions(token, options.protocol.port(), clientKey, options.protocol == desktopProtocolRDP)
+		if err != nil {
+			return fmt.Errorf("创建远程桌面临时转发失败: %w", err)
+		}
+		localAddress = forward.Address()
+		closeForward = func() { _ = forward.Close() }
 	}
-
-	forward, err := remote.StartTransientForward(token, options.protocol.port(), clientKey)
+	defer closeForward()
+	host, portText, err := net.SplitHostPort(localAddress)
 	if err != nil {
-		return fmt.Errorf("创建远程桌面临时转发失败: %w", err)
-	}
-	defer forward.Close()
-	host, portText, err := net.SplitHostPort(forward.Address())
-	if err != nil {
-		return fmt.Errorf("解析临时转发地址 %q 失败: %w", forward.Address(), err)
+		return fmt.Errorf("解析临时转发地址 %q 失败: %w", localAddress, err)
 	}
 	launch, err := desktopClientCommand(options.protocol, host, portText)
 	if err != nil {
@@ -213,7 +244,11 @@ func cmdDesk(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	fmt.Printf("远程桌面临时转发：%s → %s:%d（tailcat 会优先尝试 NAT 直连，失败时回退 DERP）\n", forward.Address(), options.remoteTarget, options.protocol.port())
+	modeNote := "独立临时隧道"
+	if reusedDaemon {
+		modeNote = "复用本机守护进程共享隧道"
+	}
+	fmt.Printf("远程桌面临时转发（%s）：%s → %s:%d（tailcat 会预热并优先尝试 NAT 直连，失败时回退 DERP）\n", modeNote, localAddress, options.remoteTarget, options.protocol.port())
 	fmt.Println("桌面客户端退出后将自动释放转发；也可按 Ctrl+C 主动断开。")
 	if err := launch.command.Start(); err != nil {
 		return fmt.Errorf("启动 %s 客户端失败: %w", strings.ToUpper(string(options.protocol)), err)
@@ -233,7 +268,7 @@ func cmdDesk(args []string) error {
 		// 用户明确中断时先关闭转发，确保 listener、活动连接及 tailcat 客户端立即释放。
 		// 随后终止本次启动的包装进程；部分平台会把 GUI 会话移交给既有进程，因此等待
 		// 设置上限，避免客户端不响应退出时 desk 命令自身长期挂住。
-		_ = forward.Close()
+		closeForward()
 		if launch.command.Process != nil {
 			_ = launch.command.Process.Kill()
 		}

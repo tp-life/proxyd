@@ -14,6 +14,12 @@ const (
 	DesktopProtocolRDP = "rdp"
 	// DesktopProtocolVNC 表示 Virtual Network Computing / Remote Framebuffer。
 	DesktopProtocolVNC = "vnc"
+	// DesktopQualitySmooth 表示低带宽/中继优先的流畅画质预设。
+	DesktopQualitySmooth = "smooth"
+	// DesktopQualityBalanced 表示隧道默认均衡画质预设（避免 127.0.0.1 被误判为局域网）。
+	DesktopQualityBalanced = "balanced"
+	// DesktopQualityHigh 表示直连高速环境下的原画预设。
+	DesktopQualityHigh = "high"
 	// DefaultDesktopRDPPort 是系统 RDP 服务最常见的 TCP 端口。
 	DefaultDesktopRDPPort = 3389
 	// DefaultDesktopVNCPort 是系统屏幕共享和 VNC 服务最常见的 TCP 端口。
@@ -37,6 +43,7 @@ type DesktopConnection struct {
 	Protocol   string `yaml:"protocol" json:"protocol"`
 	RemotePort int    `yaml:"remote-port" json:"remote_port"`
 	Username   string `yaml:"username,omitempty" json:"username,omitempty"`
+	Quality    string `yaml:"quality,omitempty" json:"quality,omitempty"`
 }
 
 // DesktopConfig 是「远程桌面」模块配置段。
@@ -227,6 +234,11 @@ func (d DesktopConfig) Validate() error {
 		}
 		if strings.ContainsAny(connection.Username, "\r\n") {
 			return fmt.Errorf("desktop.connections[%d]: 用户名不能包含换行", index)
+		}
+		switch strings.ToLower(strings.TrimSpace(connection.Quality)) {
+		case "", DesktopQualitySmooth, DesktopQualityBalanced, DesktopQualityHigh:
+		default:
+			return fmt.Errorf("desktop.connections[%d]: 画质预设 %q 不受支持（可选 smooth、balanced、high）", index, connection.Quality)
 		}
 	}
 	return nil

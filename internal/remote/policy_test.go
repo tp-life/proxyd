@@ -304,3 +304,88 @@ func TestDurationMillis(t *testing.T) {
 		t.Fatalf("非正 RTT 应保持 0，got %d", got)
 	}
 }
+
+// TestDynamicAllowClientAndDisconnect 验证 tailcat v0.8.0 动态 AllowClient 语义
+// 及 DisconnectClient 会立即关闭活动连接并写入审计记录。
+func TestDynamicAllowClientAndDisconnect(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	allowedKey := key.NewNode().Public()
+	tempKey := key.NewNode().Public()
+	strangerKey := key.NewNode().Public()
+
+	if !isClientAllowed(config.RemoteConfig{}, strangerKey.String(), now) {
+		t.Fatal("开放模式应允许任意客户端")
+	}
+	if isClientAllowed(config.RemoteConfig{Disabled: true}, allowedKey.String(), now) {
+		t.Fatal("模块禁用时应拒绝所有客户端")
+	}
+	if isClientAllowed(config.RemoteConfig{AllowRestricted: true}, strangerKey.String(), now) {
+		t.Fatal("受限空列表应拒绝所有客户端，无需占位公钥")
+	}
+	cfg := config.RemoteConfig{
+		AllowRestricted: true,
+		TempKey:         tempKey.String(),
+		Allow: []config.RemoteAllowEntry{{
+			Name:      "维护设备",
+			Key:       allowedKey.String(),
+			ExpiresAt: timePointer(now.Add(time.Minute)),
+		}},
+	}
+	if !isClientAllowed(cfg, allowedKey.String(), now) {
+		t.Fatal("有效白名单客户端应获准接入")
+	}
+	if isClientAllowed(cfg, allowedKey.String(), now.Add(time.Minute)) {
+		t.Fatal("已过期白名单客户端应在动态钩子层即被拒绝")
+	}
+	if !isClientAllowed(cfg, tempKey.String(), now) {
+		t.Fatal("临时身份应获准接入")
+	}
+	if isClientAllowed(cfg, strangerKey.String(), now) {
+		t.Fatal("未登记客户端应被拒绝")
+	}
+
+	manager := NewManager(t.TempDir(), nil)
+	manager.cfg = cfg
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		manager.guardConnection(22, func(conn net.Conn) {
+			close(entered)
+			_, _ = io.Copy(io.Discard, conn)
+		})(&attributedTestConn{Conn: serverConn, remoteAddr: tunnelTCPAddr(allowedKey)})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("测试连接未进入处理器")
+	}
+
+	if _, _, err := manager.DisconnectClient("nodekey:invalid"); err == nil {
+		t.Fatal("非法公钥应被拒绝")
+	}
+	_, closedCount, err := manager.DisconnectClient(allowedKey.String())
+	if err != nil {
+		t.Fatalf("DisconnectClient 失败: %v", err)
+	}
+	if closedCount != 1 {
+		t.Fatalf("关闭活动连接数 = %d, want 1", closedCount)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("DisconnectClient 应立即中断已建立的活动连接")
+	}
+	entries := manager.Audit(10)
+	foundDisconnectAudit := false
+	for _, entry := range entries {
+		if entry.Action == AuditActionClientDisconnect && entry.ClientKey == allowedKey.String() && entry.ClientName == "维护设备" {
+			foundDisconnectAudit = true
+		}
+	}
+	if !foundDisconnectAudit {
+		t.Fatalf("未记录客户端断开审计事件: %+v", entries)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"proxyd/internal/desktop"
 )
 
 // desktopClientCommand 构造 macOS 远程桌面客户端启动命令。
@@ -34,7 +36,7 @@ func desktopClientCommand(protocol desktopProtocol, host, port string) (desktopC
 			return desktopClientLaunch{}, fmt.Errorf("创建临时 RDP 配置失败: %w", err)
 		}
 		path := file.Name()
-		content := fmt.Sprintf("full address:s:%s\r\nprompt for credentials:i:1\r\n", address)
+		content := desktop.RenderRDPFile(address, "", desktop.QualityBalanced)
 		if _, err := file.WriteString(content); err != nil {
 			_ = file.Close()
 			_ = os.Remove(path)

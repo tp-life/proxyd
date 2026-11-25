@@ -23,7 +23,7 @@ func newTestToken(t *testing.T) string {
 	priv := tailcat.NewPrivateKey()
 	ci := priv.Public
 	ci.RegionID = 1
-	return string(ci.ConnBlob())
+	return string(ci.Addr())
 }
 
 func TestParseRegion(t *testing.T) {
@@ -180,7 +180,7 @@ func dialDirect(addr string) func(ctx context.Context) (net.Conn, error) {
 func TestForwardRunnerEcho(t *testing.T) {
 	echoAddr := startEchoServer(t)
 
-	r := newForwardRunner("t", "127.0.0.1:0", tailcat.ConnBlob("tcunused"), 22, nil, key.NodePrivate{}, dialDirect(echoAddr))
+	r := newForwardRunner("t", "127.0.0.1:0", tailcat.Addr("tcunused"), 22, nil, key.NodePrivate{}, dialDirect(echoAddr))
 	if err := r.start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestForwardRunnerStopReleasesResources(t *testing.T) {
 		runner := newForwardRunner(
 			"active",
 			"127.0.0.1:0",
-			tailcat.ConnBlob("tcunused"),
+			tailcat.Addr("tcunused"),
 			22,
 			nil,
 			key.NodePrivate{},
@@ -280,7 +280,7 @@ func TestForwardRunnerStopReleasesResources(t *testing.T) {
 		runner := newForwardRunner(
 			"dialing",
 			"127.0.0.1:0",
-			tailcat.ConnBlob("tcunused"),
+			tailcat.Addr("tcunused"),
 			22,
 			nil,
 			key.NodePrivate{},
@@ -422,40 +422,55 @@ func TestManagerForwardBadListen(t *testing.T) {
 
 func TestServerConfigEqual(t *testing.T) {
 	m := NewManager(t.TempDir(), nil)
-	m.cfg = config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}
-
-	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{8022, 22}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
-		t.Fatal("same ports/allow in different order should be equal")
+	m.cfg = config.RemoteConfig{
+		Region:       "302",
+		Serve:        []int{22, 8022},
+		ServeTargets: []config.RemoteServeTarget{{Port: 8080, Target: "80"}},
+		Allow:        []config.RemoteAllowEntry{{Key: "nodekey:a"}},
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
+
+	if !m.serverConfigEqual(config.RemoteConfig{
+		Region:       "302",
+		Serve:        []int{8022, 22},
+		ServeTargets: []config.RemoteServeTarget{{Port: 8080, Target: "80"}},
+		Allow:        []config.RemoteAllowEntry{{Key: "nodekey:a"}},
+	}) {
+		t.Fatal("same ports/targets in different order should be equal")
+	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22}, ServeTargets: m.cfg.ServeTargets}) {
 		t.Fatal("port removed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, ServeTargets: []config.RemoteServeTarget{{Port: 8080, Target: "81"}}}) {
+		t.Fatal("serve-target changed should not be equal")
+	}
+	if m.serverConfigEqual(config.RemoteConfig{Region: "", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets}) {
 		t.Fatal("region changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", DERPMapURL: "https://x/derp.json", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets}) {
 		t.Fatal("derpmap changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}}) {
-		t.Fatal("allow removed should not be equal")
-	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:b"}}}) {
-		t.Fatal("allow key changed should not be equal")
-	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, KeyFile: "/tmp/x.private.json"}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, KeyFile: "/tmp/x.private.json"}) {
 		t.Fatal("key-file changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, BuiltinSSH: true}) {
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, BuiltinSSH: true}) {
 		t.Fatal("builtin-ssh changed should not be equal")
 	}
-	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Key: "nodekey:a"}}, AllowRestricted: true}) {
-		t.Fatal("allow-restricted changed should not be equal")
+	if m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, Hybrid: true}) {
+		t.Fatal("hybrid changed should not be equal")
 	}
-	// TTL、别名和端口限制由每条连接上的领域授权动态读取，变化时不应重启
-	// tailcat 服务端，否则会无谓中断现有连接。
+	// tailcat v0.8.0 起白名单/临时身份/受限模式通过动态 Server.AllowClient 钩子与
+	// Server.DisconnectClient 热生效，不再重建隧道服务端，避免中断无关客户端。
 	expiresAt := time.Now().Add(time.Hour)
-	if !m.serverConfigEqual(config.RemoteConfig{Region: "302", Serve: []int{22, 8022}, Allow: []config.RemoteAllowEntry{{Name: "renamed", Key: "nodekey:a", ExpiresAt: &expiresAt, Ports: []int{22}}}}) {
-		t.Fatal("allow metadata changes should not restart the server")
+	for _, cfg := range []config.RemoteConfig{
+		{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets},
+		{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, Allow: []config.RemoteAllowEntry{{Key: "nodekey:b"}}},
+		{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, AllowRestricted: true},
+		{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, TempKey: "nodekey:temp"},
+		{Region: "302", Serve: []int{22, 8022}, ServeTargets: m.cfg.ServeTargets, Allow: []config.RemoteAllowEntry{{Name: "renamed", Key: "nodekey:a", ExpiresAt: &expiresAt, Ports: []int{22}}}},
+	} {
+		if !m.serverConfigEqual(cfg) {
+			t.Fatalf("allow/tempkey/restricted changes should hot-apply without restarting server: %+v", cfg)
+		}
 	}
 }
 

@@ -67,7 +67,7 @@ func (p *clientPool) acquire(token string, private key.NodePrivate) (*tailcat.Cl
 		existing.refs++
 		return existing.client, p.releaseFunc(poolKey, existing)
 	}
-	client := tailcat.NewClient(tailcat.ConnBlob(token))
+	client := tailcat.NewClient(tailcat.Addr(token))
 	client.Logf = logger.Logf(p.logf)
 	if !private.IsZero() {
 		client.Key = private
