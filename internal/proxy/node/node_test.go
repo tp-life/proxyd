@@ -123,3 +123,20 @@ func TestNodeCloneIsIndependent(t *testing.T) {
 		t.Fatalf("nil 节点展示行应为零值: %+v", d)
 	}
 }
+
+// TestMarkTestingPreservesPublishedDisplay 验证 MarkTesting 保留通过 PublishDisplay
+// 继承的上一轮展示状态，而不是用新节点的零值权威字段将其覆盖。
+func TestMarkTestingPreservesPublishedDisplay(t *testing.T) {
+	n := &Node{Name: "hk-1", Subscription: "s"}
+	n.PublishDisplay(Display{Alive: true, Delay: 85})
+	n.MarkTesting()
+	got := n.Display()
+	if !got.Testing || !got.Alive || got.Delay != 85 {
+		t.Fatalf("MarkTesting 破坏了已继承的展示行: %+v", got)
+	}
+	n.ClearTesting()
+	got = n.Display()
+	if got.Testing || !got.Alive || got.Delay != 85 {
+		t.Fatalf("ClearTesting 后展示行异常: %+v", got)
+	}
+}

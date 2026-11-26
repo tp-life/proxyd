@@ -426,6 +426,11 @@ func TestGenerateTUN(t *testing.T) {
 	if !ok || len(dnsHijack) != 1 || dnsHijack[0] != "0.0.0.0:53" {
 		t.Errorf("tun.dns-hijack = %#v", tunSection["dns-hijack"])
 	}
+	rules, _ := parseYAML(t, buf)["rules"].([]any)
+	wantRule := selfProcessDirectRule()
+	if len(rules) == 0 || rules[0] != wantRule {
+		t.Errorf("开启 TUN 时应注入自身进程直连规则 %q 防止劫持 tailcat，got rules=%v", wantRule, rules)
+	}
 }
 
 // TestGenerateDNSPresets 验证 fake-ip/redir-host 预设，以及手写 dns 的最高优先级。

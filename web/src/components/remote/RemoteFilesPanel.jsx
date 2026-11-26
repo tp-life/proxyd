@@ -77,12 +77,28 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   const uploadInputRef = useRef(null);
+  const listTokenRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      listTokenRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (remoteName && remotes.some((item) => item.name === remoteName)) return;
+    listTokenRef.current += 1;
     setRemoteName(remotes[0]?.name || "");
     setDirectory(".");
     setEntries([]);
+    setPrivateKey("");
+    setPrivateKeyName("");
+    setPassphrase("");
+    setError("");
+    if (uploadInputRef.current) uploadInputRef.current.value = "";
   }, [remoteName, remotes]);
 
   /**
@@ -106,9 +122,14 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
       setError("请先添加并选择远程设备");
       return false;
     }
+    const token = listTokenRef.current + 1;
+    listTokenRef.current = token;
     setLoading(true);
     setError("");
     const listing = await listRemoteFiles({ ...credentials(), path: target || "." });
+    if (!mountedRef.current || listTokenRef.current !== token) {
+      return false;
+    }
     setLoading(false);
     if (!listing) {
       setError("目录读取失败，请检查远端在线状态、内嵌 SSH/SFTP 与登录凭据");
@@ -146,12 +167,14 @@ export function RemoteFilesPanel({ apiLoopback, remotes, listRemoteFiles, upload
    * 可能的异常/错误情况：无；清空私钥可避免用户误把 A 设备凭据发送给 B 设备。
    */
   function selectRemote(name) {
+    listTokenRef.current += 1;
     setRemoteName(name);
     setDirectory(".");
     setEntries([]);
     setPrivateKey("");
     setPrivateKeyName("");
     setPassphrase("");
+    setError("");
     if (uploadInputRef.current) uploadInputRef.current.value = "";
   }
 

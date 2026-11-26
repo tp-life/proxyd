@@ -78,18 +78,6 @@ func main() {
 			err = cmdDiagnose(os.Args[2:])
 		case "modules":
 			err = cmdModules(os.Args[2:])
-		case "gateway":
-			err = cmdGateway(os.Args[2:])
-		case "gateway-helper":
-			// 内部子命令：macOS 特权 helper 服务端，由 launchd 以 root 托管。
-			err = cmdGatewayHelperServe(os.Args[2:])
-		case "tun-helper":
-			// 内部子命令：macOS TUN 特权助手服务端，由 launchd 以 root 托管。
-			err = cmdTunHelperServe(os.Args[2:])
-		case "helper":
-			// 统一特权助手：install|uninstall|status 为用户入口；
-			// 无参（root）为 launchd 托管的服务端入口（plist 见 internal/privhelper）。
-			err = cmdHelper(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -190,12 +178,9 @@ usage:
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
   proxyd diagnose [-c 配置] [设备] [--json]  分阶段诊断与脱敏报告
   proxyd config history list|export <ID>|preview <ID>|restore <ID> [--yes]
-  proxyd modules [-c 配置] list | proxy|remote|gateway on|off|retry  模块管理
-  proxyd gateway [-c 配置] status|precheck   LAN 网关状态 / 启用前检查（helper/能力位指引）
-  proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
-  proxyd helper install|uninstall|status   （macOS）统一特权助手本地安装管理（TUN 与 LAN 网关共用，需管理员授权）
+  proxyd modules [-c 配置] list | proxy|remote on|off|retry  模块管理
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
-  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 为旧写法，已并入 proxyd helper
+  proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
@@ -227,14 +212,15 @@ usage:
   proxyd update-check [on|off]          查看/开关启动版本检查
   proxyd conn list|close <id|all>       查看/关闭活动连接
   proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
-  proxyd ls [-c 配置]                   启动交互式 TUI（10 个视图页；轮询只读，写操作仅显式按键，? 帮助）
+  proxyd ls [-c 配置]                   启动交互式 TUI（9 个视图页；轮询只读，写操作仅显式按键，? 帮助）
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 远程连接（tailcat 隧道，与代理功能独立）:
   proxyd remote status|on|off|token      查看状态/联动开关服务端与 builtin-ssh/打印完整 token
-  proxyd remote serve [端口,...]         查看/设置经隧道暴露的本机端口
+  proxyd remote serve [端口,...] | map [list|add <端口:目标>|del <端口>]   暴露本机端口或自定义目标映射（异端口/局域网/Unix Socket）
+  proxyd remote hybrid [on|off]          查看/开关实验性后量子混合握手（ML-KEM-768，需 v0.8.0+ 客户端）
   proxyd remote relay [auto|区域ID|derp主机] [--map-url URL|--default-map]  查看/设置 DERP 中继
-  proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del <别名|公钥>   客户端最小权限白名单
+  proxyd remote allow list|add <公钥> [别名] [--ttl 1h] [--ports 22,8080]|del|disconnect <别名|公钥>   客户端最小权限白名单与主动断开
   proxyd remote audit [--tail N]       查看连接建立、拒绝与断开审计记录
   proxyd remote tempkey [reset]          查看/重置临时身份（保留手动白名单与客户端 nodekey）
   proxyd remote keyfile [路径|-]|export <路径>|import <路径>   设置、导出或导入服务端身份密钥
@@ -246,10 +232,11 @@ usage:
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
   proxyd remote genkey                   生成应急客户端身份（公钥录入对端白名单，私钥自行保存）
-  proxyd ssh [-p 端口] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
+  proxyd ssh [-p 端口] [-l 用户] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
   proxyd scp [--client-key 私钥] [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
   proxyd desk [-c 配置] [--client-key 私钥] <rdp|vnc> <远端名|token>   临时转发并打开本机远程桌面客户端
   proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
+  proxyd remote session-pipe <远端名> <端口>   Web 终端会话内经守护进程中转（proxyd ssh 找不到本地远端时自动使用）
 
 flags:
   -c <文件>      配置文件路径（默认 ~/.config/proxyd/config.yaml；命令行给的订阅地址会自动保存进去）
@@ -280,8 +267,9 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 	urls := fs.Args()
 
 	if _, err := os.Stat(*cfgFile); err != nil {
-		// 配置文件不存在
-		if len(urls) == 0 {
+		// 配置文件不存在：serve/start 模式允许零订阅直接启动，先落盘默认空配置，
+		// 用户随后在 Web 控制台或 CLI 中添加订阅/手动节点即可。
+		if len(urls) == 0 && !persist {
 			return nil, "", firstRunGuide(*cfgFile)
 		}
 		cfg, err := config.Quick(urls, *portRange)
@@ -291,6 +279,8 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 		if persist {
 			if err := cfg.Save(*cfgFile); err != nil {
 				log.Printf("[proxyd] 保存配置失败（不影响本次运行）: %v", err)
+			} else if len(urls) == 0 {
+				log.Printf("[proxyd] 未找到配置文件，已生成默认配置 %s；启动后可在控制台（http://%s/）添加订阅或手动节点", *cfgFile, cfg.APIListen)
 			} else {
 				log.Printf("[proxyd] 订阅已保存到 %s，下次直接 proxyd serve 即可", *cfgFile)
 			}

@@ -8,8 +8,6 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # 重复注册全局 expvar。构建、测试、静态检查和发布必须统一使用这一组标签。
 GOTAGS  := -tags "with_gvisor ts_omit_acme"
 GORELEASER ?= goreleaser
-UPX ?= upx
-UPX_COMPRESS := ./scripts/upx-compress.sh
 TAG ?=
 
 # TAG 只通过环境传给 shell，避免把用户输入直接拼进命令文本。
@@ -28,7 +26,6 @@ all: web build
 # 可通过 UPX=/绝对路径/upx 覆盖命令位置，适合 CI 或未把 UPX 加入 PATH 的环境。
 build:
 	go build $(GOTAGS) -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)
-	UPX="$(UPX)" $(UPX_COMPRESS) bin/$(BINARY) "$$(go env GOOS)"
 
 # web 从 React 源码生成供 Go embed 打包的 internal/api/dist 静态资源。
 web:
@@ -56,7 +53,6 @@ release: web
 		echo "错误：未找到 UPX，请先安装 UPX，或通过 UPX 指定路径。" >&2; \
 		exit 1; \
 	}
-	UPX="$(UPX)" $(GORELEASER) release --snapshot --clean
 
 # tag 创建并推送触发 GitHub Release 的 annotated tag。
 # 参数：TAG，必须是 vMAJOR.MINOR.PATCH，可选 SemVer prerelease/build 后缀，例如 v1.2.3-rc.1。

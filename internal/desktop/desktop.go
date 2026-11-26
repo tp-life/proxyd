@@ -58,6 +58,10 @@ type SessionSpec struct {
 	Protocol       Protocol
 	RemotePort     int
 	Username       string
+	Quality        string
+	// Isolated 为 true 时每次 Start 均创建独立会话，不按 ConnectionName 复用；
+	// 供 proxyd desk 等临时 CLI 多窗口并发连接同一远端时隔离各自生命周期。
+	Isolated bool
 }
 
 // Validate 校验创建会话所需的业务不变量。
@@ -102,6 +106,22 @@ type Forward interface {
 // 失败过程中创建的资源。
 type ForwardFactory func(spec SessionSpec) (Forward, error)
 
+// TransportStatus 描述桌面会话底层隧道的实时传输质量。
+type TransportStatus struct {
+	Path       string
+	Endpoint   string
+	DERPRegion string
+	RTTMillis  int64
+	Warming    bool
+	UDPEnabled bool
+	Error      string
+}
+
+// TransportReporter 是 Forward 的可选扩展接口，供真实隧道适配器上报实时路径与 RTT。
+type TransportReporter interface {
+	Transport() TransportStatus
+}
+
 // Session 是对 API/Web 可见的桌面会话快照。
 type Session struct {
 	ID                string
@@ -109,16 +129,20 @@ type Session struct {
 	Protocol          Protocol
 	RemotePort        int
 	Username          string
+	Quality           string
 	LocalAddress      string
 	StartedAt         time.Time
 	ActiveConnections int64
+	Transport         TransportStatus
 }
 
 // Options 控制遗忘会话的自动回收边界。
 //
 // StartupGrace 是等待桌面客户端首次连接的时间；IdleTimeout 是已有连接全部断开后的
 // 保留时间；MaxLifetime 是无论客户端状态如何都必须回收的硬上限；SweepInterval 控制
-// 单个固定清扫协程的检查频率，避免为每个会话创建定时器。
+// 单个固定清扫协程的检查频率，避免为每个会话创建定时器。零值字段使用适合桌面重连
+// 的默认值（30 分钟空闲 / 24 小时上限），过短的空闲期会让锁屏或网络切换后的重连
+// 重新建立整条隧道。
 type Options struct {
 	StartupGrace  time.Duration
 	IdleTimeout   time.Duration
@@ -179,10 +203,10 @@ func normalizeOptions(options Options) Options {
 		options.StartupGrace = 2 * time.Minute
 	}
 	if options.IdleTimeout <= 0 {
-		options.IdleTimeout = time.Minute
+		options.IdleTimeout = 30 * time.Minute
 	}
 	if options.MaxLifetime <= 0 {
-		options.MaxLifetime = 12 * time.Hour
+		options.MaxLifetime = 24 * time.Hour
 	}
 	if options.SweepInterval <= 0 {
 		options.SweepInterval = 15 * time.Second
@@ -214,10 +238,12 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 		m.mu.Unlock()
 		return Session{}, ErrManagerClosed
 	}
-	if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
-		snapshot := m.snapshotLocked(existing)
-		m.mu.Unlock()
-		return snapshot, nil
+	if !spec.Isolated {
+		if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
+			snapshot := m.snapshotLocked(existing)
+			m.mu.Unlock()
+			return snapshot, nil
+		}
 	}
 	m.mu.Unlock()
 
@@ -239,11 +265,13 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 		_ = forward.Close()
 		return Session{}, ErrManagerClosed
 	}
-	if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
-		snapshot := m.snapshotLocked(existing)
-		m.mu.Unlock()
-		_ = forward.Close()
-		return snapshot, nil
+	if !spec.Isolated {
+		if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
+			snapshot := m.snapshotLocked(existing)
+			m.mu.Unlock()
+			_ = forward.Close()
+			return snapshot, nil
+		}
 	}
 	now := m.now()
 	session := &managedSession{
@@ -253,6 +281,7 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 			Protocol:       spec.Protocol,
 			RemotePort:     spec.RemotePort,
 			Username:       strings.TrimSpace(spec.Username),
+			Quality:        NormalizeQuality(spec.Quality),
 			LocalAddress:   forward.Address(),
 			StartedAt:      now,
 		},
@@ -445,6 +474,9 @@ func (m *Manager) findByConnectionLocked(name string) *managedSession {
 func (m *Manager) snapshotLocked(session *managedSession) Session {
 	snapshot := session.Session
 	snapshot.ActiveConnections = session.forward.ActiveConnections()
+	if reporter, ok := session.forward.(TransportReporter); ok {
+		snapshot.Transport = reporter.Transport()
+	}
 	return snapshot
 }
 

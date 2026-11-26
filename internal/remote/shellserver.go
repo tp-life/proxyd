@@ -50,9 +50,13 @@ var shellHostKeyMu sync.Mutex
 //
 // 错误情况：状态目录创建、host key 读写或解析失败时返回错误，
 // 不会返回半成品处理器。
-func localShellSSHHandler(stateDir, shellUser string) (func(net.Conn), error) {
+//
+// extraEnv 为追加到 shell 会话的服务端环境变量（Web 终端会话中转凭据），可省略。
+func localShellSSHHandler(stateDir, shellUser string, extraEnv ...string) (func(net.Conn), error) {
 	// Web 终端依赖管理 API 与一次性回环令牌认证，不受远程 SSH 公钥开关影响。
-	return configuredShellSSHHandler(stateDir, false, nil, shellUser)
+	policy := newSSHAccess(newAuditLog(remoteAuditCapacity))
+	policy.update(false, nil)
+	return managedShellSSHHandlerWithOptions(stateDir, policy, shellUser, shellSSHOptions{extraEnv: extraEnv})
 }
 
 // configuredShellSSHHandler 创建保留本项目 PTY、环境与断连清理逻辑的 SSH 服务。
@@ -72,13 +76,33 @@ func configuredShellSSHHandler(stateDir string, required bool, entries []config.
 	return managedShellSSHHandler(stateDir, policy, shellUser)
 }
 
-// managedShellSSHHandler 构造共享动态授权策略的 SSH 入口。
+// shellSSHOptions 控制内嵌 SSH 处理器的可选能力。
+type shellSSHOptions struct {
+	// allowLocalForwarding 为 true 时允许 SSH 本地端口转发（ssh -L / ssh -D），
+	// 仅限服务端回环 IP 字面量（127.0.0.1 / ::1），用于 VS Code Remote-SSH 等场景。
+	allowLocalForwarding bool
+	// allowRequestedUser 为 true 时允许在 sudo 运行且未锁定 remote.shell-user 的情况下，
+	// 根据 SSH 客户端请求用户名降权到对应本机普通用户（不存在或 root 时回退 SUDO_USER）。
+	allowRequestedUser bool
+	// peerKeyLookup 从入站隧道连接解析已认证的 tailcat nodekey，用于注入 TAILCAT_PEER_KEY。
+	peerKeyLookup func(net.Addr) string
+	// extraEnv 为服务端追加到每个 shell 会话的环境变量（如 Web 终端的会话中转凭据）；
+	// 由服务端构造，不受客户端 SetEnv 白名单约束。
+	extraEnv []string
+}
+
+// managedShellSSHHandler 构造共享动态授权策略的 SSH 入口（默认不开启本地转发）。
 // 参数说明：stateDir 为 string，host key 保存目录；policy 为 *sshAccess，管理器共享策略；
 // shellUser 为 string，remote.shell-user 配置原值，逐会话解析为降权身份。
 // 返回值说明：func(net.Conn) 与 error；每条连接持有独立 SSH 协议状态。
 // 错误情况：host key 加载失败返回错误；握手超过 30 秒会关闭连接。
 // 公钥探测与签名完成分别检查策略，防止探测缓存跨越禁用或到期边界。
 func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string) (func(net.Conn), error) {
+	return managedShellSSHHandlerWithOptions(stateDir, policy, shellUser, shellSSHOptions{})
+}
+
+// managedShellSSHHandlerWithOptions 构造可配置本地回环端口转发与隧道身份注入的 SSH 入口。
+func managedShellSSHHandlerWithOptions(stateDir string, policy *sshAccess, shellUser string, opts shellSSHOptions) (func(net.Conn), error) {
 	signer, err := loadOrCreateShellHostKey(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("加载内嵌 SSH host key 失败: %w", err)
@@ -87,14 +111,39 @@ func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string
 		attempted := ""
 		// callbacks 与 HandleConn 在同一握手协程执行；会话索引的并发读写由 policy 锁保护。
 		defer func() { policy.finished(conn, attempted) }()
+		channelHandlers := map[string]ssh.ChannelHandler{
+			"session": ssh.DefaultSessionHandler,
+		}
+		var localForwardCallback ssh.LocalPortForwardingCallback
+		if opts.allowLocalForwarding {
+			channelHandlers["direct-tcpip"] = ssh.DirectTCPIPHandler
+			localForwardCallback = func(_ ssh.Context, host string, port uint32) bool {
+				// 对齐 tailcat v0.8.0 安全边界：仅允许本机回环 IP 字面量（不经 DNS，
+				// 不接受 localhost 主机名或非回环地址），远程转发（ssh -R）保持关闭。
+				return port > 0 && port <= 65535 && net.ParseIP(host).IsLoopback()
+			}
+		}
+		requestedUserFor := func(sess ssh.Session) string {
+			if opts.allowRequestedUser {
+				return sess.User()
+			}
+			return ""
+		}
 		srv := &ssh.Server{
-			Handler:          func(sess ssh.Session) { shellSessionHandler(sess, shellUser) },
-			HandshakeTimeout: 30 * time.Second,
-			ChannelHandlers:  map[string]ssh.ChannelHandler{"session": ssh.DefaultSessionHandler},
-			RequestHandlers:  map[string]ssh.RequestHandler{},
+			Handler: func(sess ssh.Session) {
+				peerKey := ""
+				if opts.peerKeyLookup != nil {
+					peerKey = opts.peerKeyLookup(sess.RemoteAddr())
+				}
+				shellSessionHandlerWithPeerKey(sess, shellUser, requestedUserFor(sess), peerKey, opts.extraEnv...)
+			},
+			HandshakeTimeout:            30 * time.Second,
+			ChannelHandlers:             channelHandlers,
+			RequestHandlers:             map[string]ssh.RequestHandler{},
+			LocalPortForwardingCallback: localForwardCallback,
 			SubsystemHandlers: map[string]ssh.SubsystemHandler{
-				"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser) },
-				"sftp":               func(sess ssh.Session) { shellSFTPHandler(sess, shellUser) },
+				"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser, requestedUserFor(sess)) },
+				"sftp":               func(sess ssh.Session) { shellSFTPHandler(sess, shellUser, requestedUserFor(sess)) },
 			},
 		}
 		srv.PublicKeyHandler = func(_ ssh.Context, public ssh.PublicKey) error {
@@ -127,8 +176,8 @@ func managedShellSSHHandler(stateDir string, policy *sshAccess, shellUser string
 // 错误情况：用户解析、SFTP 初始化或协议处理失败时写入 stderr 并返回退出码 1。
 // 当会话无需降权时可在当前进程安全运行；需要从 root 切换到 shell-user 时必须启动
 // 独立子进程，避免并发 goroutine 中修改整个 Go 进程的有效 UID。
-func shellSFTPHandler(sess ssh.Session, shellUser string) {
-	su, err := resolveSessionUser(shellUser)
+func shellSFTPHandler(sess ssh.Session, shellUser, requestedUser string) {
+	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
 		_ = sess.Exit(1)
@@ -278,13 +327,24 @@ func loadOrCreateShellHostKey(stateDir string) (gossh.Signer, error) {
 //
 // 错误情况：无法解析会话用户（含 root 未配置 shell-user）时向会话写错误并以退出码 1 结束。
 func shellSessionHandler(sess ssh.Session, shellUser string) {
-	su, err := resolveSessionUser(shellUser)
+	shellSessionHandlerWithPeerKey(sess, shellUser, "", "")
+}
+
+// shellSessionHandlerWithPeerKey 在解析会话用户后启动 shell，并在已知隧道对端身份时注入 TAILCAT_PEER_KEY；
+// extraEnv 为服务端追加的环境变量。
+func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, requestedUser, peerKey string, extraEnv ...string) {
+	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
 		sess.Exit(1)
 		return
 	}
-	runShellSession(sess, su)
+	cmd := newShellSessionCommand(su, sess.RawCommand())
+	if peerKey != "" {
+		cmd.Env = append(cmd.Env, "TAILCAT_PEER_KEY="+peerKey)
+	}
+	cmd.Env = append(cmd.Env, extraEnv...)
+	runShellSessionCommand(sess, cmd)
 }
 
 // runShellSession 为已解析的会话用户启动 SSH 会话，统一内嵌 SSH 与 Web 终端的执行路径。

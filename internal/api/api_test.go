@@ -1714,3 +1714,60 @@ func TestLANShareAPI(t *testing.T) {
 		t.Errorf("关闭后应返回 enabled=false listen=127.0.0.1: %+v", state)
 	}
 }
+
+// TestGuardWriteRequestsBlocksCSRFAndLimitsBody 验证跨站 Origin、Sec-Fetch-Site、
+// text/plain 简单请求与超大请求体均被全局写保护中间件拦截。
+func TestGuardWriteRequestsBlocksCSRFAndLimitsBody(t *testing.T) {
+	srv := &Server{}
+	called := 0
+	handler := srv.guardWriteRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called++
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// 1) Sec-Fetch-Site: cross-site → 403
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/remote", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site status = %d, want 403", rec.Code)
+	}
+
+	// 2) 跨源 Origin → 403
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/remote", strings.NewReader(`{"enabled":true}`))
+	req.Host = "127.0.0.1:19091"
+	req.Header.Set("Origin", "https://evil.example")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want 403", rec.Code)
+	}
+
+	// 3) text/plain 简单 POST → 415
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/remote", strings.NewReader(`{"enabled":true}`))
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain status = %d, want 415", rec.Code)
+	}
+
+	// 4) 同源 application/json POST → 200
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/remote", strings.NewReader(`{"enabled":true}`))
+	req.Host = "127.0.0.1:19091"
+	req.Header.Set("Origin", "http://127.0.0.1:19091")
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || called != 1 {
+		t.Fatalf("same-origin status = %d called = %d, want 200/1", rec.Code, called)
+	}
+
+	// 5) hashNodeKey 不泄露原始凭据
+	rawKey := "vless|example.com|443|super-secret-uuid-1234"
+	hashed := hashNodeKey(rawKey)
+	if strings.Contains(hashed, "super-secret-uuid") || !strings.HasPrefix(hashed, "node:") {
+		t.Fatalf("hashNodeKey(%q) = %q, 应返回不可逆摘要", rawKey, hashed)
+	}
+}

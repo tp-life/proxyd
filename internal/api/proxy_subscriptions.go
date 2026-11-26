@@ -79,8 +79,7 @@ func (s *Server) handleAddSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, sub)
+	writeJSONStatus(w, http.StatusCreated, sub)
 }
 
 // handleUpdateSub 同步编辑订阅名称、URL、类型、启用状态和订阅级端口映射开关。
@@ -199,9 +198,7 @@ func (s *Server) handleCreateSubscriptionDraft(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, draft)
+	writeJSONStatus(w, http.StatusCreated, draft)
 }
 
 // handleApplySubscriptionDraft 明确确认并应用指定订阅草稿。

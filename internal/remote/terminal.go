@@ -74,6 +74,7 @@ type TerminalSession struct {
 	resizeMu     sync.Mutex
 	pendingSize  TerminalSize
 	hasPending   bool
+	onClose      func() // 撤销会话中转凭据；Close 时调用一次
 }
 
 // terminalReadyWriter 在第一段 shell 输出进入本地输出管道前发布就绪信号。
@@ -123,7 +124,19 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 		return nil, ErrWebTerminalDisabled
 	}
 
-	handler, err := localShellSSHHandler(m.stateDir, cfg.ShellUser)
+	// 每个终端会话一份中转凭据：会话内 `proxyd ssh <远端名>` 借此请求守护进程代拨，
+	// 终端关闭或任一初始化失败都会撤销（revoke 幂等）。
+	relayEnv, revokeRelay, err := m.issueSessionGrant()
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			revokeRelay()
+		}
+	}()
+	handler, err := localShellSSHHandler(m.stateDir, cfg.ShellUser, relayEnv...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +224,9 @@ func (m *Manager) OpenWebTerminal(ctx context.Context, size TerminalSize) (*Term
 		done:         make(chan struct{}),
 		outputReady:  outputReady,
 		resizeReady:  make(chan struct{}),
+		onClose:      revokeRelay,
 	}
+	opened = true
 	go terminal.wait()
 	go terminal.unlockResizeWhenReady()
 	go func() {
@@ -403,6 +418,9 @@ func (s *TerminalSession) Close() error {
 		_ = s.sshClient.Close()
 		_ = s.transport.Close()
 		_ = s.outputWriter.Close()
+		if s.onClose != nil {
+			s.onClose()
+		}
 		close(s.done)
 	})
 	return nil

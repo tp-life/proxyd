@@ -1,6 +1,6 @@
 package remote
 
-// 本文件验证公钥导入边界，以及 tailcat v0.6 升级前后的持久身份兼容性。
+// 本文件验证公钥导入边界，以及 tailcat v0.6 起（含 v0.7.0）持久身份的兼容性。
 
 import (
 	"crypto/ed25519"
@@ -71,14 +71,14 @@ func TestTailcatIdentityPSKPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.Public.PresharedKey.IsZero() {
-		t.Fatal("v0.6 新身份应持久化 PSK")
+		t.Fatal("tailcat v0.6 起新身份应持久化 PSK")
 	}
 	second, err := loadOrCreateTailcatKey(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.Public.RegionID, second.Public.RegionID = 1, 1
-	if first.Public.ConnBlob() != second.Public.ConnBlob() || !first.Private.Equal(second.Private) {
+	if first.Public.Addr() != second.Public.Addr() || !first.Private.Equal(second.Private) {
 		t.Fatal("新身份在重新加载后发生变化")
 	}
 	// 旧文件缺少 PSK，保持字节与身份不变，不能让升级成为隐式密钥轮换。
@@ -91,7 +91,7 @@ func TestTailcatIdentityPSKPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacy, err := loadOrCreateTailcatKey(path)
-	if err != nil || !legacy.Public.PresharedKey.IsZero() || legacy.Public.ConnBlob() != first.Public.ConnBlob() {
+	if err != nil || !legacy.Public.PresharedKey.IsZero() || legacy.Public.Addr() != first.Public.Addr() {
 		t.Fatalf("旧身份未保持兼容：%v", err)
 	}
 	actual, err := os.ReadFile(path)

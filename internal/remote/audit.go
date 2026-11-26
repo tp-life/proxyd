@@ -19,6 +19,8 @@ const (
 	AuditActionRejected = "rejected"
 	// AuditActionDisconnected 表示一个已建立连接已经结束。
 	AuditActionDisconnected = "disconnected"
+	// AuditActionClientDisconnect 表示管理员主动请求断开一个隧道客户端。
+	AuditActionClientDisconnect = "client_disconnect_requested"
 )
 
 // AuditEntry 描述一条可追溯的远程连接安全事件。

@@ -44,8 +44,7 @@ func (s *Server) handleSetupTailscale(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, result)
+	writeJSONStatus(w, http.StatusCreated, result)
 }
 
 // handleTerminateTailscaleSetup 终止一条失败、启动中或等待审批的 Tailscale 接入，

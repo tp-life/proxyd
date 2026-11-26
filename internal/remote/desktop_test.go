@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"context"
 	"io"
 	"net"
 	"testing"
@@ -105,4 +106,49 @@ func TestTransientForwardCloseReleasesActiveConnections(t *testing.T) {
 	if active := forward.ActiveConnections(); active != 0 {
 		t.Fatalf("临时转发关闭后活跃连接数 = %d，期望 0", active)
 	}
+}
+
+// TestUDPForwardRunnerEcho 验证客户端 UDP 转发器能双向保留数据报边界并在 stop 后释放资源。
+func TestUDPForwardRunnerEcho(t *testing.T) {
+	echoLn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("监听 UDP echo 失败: %v", err)
+	}
+	defer echoLn.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := echoLn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = echoLn.WriteToUDP(buf[:n], addr)
+		}
+	}()
+
+	runner, err := startUDPForwardRunner("127.0.0.1:0", func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "udp", echoLn.LocalAddr().String())
+	}, nil)
+	if err != nil {
+		t.Fatalf("启动 UDP 转发器失败: %v", err)
+	}
+	defer runner.stop()
+
+	client, err := net.Dial("udp4", runner.localConn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("连接本地 UDP 转发失败: %v", err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Write([]byte("rdp-udp-frame")); err != nil {
+		t.Fatalf("写入 UDP 数据报失败: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := client.Read(buf)
+	if err != nil || string(buf[:n]) != "rdp-udp-frame" {
+		t.Fatalf("UDP 回显不匹配: %q err=%v", string(buf[:n]), err)
+	}
+	runner.stop()
+	runner.stop()
 }

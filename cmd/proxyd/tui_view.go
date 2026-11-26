@@ -309,8 +309,6 @@ func (m tuiModel) footerHints(width int) string {
 		row = "x 关闭 X 全关  "
 	case tuiPageRemote:
 		row = "space 启停转发  "
-	case tuiPageGateway:
-		row = "e 开关网关  "
 	case tuiPageDesktop:
 		row = "x 关闭会话  "
 	}
@@ -350,8 +348,6 @@ func (m tuiModel) renderCurrentPage(width int) (string, int) {
 		return m.renderConnectionsPage(width)
 	case tuiPageRemote:
 		return m.renderRemotePage(width)
-	case tuiPageGateway:
-		return m.renderGatewayPage(width), -1
 	case tuiPageDesktop:
 		return m.renderDesktopPage(width)
 	case tuiPageLogs:
@@ -980,62 +976,6 @@ func (m tuiModel) renderRemotePage(width int) (string, int) {
 	return prefix + forwardPanel + "\n" + auditPanel, tuiTableCursorLine(prefix, highlight)
 }
 
-// renderGatewayPage 渲染 LAN 网关的运行状态与登记设备表。
-//
-// 参数说明：
-//   - width: int，页面可用宽度。
-//
-// 返回值说明：string，状态 facts 与设备表；本页为纯滚动页，光标行恒为 -1。
-//
-// 错误情况：无；状态未加载或平台不支持时显示 precheck 风格的说明面板。
-func (m tuiModel) renderGatewayPage(width int) string {
-	gateway := m.gateway
-	if gateway == nil {
-		return renderTUIPanel(width, "LAN 网关", "状态未加载", "网关状态暂不可用，等待下一次快照刷新。")
-	}
-	if !gateway.Supported {
-		return renderTUIPanel(width, "LAN 网关", "当前平台不支持",
-			fmt.Sprintf("平台 %s 不支持 LAN 网关旁路由（仅 macOS / Linux）。\n网关页级开关键（e）在此平台上不可用。", gateway.Platform))
-	}
-	dnsListen := tuiOnOff(gateway.DNSRedirect)
-	if gateway.DNSRedirect && gateway.DNSListenPort > 0 {
-		dnsListen += " · 端口 " + strconv.Itoa(gateway.DNSListenPort)
-	}
-	facts := []tuiFact{
-		{Label: "平台", Value: gateway.Platform},
-		{Label: "模块开关", Value: tuiOnOff(gateway.Enabled)},
-		{Label: "相位", Value: tuiGatewayPhase(*gateway)},
-		{Label: "内核转发", Value: tuiOnOff(gateway.Forwarding)},
-		{Label: "规则应用", Value: tuiOnOff(gateway.Applied)},
-		{Label: "执行层", Value: defaultTUIText(gateway.Runner, "—")},
-		{Label: "redir 端口", Value: tuiPortOrOff(gateway.RedirPort)},
-		{Label: "tproxy 端口", Value: tuiPortOrOff(gateway.TProxyPort)},
-		{Label: "DNS 劫持", Value: dnsListen},
-	}
-	if gateway.Error != "" {
-		facts = append(facts, tuiFact{Label: "相位错误", Value: gateway.Error})
-	}
-	if gateway.Err != "" {
-		facts = append(facts, tuiFact{Label: "执行层错误", Value: gateway.Err})
-	}
-	statusPanel := renderTUIPanel(width, "网关状态", "LAN 旁路由 · e 开关网关", renderTUIFacts(tuiPanelBodyWidth(width), facts))
-
-	deviceRows := make([][]string, 0, len(gateway.Devices))
-	for _, device := range gateway.Devices {
-		deviceRows = append(deviceRows, []string{
-			device.Name, device.IP, defaultTUIText(device.MAC, "—"), defaultTUIText(device.Policy, "proxy"),
-		})
-	}
-	deviceColumns := []tuiColumn{
-		{Title: "名称", Width: 20},
-		{Title: "IP", Width: 18},
-		{Title: "MAC", Width: 20},
-		{Title: "策略", Width: 0},
-	}
-	devicePanel := renderTUIPanel(width, "登记设备", fmt.Sprintf("%d 台设备", len(deviceRows)), renderTUITable(deviceColumns, deviceRows, tuiPanelBodyWidth(width)))
-	return statusPanel + "\n" + devicePanel
-}
-
 // renderDesktopPage 渲染远程桌面的服务监听、连接档案与活动会话。
 //
 // 参数说明：
@@ -1155,11 +1095,11 @@ func (m tuiModel) renderLogsPage(width int) string {
 func (m tuiModel) renderHelp(width int) string {
 	body := strings.Join([]string{
 		"导航",
-		"  1–9, 0        直接打开对应视图（0 = 日志）",
+		"  1–9           直接打开对应视图（9 = 日志）",
 		"  h / l         上一个 / 下一个视图（Tab 同 l）",
 		"",
 		"光标与滚动",
-		"  j / k         可选中页移动光标；入口/规则/网关/日志页滚动",
+		"  j / k         可选中页移动光标；入口/规则/日志页滚动",
 		"  PgDn / PgUp   半屏移动 / 滚动",
 		"  g / G         首行 / 尾行（纯滚动页为页首 / 页尾）",
 		"",
@@ -1177,7 +1117,6 @@ func (m tuiModel) renderHelp(width int) string {
 		"  订阅  enter 刷新该订阅 · e / space 启停",
 		"  连接  x 关闭选中连接 · X 关闭全部（需确认）",
 		"  远程  space 启停选中转发",
-		"  网关  e 开关网关（停用需确认）",
 		"  桌面  x 关闭选中会话（需确认）",
 		"",
 		"确认",
@@ -1939,22 +1878,6 @@ func tuiAutostartState(overview *api.Overview) string {
 	default:
 		return "开启"
 	}
-}
-
-// tuiGatewayPhase 组合网关模块相位与运行标记。
-//
-// 参数说明：
-//   - gateway: app.GatewayOverview，网关完整状态视图。
-//
-// 返回值说明：string，如“running · 运行中”；相位为空时返回破折号。
-//
-// 错误情况：无。
-func tuiGatewayPhase(gateway app.GatewayOverview) string {
-	phase := defaultTUIText(gateway.Phase, "—")
-	if gateway.Running {
-		phase += " · 运行中"
-	}
-	return phase
 }
 
 // formatTUIUptime 把系统运行秒数压缩为中文时长。

@@ -13,8 +13,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { requestJSON } from "@/lib/api";
 
-// 桌面页可见时的刷新间隔；它用于更新临时会话连接数和本机服务监听状态。
+// 桌面页可见时的刷新间隔；无活动会话时 60 秒轮询，有活动会话时 5 秒刷新实时路径/RTT。
 const DESKTOP_REFRESH_INTERVAL_MS = 60_000;
+const DESKTOP_ACTIVE_SESSION_REFRESH_MS = 5_000;
 
 /**
  * launchDesktopClient 把后端生成的安全启动目标交给浏览器处理。
@@ -117,18 +118,29 @@ export function useDesktopFeed(activeView, requestConfirmation, showToast) {
     }
   }, []);
 
+  const hasActiveSessions = Boolean(status?.sessions?.length);
+
   useEffect(() => {
     if (activeView !== "desktop") {
       requestControllerRef.current?.abort();
       return undefined;
     }
     loadDesktop();
-    const timer = window.setInterval(() => loadDesktop(true), DESKTOP_REFRESH_INTERVAL_MS);
     return () => {
-      window.clearInterval(timer);
       requestControllerRef.current?.abort();
     };
   }, [activeView, loadDesktop]);
+
+  useEffect(() => {
+    if (activeView !== "desktop") {
+      return undefined;
+    }
+    const interval = hasActiveSessions ? DESKTOP_ACTIVE_SESSION_REFRESH_MS : DESKTOP_REFRESH_INTERVAL_MS;
+    const timer = window.setInterval(() => loadDesktop(true), interval);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeView, hasActiveSessions, loadDesktop]);
 
   /**
    * runMutation 串行呈现一个桌面写操作并采用服务端完整快照更新页面。

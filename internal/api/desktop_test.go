@@ -31,6 +31,9 @@ func TestDesktopAPIConnectionCRUD(t *testing.T) {
 	if status["remote_enabled"] != false || status["api_loopback"] != true {
 		t.Fatalf("桌面前置状态错误: %v", status)
 	}
+	if status["session_idle_timeout"] != "30m0s" || status["session_max_lifetime"] != "24h0m0s" {
+		t.Fatalf("桌面会话回收边界未暴露: %v", status)
+	}
 
 	connection := map[string]any{
 		"name": "办公室 Windows", "remote": "office", "protocol": "rdp", "remote_port": 0, "username": `DOMAIN\user`,
@@ -92,5 +95,45 @@ func TestDesktopSessionResponseLaunchTargets(t *testing.T) {
 	vnc := desktopSessionToResponse(base)
 	if vnc.LaunchKind != "uri" || vnc.LaunchURL != "vnc://127.0.0.1:41000" {
 		t.Fatalf("VNC 启动目标错误: %+v", vnc)
+	}
+}
+
+// TestDesktopQualityAndAdhocSession 验证 RDP 画质预设持久化及 CLI 复用守护进程临时会话端点。
+func TestDesktopQualityAndAdhocSession(t *testing.T) {
+	_, address := newRemoteTestServer(t)
+	base := "http://" + address
+
+	token := newRemoteTestToken(t)
+	code, _ := remoteAPIReq(t, http.MethodPost, base+"/api/remote/remotes", map[string]string{"name": "win-pc", "token": token})
+	if code != http.StatusCreated {
+		t.Fatalf("添加远端失败: %d", code)
+	}
+	code, status := remoteAPIReq(t, http.MethodPost, base+"/api/desktop/connections", map[string]any{
+		"name": "办公机", "remote": "win-pc", "protocol": "rdp", "remote_port": 3389, "quality": "smooth",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("保存带画质预设的连接失败: code=%d status=%v", code, status)
+	}
+	conns := status["connections"].([]any)
+	if conns[0].(map[string]any)["quality"] != "smooth" {
+		t.Fatalf("画质预设未保存: %v", conns[0])
+	}
+	code, _ = remoteAPIReq(t, http.MethodPost, base+"/api/desktop/connections", map[string]any{
+		"name": "非法画质", "remote": "win-pc", "protocol": "rdp", "remote_port": 3389, "quality": "ultra",
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法画质预设应返回 400，got %d", code)
+	}
+
+	code, session := remoteAPIReq(t, http.MethodPost, base+"/api/desktop/sessions/adhoc", map[string]any{
+		"remote": "win-pc", "protocol": "rdp", "remote_port": 3389,
+	})
+	if code != http.StatusOK || session["local_address"] == "" || session["udp_enabled"] != true {
+		t.Fatalf("POST /api/desktop/sessions/adhoc 失败: code=%d session=%v", code, session)
+	}
+	id, _ := session["id"].(string)
+	code, _ = remoteAPIReq(t, http.MethodDelete, base+"/api/desktop/sessions/"+id, nil)
+	if code != http.StatusNoContent {
+		t.Fatalf("关闭 adhoc 会话失败: %d", code)
 	}
 }

@@ -27,7 +27,7 @@
 - 配置备份与恢复：Web 设置页默认导出打码 YAML，也可显式导出含凭据的完整备份；导入通过完整校验并原子落盘，重启后生效
 - 新版本提示：启动后异步检查官方 GitHub Releases，概览页仅在发现更新时提示；可用 `check-updates: false` 或设置页开关关闭
 - 完整 CLI 管理命令（`mode/subs/nodes/rules/rule-urls/groups/logs/tun/port-range/auto-port/main-*/dns-preset/update-check/conn/traffic/config/refresh/test`），作为本地 API 客户端操作运行中的实例
-- 现代化交互式 TUI：`proxyd ls` 复用 Web 控制台的本地 API，覆盖概览、节点、订阅、入口、规则、连接、网关、远程隧道、远程桌面与日志共 10 个视图页；快照轮询只读，模式切换/启停/测速/关闭连接等写操作仅由显式按键触发（危险操作需 y/n 确认），来源地址和凭据仅显示安全摘要
+- 现代化交互式 TUI：`proxyd ls` 复用 Web 控制台的本地 API，覆盖概览、节点、订阅、入口、规则、连接、远程隧道、远程桌面与日志共 9 个视图页；快照轮询只读，模式切换/启停/测速/关闭连接等写操作仅由显式按键触发（危险操作需 y/n 确认），来源地址和凭据仅显示安全摘要
 - 远程连接（周边功能，与代理独立）：内嵌 [tailcat](https://github.com/tailscale/tailcat) 隧道（WireGuard 端到端加密 + DERP 中继，无需 Tailscale 账号/客户端），支持默认或自定义 DERP；`proxyd ssh <远端>` 一键连接，`proxyd scp` 或 Web SFTP 面板直接传文件，并支持本地常驻转发（listen 可留空自动分配端口），详见 [手册](docs/manual.md#十远程连接tailcat-隧道)
 - 独立远程桌面管理：Web「远程桌面」页分别提供服务端 RDP/VNC 监听检测与隧道开放，以及客户端连接档案、临时会话和系统客户端唤起；连接档案不保存密码或 token 副本
 - REST API 与 Web 控制台：

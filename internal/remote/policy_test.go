@@ -241,6 +241,50 @@ func TestPeerObservations(t *testing.T) {
 	}
 }
 
+// TestPeerObservationsUnlistedPeer 验证未登记公钥被保留为匿名条目，
+// 同时跳过状态中的 nil 值：tailcat v0.7.0 起 Peer 不再是空集合，
+// 开放模式下陌生客户端必须在列表里可见，Web 层自行按白名单过滤展示。
+//
+// 参数说明：
+//   - t: *testing.T，Go 测试上下文。
+//
+// 返回值说明：无；断言失败时由 testing 标记用例失败。
+//
+// 错误情况：不调用 tailcat 网络；失败表示匿名条目被误删或被赋予别名。
+func TestPeerObservationsUnlistedPeer(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	unlistedKey := key.NewNode().Public()
+	offlineKey := key.NewNode().Public()
+	nilKey := key.NewNode().Public()
+	status := &ipnstate.Status{Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+		unlistedKey: {LastHandshake: now.Add(-30 * time.Second), RxBytes: 7},
+		offlineKey:  {LastHandshake: now.Add(-time.Hour)},
+		nilKey:      nil,
+	}}
+
+	observations := peerObservations(status, nil, "", nil, now)
+	if len(observations) != 2 {
+		t.Fatalf("应保留 2 个非 nil 客户端（未登记公钥不删除，nil 跳过），got %d: %+v", len(observations), observations)
+	}
+	byKey := make(map[string]PeerObservation, len(observations))
+	for _, observation := range observations {
+		byKey[observation.Key] = observation
+		if observation.Name != "" {
+			t.Fatalf("未登记公钥不应有别名，got %q", observation.Name)
+		}
+		if observation.Path != PathUnknown {
+			t.Fatalf("无路径信息时应为 unknown，got %q", observation.Path)
+		}
+	}
+	unlisted := byKey[unlistedKey.String()]
+	if !unlisted.Online || unlisted.RxBytes != 7 {
+		t.Fatalf("近期握手的未登记客户端应近似在线并保留流量，got %+v", unlisted)
+	}
+	if offline := byKey[offlineKey.String()]; offline.Online {
+		t.Fatalf("握手过旧的客户端应标为离线，got %+v", offline)
+	}
+}
+
 // TestDurationMillis 验证 RTT 毫秒转换不会把成功的亚毫秒探测展示成零。
 //
 // 参数说明：
@@ -258,5 +302,90 @@ func TestDurationMillis(t *testing.T) {
 	}
 	if got := durationMillis(0); got != 0 {
 		t.Fatalf("非正 RTT 应保持 0，got %d", got)
+	}
+}
+
+// TestDynamicAllowClientAndDisconnect 验证 tailcat v0.8.0 动态 AllowClient 语义
+// 及 DisconnectClient 会立即关闭活动连接并写入审计记录。
+func TestDynamicAllowClientAndDisconnect(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	allowedKey := key.NewNode().Public()
+	tempKey := key.NewNode().Public()
+	strangerKey := key.NewNode().Public()
+
+	if !isClientAllowed(config.RemoteConfig{}, strangerKey.String(), now) {
+		t.Fatal("开放模式应允许任意客户端")
+	}
+	if isClientAllowed(config.RemoteConfig{Disabled: true}, allowedKey.String(), now) {
+		t.Fatal("模块禁用时应拒绝所有客户端")
+	}
+	if isClientAllowed(config.RemoteConfig{AllowRestricted: true}, strangerKey.String(), now) {
+		t.Fatal("受限空列表应拒绝所有客户端，无需占位公钥")
+	}
+	cfg := config.RemoteConfig{
+		AllowRestricted: true,
+		TempKey:         tempKey.String(),
+		Allow: []config.RemoteAllowEntry{{
+			Name:      "维护设备",
+			Key:       allowedKey.String(),
+			ExpiresAt: timePointer(now.Add(time.Hour)),
+		}},
+	}
+	if !isClientAllowed(cfg, allowedKey.String(), now) {
+		t.Fatal("有效白名单客户端应获准接入")
+	}
+	if isClientAllowed(cfg, allowedKey.String(), now.Add(time.Hour)) {
+		t.Fatal("已过期白名单客户端应在动态钩子层即被拒绝")
+	}
+	if !isClientAllowed(cfg, tempKey.String(), now) {
+		t.Fatal("临时身份应获准接入")
+	}
+	if isClientAllowed(cfg, strangerKey.String(), now) {
+		t.Fatal("未登记客户端应被拒绝")
+	}
+
+	manager := NewManager(t.TempDir(), nil)
+	manager.cfg = cfg
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		manager.guardConnection(22, func(conn net.Conn) {
+			close(entered)
+			_, _ = io.Copy(io.Discard, conn)
+		})(&attributedTestConn{Conn: serverConn, remoteAddr: tunnelTCPAddr(allowedKey)})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("测试连接未进入处理器")
+	}
+
+	if _, _, err := manager.DisconnectClient("nodekey:invalid"); err == nil {
+		t.Fatal("非法公钥应被拒绝")
+	}
+	_, closedCount, err := manager.DisconnectClient(allowedKey.String())
+	if err != nil {
+		t.Fatalf("DisconnectClient 失败: %v", err)
+	}
+	if closedCount != 1 {
+		t.Fatalf("关闭活动连接数 = %d, want 1", closedCount)
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("DisconnectClient 应立即中断已建立的活动连接")
+	}
+	entries := manager.Audit(10)
+	foundDisconnectAudit := false
+	for _, entry := range entries {
+		if entry.Action == AuditActionClientDisconnect && entry.ClientKey == allowedKey.String() && entry.ClientName == "维护设备" {
+			foundDisconnectAudit = true
+		}
+	}
+	if !foundDisconnectAudit {
+		t.Fatalf("未记录客户端断开审计事件: %+v", entries)
 	}
 }

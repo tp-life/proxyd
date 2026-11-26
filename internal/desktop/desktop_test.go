@@ -222,3 +222,71 @@ func TestManagerCloseDoesNotHoldLockDuringForwardClose(t *testing.T) {
 		t.Fatalf("退出时底层转发关闭次数 = %d，期望 1", forward.closeCount())
 	}
 }
+
+// TestRenderRDPFileQualityPresets 验证 .rdp 生成包含防局域网误判压缩参数及三档画质预设。
+func TestRenderRDPFileQualityPresets(t *testing.T) {
+	balanced := RenderRDPFile("127.0.0.1:41000", "alice", "")
+	for _, want := range []string{
+		"full address:s:127.0.0.1:41000\r\n",
+		"username:s:alice\r\n",
+		"compression:i:1\r\n",
+		"networkautodetect:i:1\r\n",
+		"connection type:i:3\r\n",
+		"disable wallpaper:i:1\r\n",
+	} {
+		if !containsLine(balanced, want) {
+			t.Errorf("balanced .rdp 缺少 %q:\n%s", want, balanced)
+		}
+	}
+	smooth := RenderRDPFile("127.0.0.1:41000", "", QualitySmooth)
+	if !containsLine(smooth, "session bpp:i:16\r\n") || !containsLine(smooth, "connection type:i:2\r\n") {
+		t.Errorf("smooth .rdp 参数错误:\n%s", smooth)
+	}
+	high := RenderRDPFile("127.0.0.1:41000", "", QualityHigh)
+	if !containsLine(high, "session bpp:i:32\r\n") || !containsLine(high, "disable wallpaper:i:0\r\n") {
+		t.Errorf("high .rdp 参数错误:\n%s", high)
+	}
+}
+
+func containsLine(content, line string) bool {
+	for i := 0; i+len(line) <= len(content); i++ {
+		if content[i:i+len(line)] == line {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIsolatedSessionsDoNotCollide 验证 Isolated=true 的临时会话（如多窗口 proxyd desk）
+// 即使 ConnectionName 相同也会分配独立会话 ID，停止其中一个不会影响另一个。
+func TestIsolatedSessionsDoNotCollide(t *testing.T) {
+	manager := NewManager(func(spec SessionSpec) (Forward, error) {
+		return &fakeForward{}, nil
+	}, Options{})
+	defer manager.Close()
+
+	spec := SessionSpec{
+		ConnectionName: "cli:rdp:office:3389",
+		Remote:         "office",
+		Protocol:       ProtocolRDP,
+		RemotePort:     3389,
+		Isolated:       true,
+	}
+	s1, err := manager.Start(spec)
+	if err != nil {
+		t.Fatalf("Start s1: %v", err)
+	}
+	s2, err := manager.Start(spec)
+	if err != nil {
+		t.Fatalf("Start s2: %v", err)
+	}
+	if s1.ID == s2.ID {
+		t.Fatalf("独立会话不应复用同一 ID: %s", s1.ID)
+	}
+	if err := manager.Stop(s1.ID); err != nil {
+		t.Fatalf("Stop s1: %v", err)
+	}
+	if _, err := manager.Get(s2.ID); err != nil {
+		t.Fatalf("关闭 s1 不应影响 s2: %v", err)
+	}
+}

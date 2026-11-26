@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -13,10 +14,23 @@ const (
 	DesktopProtocolRDP = "rdp"
 	// DesktopProtocolVNC 表示 Virtual Network Computing / Remote Framebuffer。
 	DesktopProtocolVNC = "vnc"
+	// DesktopQualitySmooth 表示低带宽/中继优先的流畅画质预设。
+	DesktopQualitySmooth = "smooth"
+	// DesktopQualityBalanced 表示隧道默认均衡画质预设（避免 127.0.0.1 被误判为局域网）。
+	DesktopQualityBalanced = "balanced"
+	// DesktopQualityHigh 表示直连高速环境下的原画预设。
+	DesktopQualityHigh = "high"
 	// DefaultDesktopRDPPort 是系统 RDP 服务最常见的 TCP 端口。
 	DefaultDesktopRDPPort = 3389
 	// DefaultDesktopVNCPort 是系统屏幕共享和 VNC 服务最常见的 TCP 端口。
 	DefaultDesktopVNCPort = 5900
+	// DefaultDesktopSessionIdleTimeout 是临时桌面会话在最后一次活动连接断开后的保留时间。
+	// 桌面客户端偶尔重连（锁屏、切换网络）不应导致下一次连接重新启动转发，因此默认
+	// 放宽到 30 分钟，而不是按秒级回收。
+	DefaultDesktopSessionIdleTimeout = 30 * time.Minute
+	// DefaultDesktopSessionMaxLifetime 是临时桌面会话的硬上限。长时间办公或值守场景
+	// 常超过 12 小时，默认允许一整天；需要更短生命周期时可在配置中显式收紧。
+	DefaultDesktopSessionMaxLifetime = 24 * time.Hour
 )
 
 // DesktopConnection 是客户端保存的一条远程桌面连接档案。
@@ -29,6 +43,7 @@ type DesktopConnection struct {
 	Protocol   string `yaml:"protocol" json:"protocol"`
 	RemotePort int    `yaml:"remote-port" json:"remote_port"`
 	Username   string `yaml:"username,omitempty" json:"username,omitempty"`
+	Quality    string `yaml:"quality,omitempty" json:"quality,omitempty"`
 }
 
 // DesktopConfig 是「远程桌面」模块配置段。
@@ -39,6 +54,12 @@ type DesktopConfig struct {
 	RDPPort     int                 `yaml:"rdp-port,omitempty" json:"rdp_port"`
 	VNCPort     int                 `yaml:"vnc-port,omitempty" json:"vnc_port"`
 	Connections []DesktopConnection `yaml:"connections,omitempty" json:"connections"`
+	// SessionIdleTimeout 是 Web/桌面临时会话在客户端全部断开后的保留时间；零值使用
+	// DefaultDesktopSessionIdleTimeout。放大它可以容忍桌面客户端短暂重连。
+	SessionIdleTimeout Duration `yaml:"session-idle-timeout,omitempty" json:"session_idle_timeout,omitempty"`
+	// SessionMaxLifetime 是临时会话的硬上限；零值使用 DefaultDesktopSessionMaxLifetime。
+	// 达到上限后即使仍有活动连接也会被回收，避免忘记关闭的会话永久占用端口和隧道。
+	SessionMaxLifetime Duration `yaml:"session-max-lifetime,omitempty" json:"session_max_lifetime,omitempty"`
 }
 
 // ApplyDefaults 为缺失的服务端口和连接端口补齐协议默认值。
@@ -54,6 +75,12 @@ func (d *DesktopConfig) ApplyDefaults() {
 	}
 	if d.VNCPort == 0 {
 		d.VNCPort = DefaultDesktopVNCPort
+	}
+	if d.SessionIdleTimeout.D() == 0 {
+		d.SessionIdleTimeout = Duration(DefaultDesktopSessionIdleTimeout)
+	}
+	if d.SessionMaxLifetime.D() == 0 {
+		d.SessionMaxLifetime = Duration(DefaultDesktopSessionMaxLifetime)
 	}
 	for index := range d.Connections {
 		if d.Connections[index].RemotePort == 0 {
@@ -160,6 +187,23 @@ func (d DesktopConfig) Validate() error {
 	if rdpPort == vncPort {
 		return fmt.Errorf("desktop: RDP 与 VNC 不能共用服务端口 %d", rdpPort)
 	}
+	idle := d.SessionIdleTimeout.D()
+	if idle == 0 {
+		idle = DefaultDesktopSessionIdleTimeout
+	}
+	if idle < 0 {
+		return fmt.Errorf("desktop.session-idle-timeout 不能为负数")
+	}
+	lifetime := d.SessionMaxLifetime.D()
+	if lifetime == 0 {
+		lifetime = DefaultDesktopSessionMaxLifetime
+	}
+	if lifetime < 0 {
+		return fmt.Errorf("desktop.session-max-lifetime 不能为负数")
+	}
+	if lifetime < idle {
+		return fmt.Errorf("desktop.session-max-lifetime 不能小于 session-idle-timeout")
+	}
 	seen := make(map[string]bool, len(d.Connections))
 	for index, connection := range d.Connections {
 		name := strings.TrimSpace(connection.Name)
@@ -190,6 +234,11 @@ func (d DesktopConfig) Validate() error {
 		}
 		if strings.ContainsAny(connection.Username, "\r\n") {
 			return fmt.Errorf("desktop.connections[%d]: 用户名不能包含换行", index)
+		}
+		switch strings.ToLower(strings.TrimSpace(connection.Quality)) {
+		case "", DesktopQualitySmooth, DesktopQualityBalanced, DesktopQualityHigh:
+		default:
+			return fmt.Errorf("desktop.connections[%d]: 画质预设 %q 不受支持（可选 smooth、balanced、high）", index, connection.Quality)
 		}
 	}
 	return nil

@@ -3,6 +3,7 @@ package app
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"proxyd/internal/config"
 )
@@ -102,5 +103,32 @@ func TestSetDesktopServiceMovesExposedPort(t *testing.T) {
 	}
 	if reloaded.Desktop.RDPPort != 3390 || len(reloaded.Remote.Serve) != 0 {
 		t.Fatalf("磁盘桌面服务配置不一致: desktop=%+v serve=%v", reloaded.Desktop, reloaded.Remote.Serve)
+	}
+}
+
+// TestDesktopSessionTimeouts 验证会话回收边界使用配置值并为缺省配置提供宽松默认。
+//
+// 参数说明：t 为 Go 测试上下文。
+//
+// 返回值说明：无；默认值与显式配置均正确映射时通过。
+//
+// 错误情况：默认空闲仍为秒级、最长寿命小于空闲时间或显式值未生效时失败。
+func TestDesktopSessionTimeouts(t *testing.T) {
+	idle, lifetime := desktopSessionTimeouts(config.DesktopConfig{})
+	if idle != config.DefaultDesktopSessionIdleTimeout || lifetime != config.DefaultDesktopSessionMaxLifetime {
+		t.Fatalf("默认会话回收边界 = %v/%v", idle, lifetime)
+	}
+	configured := config.DesktopConfig{
+		SessionIdleTimeout: config.Duration(10 * time.Minute),
+		SessionMaxLifetime: config.Duration(2 * time.Hour),
+	}
+	idle, lifetime = desktopSessionTimeouts(configured)
+	if idle != 10*time.Minute || lifetime != 2*time.Hour {
+		t.Fatalf("显式会话回收边界 = %v/%v", idle, lifetime)
+	}
+	configured.SessionMaxLifetime = config.Duration(time.Minute)
+	idle, lifetime = desktopSessionTimeouts(configured)
+	if lifetime < idle {
+		t.Fatalf("最长寿命 %v 不应小于空闲时间 %v", lifetime, idle)
 	}
 }

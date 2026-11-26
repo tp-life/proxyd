@@ -227,20 +227,6 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		m["external-ui"] = cfg.ExternalUI
 	}
 	dnsConfig := resolveDNSConfig(cfg)
-	if gatewayActive(cfg) {
-		// gateway 数据面入口（docs/adr/0003 勘误，不依赖 TUN）：
-		// redir-port 两平台都需要；tproxy-port 是 Linux 语义，macOS 上 mihomo
-		// 建 listener 只会报错刷屏，因此仅 Linux 且端口有效时写入。
-		m["redir-port"] = cfg.Gateway.EffectiveRedirPort()
-		if runtime.GOOS == "linux" {
-			if port := cfg.Gateway.EffectiveTProxyPort(); port > 0 {
-				m["tproxy-port"] = port
-			}
-		}
-		if cfg.Gateway.DNSRedirect {
-			dnsConfig = injectGatewayDNSListen(dnsConfig)
-		}
-	}
 	if dnsConfig != nil {
 		m["dns"] = dnsConfig
 	}
@@ -397,6 +383,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	if err := validatePlannedGroupNames(groups, nodeNames, plan.Groups); err != nil {
 		return nil, err
 	}
+	skippedPlanGroups := map[string]bool{}
 	for _, group := range plan.Groups {
 		members := normalizeMembers(group.Proxies)
 		if !autoGroupOn {
@@ -407,6 +394,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		}
 		if len(members) == 0 {
 			log.Printf("[core] 订阅策略组 %q 在本轮没有可用成员（可能只剩未生成的 AUTO），跳过", group.Name)
+			skippedPlanGroups[group.Name] = true
 			continue
 		}
 		planned := map[string]any{
@@ -429,8 +417,11 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	m["proxy-groups"] = groups
 
-	// 规则合并顺序：gateway 设备规则（SRC-IP-CIDR）最前 → 用户 custom-rules →
-	// rule-urls 导入规则 → 订阅自带规则 → 广告拦截 RULE-SET → 内置规则 → 订阅兜底规则。
+	planRules := filterSkippedGroupRules(plan.Rules, skippedPlanGroups)
+	planFallbackRules := filterSkippedGroupRules(plan.FallbackRules, skippedPlanGroups)
+
+	// 规则合并顺序：用户 custom-rules → rule-urls 导入规则 → 订阅自带规则 →
+	// 广告拦截 RULE-SET → 内置规则 → 订阅兜底规则。
 	// 订阅规则排在用户显式规则与规则源之后，是因为用户的白名单/直连意图必须能覆盖
 	// 订阅作者的分流；排在广告拦截之前，则让订阅自带的 REJECT 继续生效。订阅原文里的
 	// MATCH/FINAL 必须留在整份列表最后（见 plan.FallbackRules）：mihomo 按顺序匹配，
@@ -438,18 +429,20 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	//
 	// 这里同时记录每条规则的来源（ruleEntries）：来源只存在于生成阶段，最终配置里没有
 	// 任何字段可以反推它，控制台「当前生效规则」直接消费这份标注。
-	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(plan.Rules)+len(cfg.Rules)+len(plan.FallbackRules)+1)
-	if gatewayActive(cfg) {
-		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceGateway, gatewayDeviceRules(cfg, groups))
+	ruleEntries := make([]RuleEntry, 0, len(cfg.CustomRules)+len(imported)+len(planRules)+len(cfg.Rules)+len(planFallbackRules)+2)
+	// 开启 TUN 时把 proxyd 自身进程标记为 DIRECT，避免内嵌 tailcat 的 STUN、
+	// WireGuard UDP 打洞包与 DERP 中继连接被本机 TUN 劫持进代理节点，导致直连失败或 TCP-over-TCP 卡顿。
+	if tunConfig.Enable && !cfg.Remote.Disabled {
+		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceBuiltin, []string{selfProcessDirectRule()})
 	}
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceCustom, cfg.CustomRules)
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceRuleURL, imported)
-	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscription, plan.Rules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscription, planRules)
 	if cfg.AdBlock.Enable {
 		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceAdBlock, []string{adBlockRule})
 	}
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceBuiltin, cfg.Rules)
-	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscriptionFallback, plan.FallbackRules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscriptionFallback, planFallbackRules)
 	rules := ruleEntriesToLines(ruleEntries)
 	m["rules"] = rules
 	ruleProviders := cfg.RuleProviders
@@ -625,80 +618,6 @@ func mergePlannedProviders(existing map[string]any, planned []routing.Provider) 
 	return merged, nil
 }
 
-// gatewayActive 判断 gateway 数据面是否应参与本次生成：模块未停用、代理数据面
-// 未停用且设备表非空。ProxyDisabled 走 Runner.Suspend 路径本就不会调用 generate，
-// 这里的判断是防御直接构造 Config 的嵌入调用方；设备表为空的零值配置视为不生效，
-// 避免存量配置升级后凭空出现 redir 入口与转发规则（无任何设备可被分流）。
-func gatewayActive(cfg *config.Config) bool {
-	return !cfg.Gateway.Disabled && !cfg.ProxyDisabled && len(cfg.Gateway.Devices) > 0
-}
-
-// gatewayDeviceRules 返回可安全写入 mihomo 的设备分流规则：引用本轮被跳过分组
-// （与节点名冲突或成员交集为空）的设备规则按 ADR 0003 跳过并打日志，不阻塞生成；
-// DIRECT/PROXY 内置目标与实际生成的分组名均可引用。
-//
-// 参数：
-//   - cfg: *config.Config，运行配置。
-//   - groups: []map[string]any，本轮实际写入 mihomo 的策略组（含 PROXY/AUTO）。
-//
-// 返回值：[]string，过滤后的 SRC-IP-CIDR 规则行（可能为 nil）。
-//
-// 错误情况：无；失效引用仅降级为日志。
-func gatewayDeviceRules(cfg *config.Config, groups []map[string]any) []string {
-	deviceRules := cfg.Gateway.DeviceRules()
-	if len(deviceRules) == 0 {
-		return nil
-	}
-	valid := map[string]bool{"DIRECT": true, "PROXY": true}
-	for _, group := range groups {
-		if name, ok := group["name"].(string); ok {
-			valid[name] = true
-		}
-	}
-	out := make([]string, 0, len(deviceRules))
-	for _, rule := range deviceRules {
-		target := rule[strings.LastIndexByte(rule, ',')+1:]
-		if !valid[target] {
-			log.Printf("[core] gateway 设备规则 %q 引用的出口不可用，本轮跳过", rule)
-			continue
-		}
-		out = append(out, rule)
-	}
-	return out
-}
-
-// injectGatewayDNSListen 在 dns 段补网关 dns-redirect 所需的非特权监听地址。
-//
-// 参数：
-//   - dnsConfig: map[string]any，resolveDNSConfig 的结果（nil 表示无手写/预设 dns）。
-//
-// 返回值：
-//   - map[string]any：带 listen: 0.0.0.0:1053 的 dns 段；手写段已有 listen 时原样返回并打日志。
-//
-// 错误情况：无。返回的是新 map 或新建段，不原地修改 cfg.DNS 共享引用；
-// 无现存段时生成带默认 nameserver 的最小可用段（mihomo 要求 dns.enable 必须配 nameserver）。
-func injectGatewayDNSListen(dnsConfig map[string]any) map[string]any {
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", config.DefaultGatewayDNSListenPort)
-	if dnsConfig == nil {
-		return map[string]any{
-			"enable":             true,
-			"listen":             listenAddr,
-			"default-nameserver": []string{"223.5.5.5", "1.1.1.1"},
-			"nameserver":         []string{"223.5.5.5", "1.1.1.1"},
-		}
-	}
-	if existing, ok := dnsConfig["listen"].(string); ok && existing != "" {
-		log.Printf("[core] gateway dns-redirect 已开启，但手写 dns 段已配置 listen %q，不覆盖；请确认其与 pf/nftables redirect 目标一致", existing)
-		return dnsConfig
-	}
-	out := make(map[string]any, len(dnsConfig)+1)
-	for key, value := range dnsConfig {
-		out[key] = value
-	}
-	out["listen"] = listenAddr
-	return out
-}
-
 // resolveDNSConfig 按“手写配置优先，其次预设”的规则生成 mihomo DNS 段。
 //
 // 参数：
@@ -830,6 +749,14 @@ func resolveGroupMembersFromNodes(g config.NodeGroup, nodes []*node.Node, nodeSe
 }
 
 // hasGeoRules 判断规则里是否含 GEOSITE/GEOIP。
+// selfProcessDirectRule 返回开启 TUN 时放行 proxyd 自身进程直连的规则。
+func selfProcessDirectRule() string {
+	if runtime.GOOS == "windows" {
+		return "PROCESS-NAME,proxyd.exe,DIRECT"
+	}
+	return "PROCESS-NAME,proxyd,DIRECT"
+}
+
 func hasGeoRules(rules []string) bool {
 	for _, r := range rules {
 		if isGeoRule(r) {
@@ -864,4 +791,33 @@ func firstLine(s string) string {
 func isLoopback(addr string) bool {
 	ip, err := netip.ParseAddr(addr)
 	return err == nil && ip.IsLoopback()
+}
+
+// filterSkippedGroupRules 过滤引用已被本轮跳过的订阅策略组的规则，
+// 避免 mihomo 因 proxy not found 拒绝整份配置。
+func filterSkippedGroupRules(rules []string, skipped map[string]bool) []string {
+	if len(skipped) == 0 || len(rules) == 0 {
+		return rules
+	}
+	out := make([]string, 0, len(rules))
+	for _, line := range rules {
+		if target := ruleLineTarget(line); skipped[target] {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// ruleLineTarget 提取 mihomo 规则行的目标策略名（跳过尾部 no-resolve/src 等参数段）。
+func ruleLineTarget(line string) string {
+	parts := strings.Split(line, ",")
+	for i := len(parts) - 1; i >= 1; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part == "" || part == "no-resolve" || part == "src" {
+			continue
+		}
+		return part
+	}
+	return ""
 }

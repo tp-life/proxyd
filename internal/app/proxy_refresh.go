@@ -89,7 +89,7 @@ func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 	// 调和结果（策略组、规则、规则集引用），顺序颠倒会用到上一轮的旧计划。
 	a.reconcileSubscriptionRouting()
 	a.mu.RLock()
-	cfg := a.cfg
+	cfg := a.cfg.Clone()
 	imported := a.mergedImportedLocked()
 	plan := a.mergedRoutingLocked()
 	a.mu.RUnlock()
@@ -138,26 +138,10 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	}()
 	// 所有配置热更新共用此门，停用期间修改规则或端口也不能意外恢复监听。
 	if cfg.ProxyDisabled {
-		// Suspend 会关闭 TUN listener，helper 注入的 fd 随 mihomo 一并关闭，
-		// 这里只清状态，恢复代理时重新申请。
-		a.releaseTUNFDLocked(false)
 		// 核心被停用后运行态不再对应任何配置；不清空记录会让恢复代理时误判为
 		// “配置没变”而跳过热更新，留下已停用的空核心。
 		a.clearAppliedConfig()
 		return a.runner.Suspend()
-	}
-	// darwin 普通用户模式下经 tun-helper 申请 utun fd 并注入生成配置；
-	// fd 不落盘（injectTUNFD 作用于运行时副本）。
-	fd, acquired, err := a.ensureTUNFDLocked(cfg)
-	if err != nil {
-		return err
-	}
-	cfg = injectTUNFD(cfg, fd)
-	releaseOnError := func() {
-		// fd 未随配置成功应用时所有权仍在本层，回滚必须关闭，避免泄漏 utun。
-		if acquired {
-			a.releaseTUNFDLocked(true)
-		}
 	}
 	// select 分组的持久化选中项随每次生成注入 mihomo default-selected；
 	// 状态文件损坏仅打日志丢弃，mihomo 回退到组成员首位。
@@ -173,30 +157,25 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	// 必然得到相同输出（见 core.BuildWithState 的文档契约）。
 	built, err := core.BuildWithRouting(cfg, assigns, a.Nodes(), imported, selected, plan)
 	if err != nil {
-		releaseOnError()
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
 	if a.configApplied(built.YAML()) {
-		releaseOnError()
 		return nil
 	}
 	cfgYAML, err := built.Validate()
 	if err != nil {
-		releaseOnError()
 		return fmt.Errorf("generate mihomo config: %w", err)
 	}
 	// GEO 数据不可用时会降级成剔除 GEO 规则的配置，其字节与 built 不同；再比一次，
 	// 避免每个健康检查周期都把同一份降级配置重复热更新。降级期间仍会走一遍自检，
 	// 这样 geo 数据恢复可用后下一轮就能自动回到含 GEO 规则的配置。
 	if a.configApplied(cfgYAML) {
-		releaseOnError()
 		return nil
 	}
 	if err := a.runner.Reload(cfgYAML); err != nil {
 		// 热更新失败时 mihomo 可能只应用了一半，运行态不再对应该配置；清空记录让下一轮
 		// 重新自检并重试，而不是把失败状态误当成“已生效、无需再试”。
 		a.clearAppliedConfig()
-		releaseOnError()
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
 	// mihomo 的 ReCreateTun 在创建虚拟网卡失败时只写日志，不把错误返回给 hub.Parse。
@@ -204,14 +183,9 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	// 但运行时 TUN 已关闭。状态不一致作为应用失败返回，上层会恢复旧配置。
 	if active := a.runner.TUNEnabled(); active != cfg.TUN.Enable {
 		a.clearAppliedConfig()
-		releaseOnError()
 		return fmt.Errorf("mihomo TUN 实际状态与请求不一致（期望 enable=%t，实际 active=%t）；请检查 TUN 日志、stack 与系统权限", cfg.TUN.Enable, active)
 	}
 	a.markConfigApplied(cfgYAML, built.Rules())
-	if !cfg.TUN.Enable {
-		// TUN 已随本次应用关闭，fd 由 mihomo 关闭（所有权已移交），只清持有状态。
-		a.releaseTUNFDLocked(false)
-	}
 	return nil
 }
 
@@ -324,6 +298,16 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 		stateDir := a.cfg.StateDir
 		currentInfos := cloneSubscriptionInfos(a.subInfos)
 		a.mu.RUnlock()
+		// 零订阅且无手动节点时直接收敛为空节点 DIRECT 待机态，不刷健康检查报错，
+		// 删除最后一个节点来源后也能及时释放旧的一对一端口映射。
+		if len(subscriptions) == 0 && len(manualEntries) == 0 {
+			a.mu.Lock()
+			a.nodes = nil
+			a.assigns = nil
+			a.subInfos = map[string]subscribe.UserInfo{}
+			a.mu.Unlock()
+			return a.regenerateLocked(nil)
+		}
 		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
 		for _, err := range manualErrs {
 			if err != nil {
@@ -468,6 +452,14 @@ func settleDisplay(nodes []*node.Node) {
 	}
 }
 
+// clearTestingDisplay 仅清除展示行的 Testing 标记而不读取权威字段，
+// 供未持有 refreshing 锁的单订阅操作 defer 收尾，避免与并发刷新形成数据竞争。
+func clearTestingDisplay(nodes []*node.Node) {
+	for _, n := range nodes {
+		n.ClearTesting()
+	}
+}
+
 // applyNodes 执行健康检测后的流水线尾部，并完成 mihomo 托管节点的二阶段验证。
 //
 // 参数：
@@ -566,9 +558,6 @@ func (a *App) applyNodes(ctx context.Context, nodes []*node.Node) error {
 	if err := node.SaveSnapshot(a.nodesSnapshotPath(), nodes); err != nil {
 		log.Printf("[snapshot] 保存节点快照失败: %v", err)
 	}
-	// 顺带调和网关执行层：mihomo 入口刚热更新完毕，失败的 gateway 应用到点重试，
-	// 被外部清除的规则（如 helper 看门狗）也在此收敛。
-	a.reconcileGatewayLocked()
 	a.ensureInteractiveTailscaleEnrollments(nodes)
 	// reloads 是进程累计的成功热更新次数：稳态下它应当每轮保持不变，只有节点可用性
 	// 或配置真的变化时才增长。排查周期性重建与 RSS 高水位时先看这个数字。
@@ -738,9 +727,10 @@ func (a *App) restoreSnapshot() error {
 	// 订阅不应因为进程重启而丢失分流策略，而这条路径不允许访问任何订阅地址。
 	a.mu.Lock()
 	a.nodes = nodes
+	portRange := a.cfg.PortRange
 	a.mu.Unlock()
 	a.reconcileSubscriptionRouting()
-	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
+	assigns := pool.Allocate(alive, portRange[0], portRange[1], prev)
 	if err := a.regenerateLocked(assigns); err != nil {
 		return fmt.Errorf("从节点快照生成启动配置失败: %w", err)
 	}

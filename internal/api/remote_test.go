@@ -24,7 +24,7 @@ func newRemoteTestToken(t *testing.T) string {
 	priv := tailcat.NewPrivateKey()
 	ci := priv.Public
 	ci.RegionID = 1
-	return string(ci.ConnBlob())
+	return string(ci.Addr())
 }
 
 // newRemoteTestServer 搭建带临时 state-dir 与配置文件的 API 服务。
@@ -485,5 +485,49 @@ func TestRemoteKeyFileAPI(t *testing.T) {
 	if importResponse.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(importResponse.Body)
 		t.Fatalf("合法导入失败: status=%d body=%s", importResponse.StatusCode, body)
+	}
+}
+
+// TestRemoteV080API 验证 tailcat v0.8.0 新增的 Hybrid、自定义暴露映射与主动断开客户端端点。
+func TestRemoteV080API(t *testing.T) {
+	_, addr := newRemoteTestServer(t)
+	base := "http://" + addr
+
+	// 1. 混合握手开关。
+	code, st := remoteAPIReq(t, http.MethodPost, base+"/api/remote/hybrid", map[string]bool{"enabled": true})
+	if code != http.StatusOK || st["hybrid"] != true {
+		t.Fatalf("POST /api/remote/hybrid 失败: code=%d st=%v", code, st)
+	}
+
+	// 2. 自定义端口映射。
+	targets := []map[string]any{
+		{"port": 8080, "target": "80"},
+		{"port": 5555, "target": "10.2.200.213:5555"},
+		{"port": 8022, "target": "/run/app.sock"},
+	}
+	code, st = remoteAPIReq(t, http.MethodPost, base+"/api/remote/serve-targets", map[string]any{"targets": targets})
+	if code != http.StatusOK {
+		t.Fatalf("POST /api/remote/serve-targets 失败: code=%d st=%v", code, st)
+	}
+	gotTargets, _ := st["serve_targets"].([]any)
+	if len(gotTargets) != 3 {
+		t.Fatalf("serve_targets 长度错误: %v", st["serve_targets"])
+	}
+	code, _ = remoteAPIReq(t, http.MethodPost, base+"/api/remote/serve-targets", map[string]any{
+		"targets": []map[string]any{{"port": 8080, "target": "bad-target"}},
+	})
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法 serve-targets 应返回 400，got %d", code)
+	}
+
+	// 3. 主动断开客户端。
+	pub := tailcat.NewPrivateKey().Private.Public().String()
+	code, resp := remoteAPIReq(t, http.MethodPost, base+"/api/remote/clients/disconnect", map[string]string{"key": pub})
+	if code != http.StatusOK || resp["disconnected"] != false {
+		t.Fatalf("POST /api/remote/clients/disconnect 失败: code=%d resp=%v", code, resp)
+	}
+	code, _ = remoteAPIReq(t, http.MethodPost, base+"/api/remote/clients/disconnect", map[string]string{"key": "nodekey:invalid"})
+	if code != http.StatusBadRequest {
+		t.Fatalf("非法 nodekey 断开应返回 400，got %d", code)
 	}
 }

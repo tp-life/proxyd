@@ -19,7 +19,7 @@ import { isRemoteAllowExpired, formatRemoteAllowExpiry, formatRemotePath } from 
  * 参数：解构字段为状态对象、表单值或事件回调，沿用 RemotePage 的接口约定。
  * 返回：React 元素；网络错误由用例回调处理，本组件不直接写配置。
  */
-export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput, allowPortsInput, allowTTL, copyTempKey, copyText, importKeyFile, keyFileInput, manageSSHKeys, peers, removeAllowKey, resetTempKey, saveKeyFile, setAllowInput, setAllowNameInput, setAllowPortsInput, setAllowTTL, setKeyFileInput, status, submitAllowKey, submitKeyFile, tempPeer }) {
+export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput, allowPortsInput, allowTTL, copyTempKey, copyText, disconnectClient, importKeyFile, keyFileInput, manageSSHKeys, peers, removeAllowKey, resetTempKey, saveKeyFile, setAllowInput, setAllowNameInput, setAllowPortsInput, setAllowTTL, setKeyFileInput, status, submitAllowKey, submitKeyFile, tempPeer }) {
  return (<><Tabs defaultValue="ssh">
  <TabsList aria-label="授权类型"><TabsTrigger value="ssh">SSH 公钥</TabsTrigger><TabsTrigger value="clients">客户端白名单</TabsTrigger><TabsTrigger value="identity">隧道身份</TabsTrigger></TabsList>
  <TabsContent value="ssh" forceMount>              <RemoteSSHKeys status={status} manageSSHKeys={manageSSHKeys} copyText={copyText} /></TabsContent>
@@ -86,6 +86,11 @@ export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput,
                             <span>RTT —</span>
                             <span>收 {formatBytes(peer?.rx_bytes || 0)} · 发 {formatBytes(peer?.tx_bytes || 0)}</span>
                             {(activity[entry.key] || 0) > 0 && <Badge variant="secondary">活动连接 {activity[entry.key]}</Badge>}
+                            {disconnectClient && (peer?.online || (activity[entry.key] || 0) > 0) && (
+                              <Button size="sm" variant="outline" type="button" onClick={() => disconnectClient(entry.key)}>
+                                <span>断开连接</span>
+                              </Button>
+                            )}
                           </div>
                         </li>
                       );
@@ -120,6 +125,11 @@ export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput,
                         <RefreshCw size={14} aria-hidden="true" />
                         <span>重置</span>
                       </Button>
+                      {disconnectClient && (tempPeer?.online || (activity[status.temp_key] || 0) > 0) && (
+                        <Button size="sm" variant="outline" type="button" onClick={() => disconnectClient(status.temp_key)}>
+                          <span>断开连接</span>
+                        </Button>
+                      )}
                     </div>
                   </>
                 ) : (

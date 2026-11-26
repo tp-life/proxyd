@@ -185,8 +185,12 @@ func TestQuick(t *testing.T) {
 	if cfg2.PortRange != [2]int{43000, 43010} {
 		t.Errorf("PortRange = %v", cfg2.PortRange)
 	}
-	if _, err := Quick(nil, ""); err == nil {
-		t.Error("Quick without urls: expected error")
+	emptyCfg, err := Quick(nil, "")
+	if err != nil {
+		t.Fatalf("Quick without urls should succeed for zero-subscription bootstrap: %v", err)
+	}
+	if len(emptyCfg.Subscriptions) != 0 || len(emptyCfg.ManualNodes) != 0 {
+		t.Errorf("empty Quick should have 0 subscriptions/manual nodes, got %d/%d", len(emptyCfg.Subscriptions), len(emptyCfg.ManualNodes))
 	}
 	if _, err := Quick([]string{"https://a.com"}, "abc"); err == nil {
 		t.Error("Quick bad range: expected error")
@@ -195,7 +199,6 @@ func TestQuick(t *testing.T) {
 
 func TestLoadInvalid(t *testing.T) {
 	cases := map[string]string{
-		"no subscriptions":   "port-range: [1,2]\nrules: [MATCH,PROXY]\n",
 		"empty rules":        "subscriptions: [{name: a, url: x}]\nport-range: [1,2]\n",
 		"bad range":          "subscriptions: [{name: a, url: x}]\nport-range: [100,50]\nrules: [MATCH,PROXY]\n",
 		"range overflow":     "subscriptions: [{name: a, url: x}]\nport-range: [1,70000]\nrules: [MATCH,PROXY]\n",

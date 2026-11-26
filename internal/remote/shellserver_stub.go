@@ -23,7 +23,7 @@ var errShellTerminalUnsupported = errors.New("当前平台不支持 Web 终端")
 // 返回值说明：func(net.Conn) 恒为 nil；error 恒为平台不支持错误。
 //
 // 错误情况：无条件返回 errShellTerminalUnsupported。
-func localShellSSHHandler(_, _ string) (func(net.Conn), error) {
+func localShellSSHHandler(_, _ string, _ ...string) (func(net.Conn), error) {
 	return nil, errShellTerminalUnsupported
 }
 
@@ -36,10 +36,22 @@ func configuredShellSSHHandler(_ string, _ bool, _ []config.RemoteSSHKey, _ stri
 	return nil, errShellTerminalUnsupported
 }
 
+type shellSSHOptions struct {
+	allowLocalForwarding bool
+	allowRequestedUser   bool
+	peerKeyLookup        func(net.Addr) string
+	extraEnv             []string
+}
+
 // managedShellSSHHandler 为不支持的平台保留动态授权入口。
-// 参数说明：string 为状态目录，*sshAccess 为授权服务，均不使用。
+// 参数说明：string 为状态目录，*sshAccess 为授权服务，string 为 shell-user，均不使用。
 // 返回值说明：nil 与平台错误。
 // 错误情况：始终拒绝启动，不创建监听或后台协程。
-func managedShellSSHHandler(_ string, _ *sshAccess) (func(net.Conn), error) {
+func managedShellSSHHandler(_ string, _ *sshAccess, _ string) (func(net.Conn), error) {
+	return nil, errShellTerminalUnsupported
+}
+
+// managedShellSSHHandlerWithOptions 为不支持的平台提供一致的可选参数入口。
+func managedShellSSHHandlerWithOptions(_ string, _ *sshAccess, _ string, _ shellSSHOptions) (func(net.Conn), error) {
 	return nil, errShellTerminalUnsupported
 }

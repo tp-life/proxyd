@@ -233,8 +233,6 @@ func (m tuiModel) buildRowAction(key string) (tuiAction, bool) {
 		return m.buildConnectionAction(key)
 	case tuiPageRemote:
 		return m.buildForwardAction(key)
-	case tuiPageGateway:
-		return m.buildGatewayAction(key)
 	case tuiPageDesktop:
 		return m.buildSessionAction(key)
 	default:
@@ -466,34 +464,6 @@ func (m tuiModel) buildForwardAction(key string) (tuiAction, bool) {
 			return "转发「" + forward.Name + "」" + tuiActionOnOff(enable), nil
 		},
 	}, true
-}
-
-// buildGatewayAction 构造网关页的模块开关动作。
-//
-// 参数说明：
-//   - key: string，e 切换网关模块启停。
-//
-// 返回值说明：tuiAction 与 bool，网关状态未加载或键未绑定时 ok 为 false。
-//
-// 错误情况：无；停用网关属于危险操作，返回的动作带确认文案。
-func (m tuiModel) buildGatewayAction(key string) (tuiAction, bool) {
-	if key != "e" || m.gateway == nil {
-		return tuiAction{}, false
-	}
-	enable := !m.gateway.Enabled
-	action := tuiAction{
-		Label: "网关开关",
-		Run: func(c *apiClient) (string, error) {
-			if err := c.do(http.MethodPost, "/api/gateway", map[string]bool{"enabled": enable}, nil); err != nil {
-				return "", err
-			}
-			return "LAN 网关" + tuiActionOnOff(enable), nil
-		},
-	}
-	if !enable {
-		action.Confirm = "确认停用 LAN 网关？登记设备将立即失去分流出口。"
-	}
-	return action, true
 }
 
 // buildSessionAction 构造桌面页的关闭会话动作。

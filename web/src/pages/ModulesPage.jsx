@@ -6,7 +6,6 @@ import { PageHeader } from "@/components/PageHeader";
 const MODULE_DESCRIPTIONS = {
   proxy: "控制代理入口、TUN、DNS、系统代理及周期订阅刷新。禁用会断开活动代理连接。",
   remote: "控制隧道服务、端口转发、远程桌面连接与 Web Terminal。禁用会结束现有会话。",
-  gateway: "控制 LAN 网关的转发规则与 IPv4 转发开关。禁用会清除规则，下游设备恢复直连；启用要求代理模块已启用。",
 };
 
 /**

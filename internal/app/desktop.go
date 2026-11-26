@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"proxyd/internal/config"
 	"proxyd/internal/desktop"
@@ -33,16 +34,37 @@ type DesktopStatus struct {
 	Sessions      []desktop.Session          `json:"sessions"`
 	RemoteEnabled bool                       `json:"remote_enabled"`
 	APILoopback   bool                       `json:"api_loopback"`
+	// SessionIdleTimeout / SessionMaxLifetime 是当前生效的临时会话回收边界，供
+	// 控制台展示；完整配置仍以 desktop 段为准。
+	SessionIdleTimeout time.Duration `json:"session_idle_timeout"`
+	SessionMaxLifetime time.Duration `json:"session_max_lifetime"`
+}
+
+// desktopForwardAdapter 将 remote.TransientForward 适配为 desktop.Forward + TransportReporter，
+// 保持 desktop 领域包零 tailcat 依赖的同时向界面暴露实时路径、RTT 与 UDP 状态。
+type desktopForwardAdapter struct {
+	*remote.TransientForward
+}
+
+func (a desktopForwardAdapter) Transport() desktop.TransportStatus {
+	st := a.TransientForward.Transport()
+	return desktop.TransportStatus{
+		Path:       st.Path,
+		Endpoint:   st.Endpoint,
+		DERPRegion: st.DERPRegion,
+		RTTMillis:  st.RTTMillis,
+		Warming:    st.Warming,
+		UDPEnabled: st.UDPEnabled,
+		Error:      st.Error,
+	}
 }
 
 // initDesktop 创建桌面会话管理器，并注入 remote 临时转发适配器。
-//
-// 参数说明：无；在 initRemote 之后由 New 调用。
-//
-// 返回值说明：无；管理器被保存到 App，后台只启动一个固定清扫协程。
-//
-// 错误情况：构造阶段不执行网络 I/O；真正的远端解析或监听错误由 StartDesktopSession 返回。
 func (a *App) initDesktop() {
+	a.mu.RLock()
+	configuration := a.cfg.Desktop.Clone()
+	a.mu.RUnlock()
+	idleTimeout, maxLifetime := desktopSessionTimeouts(configuration)
 	a.desktop = desktop.NewManager(func(spec desktop.SessionSpec) (desktop.Forward, error) {
 		a.mu.RLock()
 		remotes := append([]config.RemotePeer(nil), a.cfg.Remote.Remotes...)
@@ -51,8 +73,37 @@ func (a *App) initDesktop() {
 		if err != nil {
 			return nil, err
 		}
-		return a.remote.StartTransientForward(token, spec.RemotePort)
-	}, desktop.Options{})
+		// RDP 8+ 依赖同端口 UDP 3389 消除视频流队头阻塞；VNC 保持纯 TCP。
+		enableUDP := spec.Protocol == desktop.ProtocolRDP
+		forward, err := a.remote.StartDesktopTransientForward(token, spec.RemotePort, enableUDP)
+		if err != nil {
+			return nil, err
+		}
+		return desktopForwardAdapter{TransientForward: forward}, nil
+	}, desktop.Options{IdleTimeout: idleTimeout, MaxLifetime: maxLifetime})
+}
+
+// desktopSessionTimeouts 返回临时桌面会话当前生效的空闲与最长寿命边界。
+//
+// 参数说明：configuration 是桌面配置快照；零值视为使用默认值，负数不会出现，因为
+// 配置校验已在加载阶段拒绝。
+//
+// 返回值说明：time.Duration，依次为 IdleTimeout 与 MaxLifetime，且后者不小于前者。
+//
+// 错误情况：无；这里只做运行期兜底，非法值最终由配置校验拦截。
+func desktopSessionTimeouts(configuration config.DesktopConfig) (time.Duration, time.Duration) {
+	idleTimeout := configuration.SessionIdleTimeout.D()
+	if idleTimeout <= 0 {
+		idleTimeout = config.DefaultDesktopSessionIdleTimeout
+	}
+	maxLifetime := configuration.SessionMaxLifetime.D()
+	if maxLifetime <= 0 {
+		maxLifetime = config.DefaultDesktopSessionMaxLifetime
+	}
+	if maxLifetime < idleTimeout {
+		maxLifetime = idleTimeout
+	}
+	return idleTimeout, maxLifetime
 }
 
 // stopDesktop 幂等停止全部桌面会话及后台清扫协程。
@@ -107,12 +158,15 @@ func (a *App) DesktopStatus(ctx context.Context) DesktopStatus {
 	}
 	connections := append([]config.DesktopConnection(nil), configuration.Connections...)
 	sort.Slice(connections, func(i, j int) bool { return connections[i].Name < connections[j].Name })
+	idleTimeout, maxLifetime := desktopSessionTimeouts(configuration)
 	return DesktopStatus{
-		Services:      services,
-		Connections:   connections,
-		Sessions:      a.desktop.List(),
-		RemoteEnabled: remoteConfiguration.Enabled,
-		APILoopback:   config.IsLoopbackAPIListen(apiListen),
+		Services:           services,
+		Connections:        connections,
+		Sessions:           a.desktop.List(),
+		RemoteEnabled:      remoteConfiguration.Enabled,
+		APILoopback:        config.IsLoopbackAPIListen(apiListen),
+		SessionIdleTimeout: idleTimeout,
+		SessionMaxLifetime: maxLifetime,
 	}
 }
 
@@ -292,6 +346,40 @@ func (a *App) StartDesktopSession(name string) (desktop.Session, error) {
 		Protocol:       protocol,
 		RemotePort:     found.RemotePort,
 		Username:       found.Username,
+		Quality:        found.Quality,
+	})
+}
+
+// StartAdhocDesktopSession 为本机 CLI（proxyd desk）创建复用守护进程共享 tailcat 客户端的临时桌面会话，
+// 避免 CLI 与守护进程以同一 nodekey 并发连接同一远端互相顶掉握手。
+func (a *App) StartAdhocDesktopSession(remoteNameOrToken, protocolText string, remotePort int, quality string) (desktop.Session, error) {
+	a.remoteMutationMu.Lock()
+	defer a.remoteMutationMu.Unlock()
+	a.mu.RLock()
+	disabled := a.cfg.Remote.Disabled
+	a.mu.RUnlock()
+	if disabled {
+		return desktop.Session{}, fmt.Errorf("远程访问模块已禁用")
+	}
+	protocol, err := desktop.ParseProtocol(protocolText)
+	if err != nil {
+		return desktop.Session{}, err
+	}
+	remoteNameOrToken = strings.TrimSpace(remoteNameOrToken)
+	if remotePort == 0 {
+		remotePort = config.DefaultDesktopPort(string(protocol))
+	}
+	label := remoteNameOrToken
+	if len(label) > 20 && strings.HasPrefix(label, "tc") {
+		label = label[:6] + "…" + label[len(label)-6:]
+	}
+	return a.desktop.Start(desktop.SessionSpec{
+		ConnectionName: fmt.Sprintf("cli:%s:%s:%d", protocol, label, remotePort),
+		Remote:         remoteNameOrToken,
+		Protocol:       protocol,
+		RemotePort:     remotePort,
+		Quality:        quality,
+		Isolated:       true,
 	})
 }
 
@@ -377,6 +465,7 @@ func normalizeDesktopConnection(connection config.DesktopConnection) config.Desk
 	connection.Remote = strings.TrimSpace(connection.Remote)
 	connection.Protocol = strings.ToLower(strings.TrimSpace(connection.Protocol))
 	connection.Username = strings.TrimSpace(connection.Username)
+	connection.Quality = strings.ToLower(strings.TrimSpace(connection.Quality))
 	if connection.RemotePort == 0 {
 		connection.RemotePort = config.DefaultDesktopPort(connection.Protocol)
 	}

@@ -121,7 +121,7 @@ func SaveSnapshot(path string, s *Snapshot) error {
 		return fmt.Errorf("创建快照目录失败: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("写入临时快照失败: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

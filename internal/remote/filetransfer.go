@@ -89,10 +89,11 @@ func (m *Manager) OpenFileClient(ctx context.Context, token string, credentials 
 		m.mu.Unlock()
 		return nil, fmt.Errorf("远程访问模块已禁用")
 	}
-	clientKey := m.clientKeyLocked()
 	m.mu.Unlock()
 
-	transport, err := Dial(ctx, token, 22, clientKey)
+	// 与常驻转发/桌面会话共享同一个 tailcat 客户端，避免文件传输期间
+	// 用同一 node key 另建 magicsock 把现有会话的握手顶掉。
+	transport, err := m.dialShared(ctx, token, 22)
 	if err != nil {
 		return nil, fmt.Errorf("建立 tailcat 文件隧道失败: %w", err)
 	}

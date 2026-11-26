@@ -19,13 +19,20 @@ import (
 type forwardRunner struct {
 	name      string
 	listen    string
-	token     tailcat.ConnBlob
+	token     tailcat.Addr
 	port      uint16
 	logf      func(format string, args ...any)
 	clientKey key.NodePrivate // 本机客户端身份（对端 --allow 白名单用）；零值=临时身份
 
-	// dial 可注入替换（测试）；为 nil 时内部创建复用的 tailcat 客户端。
+	// dial 可注入替换（测试或 Manager 共享客户端）；为 nil 时内部创建独立 tailcat 客户端。
 	dial func(ctx context.Context) (net.Conn, error)
+
+	// sharedClient 指向 Manager 客户端池借出的共享客户端（非拥有，由 release 释放），
+	// 仅用于只读观测（如 tailcat v0.8.0 Client.DERPRegion）。
+	sharedClient *tailcat.Client
+
+	// release 归还 Manager 共享客户端的一次借用；为 nil 表示 runner 自己拥有 client。
+	release func()
 
 	ln     net.Listener
 	client *tailcat.Client
@@ -48,16 +55,17 @@ type forwardRunner struct {
 // 参数说明：
 //   - name: string，配置中的转发名称，用于状态与日志定位。
 //   - listen: string，本地 TCP 监听地址。
-//   - token: tailcat.ConnBlob，远端身份与 DERP 信息。
+//   - token: tailcat.Addr，远端身份与 DERP 信息。
 //   - port: uint16，远端目标端口。
 //   - logf: func(string, ...any)，日志回调；nil 时使用静默回调。
 //   - clientKey: key.NodePrivate，本机客户端身份；零值使用临时身份。
-//   - dial: func(context.Context) (net.Conn, error)，测试注入拨号器；nil 使用 tailcat。
+//   - dial: func(context.Context) (net.Conn, error)，测试或 Manager 注入拨号器；
+//     nil 时由 runner 自己创建一个独立 tailcat 客户端。
 //
 // 返回值说明：*forwardRunner，调用方还需调用 start。
 //
 // 错误情况：构造阶段不执行 I/O，不返回错误；监听或拨号错误由 start/handle 处理。
-func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, logf func(string, ...any), clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
+func newForwardRunner(name, listen string, token tailcat.Addr, port uint16, logf func(string, ...any), clientKey key.NodePrivate, dial func(ctx context.Context) (net.Conn, error)) *forwardRunner {
 	ctx, cancel := context.WithCancel(context.Background())
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -77,9 +85,38 @@ func newForwardRunner(name, listen string, token tailcat.ConnBlob, port uint16, 
 	}
 }
 
+// sharedClientDial 返回使用 Manager 共享客户端拨远端端口的 dialer。
+//
+// 参数说明：
+//   - client: *tailcat.Client，Manager 客户端池借出的共享客户端。
+//   - port: uint16，远端目标 TCP 端口。
+//
+// 返回值说明：func(context.Context) (net.Conn, error)，每次拨号独立套用 dialTimeout。
+//
+// 错误情况：客户端已关闭或远端不可达时由 DialTCPPort 返回错误。
+func sharedClientDial(client *tailcat.Client, port uint16) func(context.Context) (net.Conn, error) {
+	return func(ctx context.Context) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+		return client.DialTCPPort(ctx, port)
+	}
+}
+
 // specEqual 判断运行中的转发与新配置是否等价（等价则保留，避免打断活动连接）。
-func (r *forwardRunner) specEqual(listen string, token tailcat.ConnBlob, port uint16) bool {
+func (r *forwardRunner) specEqual(listen string, token tailcat.Addr, port uint16) bool {
 	return r.listen == listen && r.token == token && r.port == port
+}
+
+// derpRegion 返回该转发底层 tailcat 客户端当前使用的 DERP 区域标识（尚未启动时为空）。
+func (r *forwardRunner) derpRegion() string {
+	cl := r.sharedClient
+	if cl == nil {
+		cl = r.client
+	}
+	if cl == nil {
+		return ""
+	}
+	return formatDERPRegion(cl.DERPRegion())
 }
 
 // start 开始监听并进入 accept 循环；监听失败时返回错误。
@@ -143,6 +180,7 @@ func (r *forwardRunner) acceptLoop() {
 func (r *forwardRunner) handle(local net.Conn) {
 	defer r.active.Add(-1)
 	defer r.releaseConnection(local)
+	tuneLocalConn(local)
 
 	// 拨号继承 runner 的生命周期，这样停止转发时不必等待拨号
 	// 超时；真实 tailcat dialer 和测试 dialer 都应响应 context 取消。
@@ -228,6 +266,11 @@ func (r *forwardRunner) stop() {
 		if r.client != nil {
 			_ = r.client.Close()
 		}
+		if r.release != nil {
+			release := r.release
+			r.release = nil
+			release()
+		}
 	})
 }
 
@@ -266,7 +309,7 @@ func (m *Manager) reconcileForwardsLocked(cfg config.RemoteConfig) {
 		listen, err := config.NormalizeRemoteListen(f.Listen)
 		token, terr := ResolveToken(cfg.Remotes, f.Remote)
 		// ln==nil 表示上次启动失败：规格未变也停下重建，让配置修正后能自动恢复。
-		if err != nil || terr != nil || r.ln == nil || !r.specEqual(listen, tailcat.ConnBlob(token), uint16(f.RemotePort)) {
+		if err != nil || terr != nil || r.ln == nil || !r.specEqual(listen, tailcat.Addr(token), uint16(f.RemotePort)) {
 			r.stop()
 			delete(m.forwards, name)
 		}
@@ -287,8 +330,15 @@ func (m *Manager) reconcileForwardsLocked(cfg config.RemoteConfig) {
 			m.logf("[remote] 转发 %s: %v", name, err)
 			continue
 		}
-		r := newForwardRunner(name, listen, tailcat.ConnBlob(token), uint16(f.RemotePort), m.logf, m.clientKeyLocked(), nil)
+		// 同一 token 的所有 forward 共享客户端：tailcat peer 按 node key 唯一，
+		// 每条转发各建 Client 会互相覆盖握手与 endpoint。
+		clientKey := m.clientKeyLocked()
+		client, release := m.clients.acquire(token, clientKey)
+		r := newForwardRunner(name, listen, tailcat.Addr(token), uint16(f.RemotePort), m.logf, clientKey, sharedClientDial(client, uint16(f.RemotePort)))
+		r.sharedClient = client
+		r.release = release
 		if err := r.start(); err != nil {
+			release()
 			r.setLastError(err.Error())
 			m.logf("[remote] 转发 %s 启动失败: %v", name, err)
 			// 启动失败的 runner 也放入 map，让 Status 能展示错误；下次配置变更时会重建。

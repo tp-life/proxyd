@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -114,16 +115,26 @@ func (f RemoteForward) IsEnabled() bool {
 	return f.Enabled == nil || *f.Enabled
 }
 
+// RemoteServeTarget 把隧道暴露端口映射到非默认上游目标：
+// 支持本机其他端口（如 "80"）、局域网主机或域名（如 "10.2.200.213:5555"、"android.lan:5555"）
+// 以及本机 Unix 域套接字（如 "/run/app.sock" 或 "unix:/run/app.sock"）。
+type RemoteServeTarget struct {
+	Port   int    `yaml:"port" json:"port"`
+	Target string `yaml:"target" json:"target"`
+}
+
 // RemoteConfig 是「远程连接」周边模块的配置段，基于 tailcat 数据面隧道，
 // 与代理功能完全独立（不经过 mihomo）。
 type RemoteConfig struct {
 	// Disabled 是模块总停用标记，独立于 Enabled 服务端开关；保留客户端模式兼容性。
-	Disabled   bool               `yaml:"disabled,omitempty" json:"disabled"`
-	Enabled    bool               `yaml:"enabled" json:"enabled"`                             // 隧道服务端总开关
-	Region     string             `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
-	DERPMapURL string             `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
-	Serve      []int              `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
-	Allow      []RemoteAllowEntry `yaml:"allow,omitempty" json:"allow,omitempty"`             // 允许的客户端公钥白名单（name 为可选管理别名）；空=放行所有持有 token 的客户端
+	Disabled     bool                `yaml:"disabled,omitempty" json:"disabled"`
+	Enabled      bool                `yaml:"enabled" json:"enabled"`                             // 隧道服务端总开关
+	Hybrid       bool                `yaml:"hybrid,omitempty" json:"hybrid,omitempty"`           // 实验性后量子混合握手（ML-KEM-768，需 tailcat v0.8.0+ 客户端）
+	Region       string              `yaml:"region,omitempty" json:"region,omitempty"`           // 空=自动就近；数字=DERP 区域 ID；含 "."=自建 derper 主机名（逗号分隔）
+	DERPMapURL   string              `yaml:"derpmap-url,omitempty" json:"derpmap_url,omitempty"` // 自建 DERP map JSON 地址
+	Serve        []int               `yaml:"serve,omitempty" json:"serve,omitempty"`             // 经隧道暴露的本机端口（连接转发到 127.0.0.1:port）
+	ServeTargets []RemoteServeTarget `yaml:"serve-targets,omitempty" json:"serve_targets,omitempty"`
+	Allow        []RemoteAllowEntry  `yaml:"allow,omitempty" json:"allow,omitempty"` // 允许的客户端公钥白名单（name 为可选管理别名）；空=放行所有持有 token 的客户端
 	// AllowRestricted 区分“用户明确开启过白名单但授权已全部过期”和“从未配置白名单”。
 	// 它避免清扫最后一条过期授权后意外回到开放模式；普通用户删除最后一条授权时会重置为 false。
 	AllowRestricted bool            `yaml:"allow-restricted,omitempty" json:"allow_restricted,omitempty"`
@@ -148,6 +159,7 @@ type RemoteConfig struct {
 func (r RemoteConfig) Clone() RemoteConfig {
 	out := r
 	out.Serve = append([]int(nil), r.Serve...)
+	out.ServeTargets = append([]RemoteServeTarget(nil), r.ServeTargets...)
 	out.SSHKeys = make([]RemoteSSHKey, len(r.SSHKeys))
 	for i, entry := range r.SSHKeys {
 		out.SSHKeys[i] = entry.Clone()
@@ -217,6 +229,87 @@ func ValidateRemoteServe(ports []int) error {
 			return fmt.Errorf("serve[%d]: 端口 %d 重复", i, p)
 		}
 		seen[p] = true
+	}
+	return nil
+}
+
+// ParseRemoteServeTarget 解析单条自定义暴露映射目标，返回网络类型（"loopback"、"tcp" 或 "unix"）与规范化目标地址。
+//
+// 参数说明：
+//   - target: string，支持纯端口号（"80"）、host:port（"10.0.0.2:5555"、"android.lan:5555"）
+//     或 Unix 域套接字路径（"/run/app.sock"、"unix:/run/app.sock"）。
+//
+// 返回值说明：network 与 addr 均为规范化后的拨号参数，合法时 error 为 nil。
+//
+// 错误情况：空串、含非法空白/控制字符、端口越界或 host:port 结构非法时返回可读错误。
+func ParseRemoteServeTarget(target string) (network, addr string, err error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", "", fmt.Errorf("目标不能为空")
+	}
+	if strings.ContainsAny(target, "\r\n\t\x00") {
+		return "", "", fmt.Errorf("目标 %q 包含非法控制字符", target)
+	}
+	if strings.HasPrefix(target, "unix:") {
+		socketPath := strings.TrimSpace(strings.TrimPrefix(target, "unix:"))
+		if socketPath == "" {
+			return "", "", fmt.Errorf("Unix 套接字路径不能为空")
+		}
+		return "unix", socketPath, nil
+	}
+	if strings.HasPrefix(target, "/") {
+		return "unix", target, nil
+	}
+	if port, perr := strconv.Atoi(target); perr == nil {
+		if port <= 0 || port > 65535 {
+			return "", "", fmt.Errorf("目标端口 %d 超出 1-65535", port)
+		}
+		return "loopback", strconv.Itoa(port), nil
+	}
+	host, portStr, serr := net.SplitHostPort(target)
+	if serr != nil {
+		return "", "", fmt.Errorf("目标 %q 无效（应为 端口、host:port 或 /path/to.sock）", target)
+	}
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, " /@#?") {
+		return "", "", fmt.Errorf("目标主机 %q 无效", host)
+	}
+	port, perr := strconv.Atoi(portStr)
+	if perr != nil || port <= 0 || port > 65535 {
+		return "", "", fmt.Errorf("目标端口 %q 超出 1-65535", portStr)
+	}
+	return "tcp", net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// ValidateRemoteServeTargets 校验自定义暴露端口映射列表，并确保不与普通本机暴露端口冲突。
+//
+// 参数说明：
+//   - servePorts: []int，当前已配置的普通本机暴露端口列表。
+//   - targets: []RemoteServeTarget，待校验的端口映射列表。
+//
+// 返回值说明：error，端口范围、目标格式与去重均合法时返回 nil。
+//
+// 错误情况：端口越界、重复、与 serve 端口冲突或目标语法非法时返回错误。
+func ValidateRemoteServeTargets(servePorts []int, targets []RemoteServeTarget) error {
+	serveSet := make(map[int]bool, len(servePorts))
+	for _, p := range servePorts {
+		serveSet[p] = true
+	}
+	seen := make(map[int]bool, len(targets))
+	for i, item := range targets {
+		if item.Port <= 0 || item.Port > 65535 {
+			return fmt.Errorf("serve-targets[%d]: 端口 %d 超出 1-65535", i, item.Port)
+		}
+		if seen[item.Port] {
+			return fmt.Errorf("serve-targets[%d]: 端口 %d 重复", i, item.Port)
+		}
+		if serveSet[item.Port] {
+			return fmt.Errorf("serve-targets[%d]: 端口 %d 已在普通暴露端口中，请先移除再配置映射", i, item.Port)
+		}
+		if _, _, err := ParseRemoteServeTarget(item.Target); err != nil {
+			return fmt.Errorf("serve-targets[%d]: %w", i, err)
+		}
+		seen[item.Port] = true
 	}
 	return nil
 }
@@ -330,6 +423,9 @@ func (c *Config) checkRemote() error {
 	if err := ValidateRemoteServe(r.Serve); err != nil {
 		return fmt.Errorf("remote: %w", err)
 	}
+	if err := ValidateRemoteServeTargets(r.Serve, r.ServeTargets); err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
 	if err := ValidateRemoteAllow(r.Allow); err != nil {
 		return fmt.Errorf("remote: %w", err)
 	}
@@ -374,6 +470,37 @@ func (c *Config) checkRemote() error {
 }
 
 // checkRemotePeer 校验单个远端条目的必填字段；token 合法性由 remote 包解析兜底。
+// LoadRemotePeers 只读取配置文件中的 remote.remotes 段，供 CLI 把远端名解析为 token。
+//
+// 参数说明：
+//   - path: string，proxyd 配置文件路径。
+//
+// 返回值说明：[]RemotePeer 和 error；成功返回已逐条校验的保存远端列表。
+//
+// 错误情况：文件读取、YAML 解析失败或某条远端不合法时返回错误。刻意不走完整 Load：
+// 纯客户端命令（ssh/desk）只需要远端表，不应因代理段缺字段（如未写 port-range/rules
+// 的精简配置）而拒绝工作。
+func LoadRemotePeers(path string) ([]RemotePeer, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var doc struct {
+		Remote struct {
+			Remotes []RemotePeer `yaml:"remotes"`
+		} `yaml:"remote"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	for i, p := range doc.Remote.Remotes {
+		if err := checkRemotePeer(p); err != nil {
+			return nil, fmt.Errorf("remote.remotes[%d]: %w", i, err)
+		}
+	}
+	return doc.Remote.Remotes, nil
+}
+
 func checkRemotePeer(p RemotePeer) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("名称不能为空")

@@ -64,12 +64,14 @@ type remoteRelayJSON struct {
 // remoteStatusJSON 对应 GET /api/remote 的响应（token 为打码摘要）。
 type remoteStatusJSON struct {
 	Enabled         bool                        `json:"enabled"`
+	Hybrid          bool                        `json:"hybrid"`
 	Running         bool                        `json:"running"`
 	Error           string                      `json:"error,omitempty"`
 	Token           string                      `json:"token,omitempty"`
 	ClientKey       string                      `json:"client_key,omitempty"`
 	Region          string                      `json:"region,omitempty"`
 	Serve           []int                       `json:"serve"`
+	ServeTargets    []config.RemoteServeTarget  `json:"serve_targets"`
 	Allow           []allowEntryJSON            `json:"allow"`
 	AllowRestricted bool                        `json:"allow_restricted"`
 	TempKey         string                      `json:"temp_key,omitempty"`
@@ -91,6 +93,7 @@ type remoteStatusJSON struct {
 		Enabled    bool   `json:"enabled"`
 		Running    bool   `json:"running"`
 		Active     int64  `json:"active"`
+		DERPRegion string `json:"derp_region,omitempty"`
 		LastError  string `json:"last_error,omitempty"`
 	} `json:"forwards"`
 }
@@ -116,6 +119,10 @@ func cmdRemote(args []string) error {
 	// pipe 是 ProxyCommand 用的纯客户端管道，无需守护进程。
 	if sub == "pipe" {
 		return cmdRemotePipe(rest[1:], cfgFile)
+	}
+	// session-pipe 是 Web 终端会话内经守护进程中转的 ProxyCommand，凭据来自环境变量。
+	if sub == "session-pipe" {
+		return cmdRemoteSessionPipe(rest[1:])
 	}
 	// genkey 生成应急客户端身份（纯本地，不触碰守护进程与 state-dir）。
 	if sub == "genkey" {
@@ -158,6 +165,8 @@ func cmdRemote(args []string) error {
 		return nil
 	case "serve":
 		return cmdRemoteServe(c, rest[1:])
+	case "hybrid":
+		return cmdRemoteHybrid(c, rest[1:])
 	case "relay":
 		return cmdRemoteRelay(c, rest[1:])
 	case "allow":
@@ -181,7 +190,7 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|hybrid|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe|session-pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -247,7 +256,13 @@ func remotePrintStatus(c *apiClient) error {
 	if st.WebTerminal {
 		fmt.Printf("Web 终端：已开启（管理 API %s；proxyd remote web-terminal off 可立即关闭）\n", st.APIListen)
 	}
+	if st.Hybrid {
+		fmt.Println("后量子混合握手：已开启（ML-KEM-768，实验性，需 tailcat v0.8.0+ 客户端）")
+	}
 	fmt.Printf("暴露端口：%s\n", formatPorts(st.Serve))
+	if len(st.ServeTargets) > 0 {
+		fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+	}
 	if len(st.Peers) > 0 {
 		fmt.Println("\n入站客户端：")
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -266,6 +281,16 @@ func remotePrintStatus(c *apiClient) error {
 				formatBytes(peer.RxBytes), formatBytes(peer.TxBytes), peer.Active)
 		}
 		_ = tw.Flush()
+		relayed := 0
+		for _, peer := range st.Peers {
+			if peer.Online && peer.Path == remote.PathDERP {
+				relayed++
+			}
+		}
+		if relayed > 0 {
+			fmt.Printf("\n注意：%d 个在线客户端正在走 DERP 中继（TCP）。远程桌面、SSH 交互和大文件传输通常明显慢于直连。\n", relayed)
+			fmt.Println("  可检查双方 UDP 是否互通、客户端防火墙是否放行 proxyd 入站 UDP，以及是否有多个网口在同一子网抢路由。")
+		}
 	}
 	if len(st.Forwards) > 0 {
 		fmt.Println("\n本地转发：")
@@ -424,7 +449,49 @@ func formatRemoteExpiry(expiresAt *time.Time, now time.Time) string {
 	return remaining.Truncate(time.Minute).String()
 }
 
-// cmdRemoteServe 查看或设置经隧道暴露的本机端口。
+// formatServeTargets 把自定义端口映射列表格式化为可读文本。
+func formatServeTargets(targets []config.RemoteServeTarget) string {
+	if len(targets) == 0 {
+		return "（无）"
+	}
+	parts := make([]string, len(targets))
+	for i, t := range targets {
+		parts[i] = fmt.Sprintf("%d → %s", t.Port, t.Target)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// cmdRemoteHybrid 查看或切换 tailcat v0.8.0 实验性后量子混合握手（ML-KEM-768）。
+func cmdRemoteHybrid(c *apiClient, args []string) error {
+	if len(args) == 0 {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return err
+		}
+		if st.Hybrid {
+			fmt.Println("后量子混合握手：已开启（ML-KEM-768，实验性，需 tailcat v0.8.0+ 客户端）")
+		} else {
+			fmt.Println("后量子混合握手：关闭")
+		}
+		return nil
+	}
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		return fmt.Errorf("用法: proxyd remote hybrid [on|off]")
+	}
+	enabled := args[0] == "on"
+	var st remoteStatusJSON
+	if err := c.do(http.MethodPost, "/api/remote/hybrid", map[string]bool{"enabled": enabled}, &st); err != nil {
+		return err
+	}
+	if enabled {
+		fmt.Println("后量子混合握手（ML-KEM-768）已开启；token 已更新，客户端需升级至 tailcat/proxyd v0.8.0+")
+	} else {
+		fmt.Println("后量子混合握手已关闭；token 已更新")
+	}
+	return nil
+}
+
+// cmdRemoteServe 查看或设置经隧道暴露的本机端口，或通过 map 子命令管理自定义目标映射。
 func cmdRemoteServe(c *apiClient, args []string) error {
 	if len(args) == 0 {
 		var st remoteStatusJSON
@@ -432,10 +499,16 @@ func cmdRemoteServe(c *apiClient, args []string) error {
 			return err
 		}
 		fmt.Printf("暴露端口：%s\n", formatPorts(st.Serve))
+		if len(st.ServeTargets) > 0 {
+			fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+		}
 		return nil
 	}
+	if args[0] == "map" {
+		return cmdRemoteServeMap(c, args[1:])
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("用法: proxyd remote serve [端口,端口...]（空串清空）")
+		return fmt.Errorf("用法: proxyd remote serve [端口,端口...] | map [list|add <端口:目标>|del <端口>]")
 	}
 	var ports []int
 	if strings.TrimSpace(args[0]) != "" {
@@ -453,6 +526,110 @@ func cmdRemoteServe(c *apiClient, args []string) error {
 	}
 	fmt.Printf("暴露端口已更新：%s\n", formatPorts(st.Serve))
 	return nil
+}
+
+// parseServeMappingArg 解析 <端口:目标> 参数，例如 8080:80、5555:10.0.0.2:5555、8022:/run/app.sock。
+func parseServeMappingArg(raw string) (config.RemoteServeTarget, error) {
+	portText, target, ok := strings.Cut(strings.TrimSpace(raw), ":")
+	if !ok {
+		return config.RemoteServeTarget{}, fmt.Errorf("映射 %q 格式无效（应为 端口:目标，如 8080:80、5555:10.0.0.2:5555 或 8022:/run/app.sock）", raw)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil || port <= 0 || port > 65535 {
+		return config.RemoteServeTarget{}, fmt.Errorf("隧道端口 %q 超出 1-65535", portText)
+	}
+	target = strings.TrimSpace(target)
+	if _, _, err := config.ParseRemoteServeTarget(target); err != nil {
+		return config.RemoteServeTarget{}, err
+	}
+	return config.RemoteServeTarget{Port: port, Target: target}, nil
+}
+
+// cmdRemoteServeMap 管理自定义暴露端口映射（本机异端口、局域网主机或 Unix Socket）。
+func cmdRemoteServeMap(c *apiClient, args []string) error {
+	load := func() (remoteStatusJSON, error) {
+		var st remoteStatusJSON
+		if err := c.do(http.MethodGet, "/api/remote", nil, &st); err != nil {
+			return remoteStatusJSON{}, err
+		}
+		return st, nil
+	}
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list":
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射：%s\n", formatServeTargets(st.ServeTargets))
+		return nil
+	case "add":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote serve map add <端口:目标>（如 8080:80、5555:10.0.0.2:5555、8022:/run/app.sock）")
+		}
+		entry, err := parseServeMappingArg(args[1])
+		if err != nil {
+			return err
+		}
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		next := make([]config.RemoteServeTarget, 0, len(st.ServeTargets)+1)
+		replaced := false
+		for _, item := range st.ServeTargets {
+			if item.Port == entry.Port {
+				next = append(next, entry)
+				replaced = true
+			} else {
+				next = append(next, item)
+			}
+		}
+		if !replaced {
+			next = append(next, entry)
+		}
+		var updated remoteStatusJSON
+		if err := c.do(http.MethodPost, "/api/remote/serve-targets", map[string]any{"targets": next}, &updated); err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射已更新：%s\n", formatServeTargets(updated.ServeTargets))
+		return nil
+	case "del":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote serve map del <隧道端口>")
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(args[1]))
+		if err != nil || port <= 0 || port > 65535 {
+			return fmt.Errorf("隧道端口 %q 无效", args[1])
+		}
+		st, err := load()
+		if err != nil {
+			return err
+		}
+		next := make([]config.RemoteServeTarget, 0, len(st.ServeTargets))
+		found := false
+		for _, item := range st.ServeTargets {
+			if item.Port == port {
+				found = true
+				continue
+			}
+			next = append(next, item)
+		}
+		if !found {
+			return fmt.Errorf("未找到隧道端口 %d 的自定义映射", port)
+		}
+		var updated remoteStatusJSON
+		if err := c.do(http.MethodPost, "/api/remote/serve-targets", map[string]any{"targets": next}, &updated); err != nil {
+			return err
+		}
+		fmt.Printf("自定义端口映射已更新：%s\n", formatServeTargets(updated.ServeTargets))
+		return nil
+	default:
+		return fmt.Errorf("未知子命令 %q（list|add|del）", sub)
+	}
 }
 
 // cmdRemoteAllow 查看或增删客户端授权；add 支持 --ttl 与 --ports 最小权限。
@@ -566,8 +743,39 @@ func cmdRemoteAllow(c *apiClient, args []string) error {
 			fmt.Println("已移出白名单")
 		}
 		return nil
+	case "disconnect":
+		if len(args) != 2 {
+			return fmt.Errorf("用法: proxyd remote allow disconnect <别名|nodekey:... 公钥>")
+		}
+		target := strings.TrimSpace(args[1])
+		if !strings.HasPrefix(target, "nodekey:") {
+			st, err := load()
+			if err != nil {
+				return err
+			}
+			resolved := ""
+			for _, e := range st.Allow {
+				if e.Name == target {
+					resolved = e.Key
+					break
+				}
+			}
+			if resolved == "" {
+				return fmt.Errorf("白名单中没有别名为 %q 的客户端（可直接传 nodekey:... 公钥）", target)
+			}
+			target = resolved
+		}
+		var result struct {
+			Disconnected      bool `json:"disconnected"`
+			ClosedConnections int  `json:"closed_connections"`
+		}
+		if err := c.do(http.MethodPost, "/api/remote/clients/disconnect", map[string]string{"key": target}, &result); err != nil {
+			return err
+		}
+		fmt.Printf("已请求断开客户端（隧道移除=%v，关闭活动连接=%d）；授权配置未变更\n", result.Disconnected, result.ClosedConnections)
+		return nil
 	}
-	return fmt.Errorf("未知子命令 %q（list|add|del）", sub)
+	return fmt.Errorf("未知子命令 %q（list|add|del|disconnect）", sub)
 }
 
 // parseRemoteAllowAdd 解析 allow add 的位置参数、TTL 和端口限制。
@@ -777,6 +985,8 @@ func formatRemoteAuditAction(action string) string {
 		return "SSH 结束"
 	case "ssh_disconnect_requested":
 		return "请求断开"
+	case remote.AuditActionClientDisconnect:
+		return "断开客户端"
 	default:
 		return action
 	}
@@ -1328,49 +1538,46 @@ func cmdSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 解析 -p 端口（默认 22）；首个非 flag 参数为 [user@]<远端名|token>，其余透传给 ssh。
-	port := "22"
-	var dst string
-	var sshArgs []string
-	for i := 0; i < len(rest); i++ {
-		a := rest[i]
-		switch {
-		case a == "-p" && i+1 < len(rest):
-			port = rest[i+1]
-			i++
-		case strings.HasPrefix(a, "-p") && len(a) > 2:
-			port = a[2:]
-		case dst == "" && !strings.HasPrefix(a, "-"):
-			dst = a
-		default:
-			sshArgs = append(sshArgs, a)
-		}
+	parsed, err := parseSSHCommandArgs(rest)
+	if err != nil {
+		return err
 	}
-	if dst == "" {
-		return fmt.Errorf("用法: proxyd ssh [-c 配置] [-p 端口] [--client-key privkey:私钥] [user@]<远端名|token> [ssh 参数/远端命令...]")
-	}
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum <= 0 || portNum > 65535 {
-		return fmt.Errorf("端口 %q 无效", port)
-	}
-
-	user, name, hasUser := strings.Cut(dst, "@")
-	if !hasUser {
-		name = user
-		user = ""
-	}
+	portNum := parsed.port
+	user := parsed.user
+	name := parsed.name
 
 	// 名称 → token：读配置文件的 remotes；直接给 tc... token 时原样使用（无需配置文件）。
+	// 本地解析不到且处于 Web 终端会话（守护进程注入了中转凭据）时，改由守护进程代拨：
+	// root 守护进程降权后的会话既读不到 root 配置里的 token，也没有守护进程的客户端身份。
 	var token string
+	viaSession := false
 	if strings.HasPrefix(name, "tc") {
 		token = name
 	} else {
-		cfg, err := config.Load(cfgFile)
+		var resolveErr error
+		peers, err := config.LoadRemotePeers(cfgFile)
 		if err != nil {
-			return fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", cfgFile, err)
+			resolveErr = fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", cfgFile, err)
+		} else {
+			token, resolveErr = remote.ResolveToken(peers, name)
 		}
-		if token, err = remote.ResolveToken(cfg.Remote.Remotes, name); err != nil {
-			return err
+		if resolveErr != nil {
+			if !sessionRelayAvailable() {
+				return resolveErr
+			}
+			viaSession = true
+		}
+	}
+	if viaSession {
+		if diagnose {
+			return fmt.Errorf("远端 %q 经守护进程会话中转连接，暂不支持 --diagnose（可在守护进程所在账户下运行）", name)
+		}
+		if clientKeyText != "" {
+			return fmt.Errorf("远端 %q 经守护进程会话中转连接，使用守护进程身份，不能同时指定 --client-key", name)
+		}
+		// 名称会拼进由 shell 执行的 ProxyCommand，只放行安全字符集，无需处理转义。
+		if !isSafeRelayName(name) {
+			return fmt.Errorf("远端名 %q 含特殊字符，无法经会话中转（仅支持字母、数字与 ._-）", name)
 		}
 	}
 
@@ -1404,6 +1611,10 @@ func cmdSSH(args []string) error {
 		quotedCfg = "\"" + cfgFile + "\""
 	}
 	proxyCmd := fmt.Sprintf("%s remote -c %s pipe %s %d", quotedExe, quotedCfg, token, portNum)
+	if viaSession {
+		// 凭据与 API 地址经环境变量（ssh 原样传给 ProxyCommand）获取，不出现在命令行。
+		proxyCmd = fmt.Sprintf("%s remote session-pipe %s %d", quotedExe, name, portNum)
+	}
 
 	argv := []string{
 		"-o", "UpdateHostKeys no",
@@ -1411,16 +1622,17 @@ func cmdSSH(args []string) error {
 		"-o", "UserKnownHostsFile " + os.DevNull,
 		"-o", "LogLevel ERROR",
 		"-o", "ProxyCommand=" + proxyCmd,
-		sshDst,
 	}
+	argv = append(argv, parsed.preSSHArgs...)
 	if diagnose {
 		// 诊断参数放在目标之前；BatchMode 禁止无人值守密码提示，子系统使用真实交互 PTY。
-		diagnosticArgs := append([]string{}, argv[:len(argv)-1]...)
-		diagnosticArgs = append(diagnosticArgs, sshArgs...)
+		diagnosticArgs := append([]string{}, argv...)
+		diagnosticArgs = append(diagnosticArgs, parsed.postSSHArgs...)
 		diagnosticArgs = append(diagnosticArgs, "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-tt", "-s", sshDst, "proxyd-diagnostics")
 		return runSSHDiagnostic(sshExe, diagnosticArgs, cfgFile, token, clientKeyText, portNum)
 	}
-	argv = append(argv, sshArgs...)
+	argv = append(argv, sshDst)
+	argv = append(argv, parsed.postSSHArgs...)
 
 	cmd := exec.Command(sshExe, argv...)
 	cmd.Stdin = os.Stdin
@@ -1443,4 +1655,97 @@ func cmdSSH(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// sshCommandArgs 保存解析后的 proxyd ssh 参数，区分目标前 SSH 选项与目标后透传参数/远端命令。
+type sshCommandArgs struct {
+	port        int
+	user        string
+	name        string
+	preSSHArgs  []string
+	postSSHArgs []string
+}
+
+// isSSHValueFlag 判断单个短参数是否为 OpenSSH 需要紧跟值的选项（不含已单独处理的 -p/-l）。
+func isSSHValueFlag(arg string) bool {
+	return len(arg) == 2 && arg[0] == '-' && strings.ContainsRune("BbDEeFIiJLmOQRSwW", rune(arg[1]))
+}
+
+// parseSSHCommandArgs 解析 proxyd ssh 的端口、目标用户、远端名及透传参数。
+// 支持 -p <端口>/-p<端口>、-l <用户>/-l<用户> 与 [user@]<远端名|token>；
+// 目标前的 OpenSSH 带值选项（如 -i key、-o K=V）会被识别并保留在目标之前，
+// 避免其参数值被误判为远端名；进入远端命令后的参数一律原样透传。
+func parseSSHCommandArgs(rest []string) (sshCommandArgs, error) {
+	port := "22"
+	var dst, flagUser string
+	var preArgs, postArgs []string
+	seenRemoteCmd := false
+
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if seenRemoteCmd {
+			postArgs = append(postArgs, a)
+			continue
+		}
+		switch {
+		case a == "-p":
+			if i+1 >= len(rest) {
+				return sshCommandArgs{}, fmt.Errorf("-p 缺少端口参数")
+			}
+			port = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "-p") && len(a) > 2:
+			port = a[2:]
+		case a == "-l":
+			if i+1 >= len(rest) {
+				return sshCommandArgs{}, fmt.Errorf("-l 缺少用户名参数")
+			}
+			flagUser = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "-l") && len(a) > 2:
+			flagUser = a[2:]
+		case dst == "" && isSSHValueFlag(a):
+			preArgs = append(preArgs, a)
+			if i+1 < len(rest) {
+				preArgs = append(preArgs, rest[i+1])
+				i++
+			}
+		case dst == "" && strings.HasPrefix(a, "-"):
+			preArgs = append(preArgs, a)
+		case dst == "":
+			dst = a
+		case !strings.HasPrefix(a, "-"):
+			seenRemoteCmd = true
+			postArgs = append(postArgs, a)
+		default:
+			postArgs = append(postArgs, a)
+			if isSSHValueFlag(a) && i+1 < len(rest) {
+				postArgs = append(postArgs, rest[i+1])
+				i++
+			}
+		}
+	}
+	if dst == "" {
+		return sshCommandArgs{}, fmt.Errorf("用法: proxyd ssh [-c 配置] [-p 端口] [-l 用户] [--client-key privkey:私钥] [user@]<远端名|token> [ssh 参数/远端命令...]")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum <= 0 || portNum > 65535 {
+		return sshCommandArgs{}, fmt.Errorf("端口 %q 无效", port)
+	}
+
+	user, name, hasUser := strings.Cut(dst, "@")
+	if !hasUser {
+		name = user
+		user = flagUser
+	}
+	if name == "" {
+		return sshCommandArgs{}, fmt.Errorf("远端目标 %q 无效", dst)
+	}
+	return sshCommandArgs{
+		port:        portNum,
+		user:        user,
+		name:        name,
+		preSSHArgs:  preArgs,
+		postSSHArgs: postArgs,
+	}, nil
 }

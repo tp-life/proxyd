@@ -1,6 +1,7 @@
 // Package autostart 管理 proxyd 的开机自启项：
 // macOS 写 /Library/LaunchDaemons/com.proxyd.plist（系统启动即托管 serve）；
-// Linux 写 ~/.config/systemd/user/proxyd.service 并 systemctl --user enable；
+// Linux 普通用户写 ~/.config/systemd/user/proxyd.service 并 systemctl --user enable，
+// root（TUN）写 /etc/systemd/system/proxyd.service 并 systemctl enable；
 // Windows 写注册表 HKCU\...\Run（执行 start 派生后台进程，避免弹控制台窗口）。
 // 不支持的平台返回 ErrUnsupported。
 package autostart
@@ -37,13 +38,6 @@ type Options struct {
 	Exe        string // proxyd 二进制绝对路径
 	ConfigPath string // 配置文件绝对路径
 	StateDir   string // 状态目录（日志文件落在其下）
-	// RootDaemon 为 true 时服务以 root 运行（macOS plist 省略 UserName）。
-	// 历史用途是 TUN 需要 root；tun-helper 落地后不再有调用方传 true，
-	// 保留字段仅为渲染兼容（docs/adr/0004 方案 B 追述）。
-	RootDaemon bool
-	// RunAsUser 显式指定 macOS LaunchDaemon 的降权账户（旧 root 自启项迁移用）；
-	// 为空时按 sudo 调用者/当前进程账户解析。
-	RunAsUser string
 }
 
 // On 注册开机自启并立即启动一次。

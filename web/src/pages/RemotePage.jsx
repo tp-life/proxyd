@@ -90,8 +90,10 @@ export function RemotePage({
   toggleEnabled,
   copyToken,
   saveServe,
+  saveServeTargets,
   saveRelay,
   saveAllow,
+  disconnectClient,
   manageSSHKeys,
   saveKeyFile,
   importKeyFile,
@@ -102,6 +104,7 @@ export function RemotePage({
   refreshAudit,
   toggleRemoteDetails,
   setBuiltinSSH,
+  setHybrid,
   saveShellUser,
   setWebTerminal,
   resetTempKey,
@@ -120,6 +123,8 @@ export function RemotePage({
   setSshSetEnvTerm,
 }) {
   const [serveInput, setServeInput] = useState("");
+  const [serveTargetPortInput, setServeTargetPortInput] = useState("");
+  const [serveTargetAddrInput, setServeTargetAddrInput] = useState("");
   const [relayRegionInput, setRelayRegionInput] = useState("");
   const [relayMapInput, setRelayMapInput] = useState("");
   const [allowInput, setAllowInput] = useState("");
@@ -142,9 +147,11 @@ export function RemotePage({
   const page = NAV_ITEMS.find((item) => item.id === view);
 
   const serve = status?.serve || [];
+  const serveTargets = status?.serve_targets || [];
   const allow = status?.allow || [];
   const activity = status?.client_activity || {};
   const peers = status?.peers || [];
+  const relayedPeers = peers.filter((item) => item.online && item.path === "derp");
   const tempPeer = peers.find((item) => item.key === status?.temp_key);
   const forwards = status?.forwards || [];
   const initialLoading = loading && !hasLoaded && !status;
@@ -399,6 +406,33 @@ export function RemotePage({
   }
 
   /**
+   * submitServeTarget 新增或覆盖一条自定义暴露端口映射（异端口 / 局域网 / Unix Socket）。
+   */
+  async function submitServeTarget(event) {
+    event.preventDefault();
+    const port = Number.parseInt(serveTargetPortInput, 10);
+    const target = serveTargetAddrInput.trim();
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !target) {
+      return;
+    }
+    const next = [
+      ...serveTargets.filter((item) => item.port !== port),
+      { port, target },
+    ].sort((a, b) => a.port - b.port);
+    if (await saveServeTargets(next)) {
+      setServeTargetPortInput("");
+      setServeTargetAddrInput("");
+    }
+  }
+
+  /**
+   * removeServeTarget 从自定义映射列表移除指定隧道端口并提交。
+   */
+  async function removeServeTarget(port) {
+    await saveServeTargets(serveTargets.filter((item) => item.port !== port));
+  }
+
+  /**
    * submitAllowKey 校验公钥、TTL 与端口范围，并把最小授权条目整体提交。
    *
    * 参数说明：event 为表单提交事件。
@@ -564,15 +598,25 @@ export function RemotePage({
         </div>
       )}
 
+      {relayedPeers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">
+          <CircleAlert size={16} aria-hidden="true" />
+          <span className="min-w-0 break-words">
+            检测到 {relayedPeers.length} 个在线客户端正在走 DERP 中继（TCP）。远程桌面、SSH 交互和大文件传输通常明显慢于直连；
+            请检查双方 UDP 连通性、客户端防火墙是否放行 proxyd 入站 UDP，以及是否有多余网口在同一子网抢路由。
+          </span>
+        </div>
+      )}
+
       {view === "remote/devices" && <RemoteDevicesIntro  />}
 
       {initialLoading ? (
         <EmptyState title="正在加载远程连接状态" detail="等待 /api/remote 返回服务状态。" />
       ) : (
 <>
-{view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} relayMapInput={relayMapInput} relayRegionInput={relayRegionInput} removeServePort={removeServePort} resetRelay={resetRelay} serve={serve} serveInput={serveInput} setBuiltinSSH={setBuiltinSSH} setRelayMapInput={setRelayMapInput} setRelayRegionInput={setRelayRegionInput} setServeInput={setServeInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitRelay={submitRelay} submitServePort={submitServePort} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
+{view === "remote/services" && <RemoteServicesPanel clearShellUser={clearShellUser} copyText={copyText} copyToken={copyToken} onOpenTerminal={onOpenTerminal} openSSHPort={openSSHPort} relayMapInput={relayMapInput} relayRegionInput={relayRegionInput} removeServePort={removeServePort} removeServeTarget={removeServeTarget} resetRelay={resetRelay} serve={serve} serveInput={serveInput} serveTargetAddrInput={serveTargetAddrInput} serveTargetPortInput={serveTargetPortInput} serveTargets={serveTargets} setBuiltinSSH={setBuiltinSSH} setHybrid={setHybrid} setRelayMapInput={setRelayMapInput} setRelayRegionInput={setRelayRegionInput} setServeInput={setServeInput} setServeTargetAddrInput={setServeTargetAddrInput} setServeTargetPortInput={setServeTargetPortInput} setShellUserInput={setShellUserInput} setWebTerminal={setWebTerminal} shellUserInput={shellUserInput} status={status} submitRelay={submitRelay} submitServePort={submitServePort} submitServeTarget={submitServeTarget} submitShellUser={submitShellUser} terminalAvailable={terminalAvailable} toggleEnabled={toggleEnabled} />}
 {view === "remote/files" && <RemoteFilesPanel apiLoopback={status?.api_loopback} downloadRemoteFile={downloadRemoteFile} listRemoteFiles={listRemoteFiles} remotes={remotes} uploadRemoteFile={uploadRemoteFile} />}
-{view === "remote/access" && <RemoteAccessPanel activity={activity} allow={allow} allowInput={allowInput} allowNameInput={allowNameInput} allowPortsInput={allowPortsInput} allowTTL={allowTTL} copyTempKey={copyTempKey} copyText={copyText} importKeyFile={importKeyFile} keyFileInput={keyFileInput} manageSSHKeys={manageSSHKeys} peers={peers} removeAllowKey={removeAllowKey} resetTempKey={resetTempKey} saveKeyFile={saveKeyFile} setAllowInput={setAllowInput} setAllowNameInput={setAllowNameInput} setAllowPortsInput={setAllowPortsInput} setAllowTTL={setAllowTTL} setKeyFileInput={setKeyFileInput} status={status} submitAllowKey={submitAllowKey} submitKeyFile={submitKeyFile} tempPeer={tempPeer} />}
+{view === "remote/access" && <RemoteAccessPanel activity={activity} allow={allow} allowInput={allowInput} allowNameInput={allowNameInput} allowPortsInput={allowPortsInput} allowTTL={allowTTL} copyTempKey={copyTempKey} copyText={copyText} disconnectClient={disconnectClient} importKeyFile={importKeyFile} keyFileInput={keyFileInput} manageSSHKeys={manageSSHKeys} peers={peers} removeAllowKey={removeAllowKey} resetTempKey={resetTempKey} saveKeyFile={saveKeyFile} setAllowInput={setAllowInput} setAllowNameInput={setAllowNameInput} setAllowPortsInput={setAllowPortsInput} setAllowTTL={setAllowTTL} setKeyFileInput={setKeyFileInput} status={status} submitAllowKey={submitAllowKey} submitKeyFile={submitKeyFile} tempPeer={tempPeer} />}
 {view === "remote/audit" && <RemoteAuditPanel auditColumns={auditColumns} auditEntries={auditEntries} refreshAudit={refreshAudit} />}
 {view === "remote/devices" && <RemoteDevicesPanel expandedRemote={expandedRemote} probeRemote={probeRemote} remoteColumns={remoteColumns} remoteForm={remoteForm} remoteProbes={remoteProbes} remotes={remotes} setRemoteForm={setRemoteForm} setSshSetEnvTerm={setSshSetEnvTerm} sshSetEnvTerm={sshSetEnvTerm} submitRemote={submitRemote} />}
 {view === "remote/forwards" && <RemoteForwardsPanel forwardColumns={forwardColumns} forwardForm={forwardForm} forwards={forwards} remotes={remotes} setForwardForm={setForwardForm} submitForward={submitForward} />}

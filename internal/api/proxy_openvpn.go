@@ -85,8 +85,7 @@ func (s *Server) handleSetupOpenVPN(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, result)
+	writeJSONStatus(w, http.StatusCreated, result)
 }
 
 // handleTerminateOpenVPNSetup 删除 OpenVPN 聚合接入及其已清空策略组和受管路由。

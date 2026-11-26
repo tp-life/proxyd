@@ -15,7 +15,7 @@ func newSCPTestToken(t *testing.T) string {
 	priv := tailcat.NewPrivateKey()
 	ci := priv.Public
 	ci.RegionID = 1
-	return string(ci.ConnBlob())
+	return string(ci.Addr())
 }
 
 // TestFindTunnelToken 验证 scp 参数中隧道 token 操作数的识别规则：
@@ -154,5 +154,129 @@ func TestResolveDesktopToken(t *testing.T) {
 	}
 	if _, err := resolveDesktopToken("/path/that/does/not/exist", "tc-invalid"); err == nil {
 		t.Fatal("非法直接 token 应被拒绝")
+	}
+}
+
+// TestParseServeMappingArg 验证 CLI 自定义端口映射参数解析。
+func TestParseServeMappingArg(t *testing.T) {
+	for _, tc := range []struct {
+		raw        string
+		wantPort   int
+		wantTarget string
+		wantErr    bool
+	}{
+		{"8080:80", 8080, "80", false},
+		{"5555:10.2.200.213:5555", 5555, "10.2.200.213:5555", false},
+		{"5556:android.lan:5555", 5556, "android.lan:5555", false},
+		{"8022:/run/app.sock", 8022, "/run/app.sock", false},
+		{"8023:unix:/tmp/demo.sock", 8023, "unix:/tmp/demo.sock", false},
+		{"8080", 0, "", true},
+		{"0:80", 0, "", true},
+		{"8080:0", 0, "", true},
+	} {
+		got, err := parseServeMappingArg(tc.raw)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseServeMappingArg(%q) err=%v wantErr=%v", tc.raw, err, tc.wantErr)
+			continue
+		}
+		if !tc.wantErr && (got.Port != tc.wantPort || got.Target != tc.wantTarget) {
+			t.Errorf("parseServeMappingArg(%q) = %+v, want %d -> %q", tc.raw, got, tc.wantPort, tc.wantTarget)
+		}
+	}
+}
+
+// TestParseSSHCommandArgs 验证 proxyd ssh 对 -l/-p、user@host、目标前选项及远端命令的解析规则。
+func TestParseSSHCommandArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantPort int
+		wantUser string
+		wantName string
+		wantPre  []string
+		wantPost []string
+		wantErr  bool
+	}{
+		{
+			name:     "基础远端名",
+			args:     []string{"office"},
+			wantPort: 22,
+			wantName: "office",
+		},
+		{
+			name:     "user@host 写法",
+			args:     []string{"alice@office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 空格写法在目标前",
+			args:     []string{"-l", "alice", "office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 紧贴写法",
+			args:     []string{"-lalice", "office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 与 -p 在目标后",
+			args:     []string{"office", "-l", "alice", "-p", "2222"},
+			wantPort: 2222,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "目标前带值选项与远端命令中的 -l/-p 不冲突",
+			args:     []string{"-i", "/tmp/id_ed25519", "-l", "alice", "-p", "2222", "office", "ls", "-l", "/tmp", "-p"},
+			wantPort: 2222,
+			wantUser: "alice",
+			wantName: "office",
+			wantPre:  []string{"-i", "/tmp/id_ed25519"},
+			wantPost: []string{"ls", "-l", "/tmp", "-p"},
+		},
+		{
+			name:     "user@ 优先于 -l",
+			args:     []string{"-l", "alice", "bob@office"},
+			wantPort: 22,
+			wantUser: "bob",
+			wantName: "office",
+		},
+		{
+			name:    "-l 缺少参数报错",
+			args:    []string{"-l"},
+			wantErr: true,
+		},
+		{
+			name:    "-p 缺少参数报错",
+			args:    []string{"-p"},
+			wantErr: true,
+		},
+		{
+			name:    "缺少远端目标报错",
+			args:    []string{"-l", "alice"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSSHCommandArgs(tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseSSHCommandArgs(%v) err=%v wantErr=%v", tc.args, err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if got.port != tc.wantPort || got.user != tc.wantUser || got.name != tc.wantName ||
+				!reflect.DeepEqual(got.preSSHArgs, tc.wantPre) || !reflect.DeepEqual(got.postSSHArgs, tc.wantPost) {
+				t.Fatalf("parseSSHCommandArgs(%v) = %+v, want port=%d user=%q name=%q pre=%v post=%v",
+					tc.args, got, tc.wantPort, tc.wantUser, tc.wantName, tc.wantPre, tc.wantPost)
+			}
+		})
 	}
 }

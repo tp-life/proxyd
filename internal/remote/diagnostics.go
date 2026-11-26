@@ -37,7 +37,7 @@ func (m *Manager) DiagnoseNetwork(ctx context.Context) []DiagnosticCheck {
 	}
 	sources := []string{cfg.DERPMapURL}
 	if cfg.DERPMapURL == "" {
-		sources = []string{"https://tailcat.dev/derpmap.json", fallbackDERPMapURL}
+		sources = []string{tailcat.DefaultDERPMapURL, fallbackDERPMapURL}
 	}
 	result := []DiagnosticCheck{}
 	for i, source := range sources {
@@ -148,7 +148,7 @@ func (m *Manager) DiagnoseSSH(ctx context.Context, token string) []DiagnosticChe
 		return result
 	}
 	runtimeCtx := m.runtimeCtx
-	priv := m.clientKeyLocked()
+	m.clientKeyLocked()
 	keyErr := m.clientErr
 	m.mu.Unlock()
 	if keyErr != nil {
@@ -162,7 +162,7 @@ func (m *Manager) DiagnoseSSH(ctx context.Context, token string) []DiagnosticChe
 	defer stopRuntime()
 	start := time.Now()
 	dialCtx, stop := context.WithTimeout(ctx, 15*time.Second)
-	conn, err := Dial(dialCtx, token, 22, priv)
+	conn, err := m.dialShared(dialCtx, token, 22)
 	stop()
 	result[0].DurationMS = time.Since(start).Milliseconds()
 	if err != nil {

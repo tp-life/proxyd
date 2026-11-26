@@ -5,11 +5,9 @@ package app
 import (
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 
 	"proxyd/internal/config"
-	"proxyd/internal/proxy/tunhelper"
 	"proxyd/internal/proxy/tunperm"
 )
 
@@ -23,8 +21,6 @@ type TUNStatus struct {
 	Allowed    bool   `json:"allowed"`
 	Platform   string `json:"platform"`
 	Permission string `json:"permission,omitempty"`
-	// Helper 是 tun-helper 的安装/可达状态（仅 darwin 有值；其余平台为 nil）。
-	Helper *tunhelper.HelperStatus `json:"helper,omitempty"`
 }
 
 // TUNStatus 返回 TUN 配置状态以及当前进程的权限检测结果。
@@ -32,8 +28,7 @@ type TUNStatus struct {
 // 参数：无。
 //
 // 返回值：
-//   - TUNStatus：Enabled 来自当前配置；Allowed/Platform/Permission 来自操作系统适配器；
-//     darwin 上附带 tun-helper 的安装与可达状态。
+//   - TUNStatus：Enabled 来自当前配置；Allowed/Platform/Permission 来自操作系统适配器。
 //
 // 错误情况：无；底层无法读取权限状态时按不允许处理，并通过 Permission 返回修复指引。
 func (a *App) TUNStatus() TUNStatus {
@@ -41,18 +36,13 @@ func (a *App) TUNStatus() TUNStatus {
 	enabled := a.cfg.TUN.Enable
 	a.mu.RUnlock()
 	permission := tunperm.Current()
-	status := TUNStatus{
+	return TUNStatus{
 		Enabled:    enabled,
 		Active:     a.runner.TUNEnabled(),
 		Allowed:    permission.Allowed,
 		Platform:   permission.Platform,
 		Permission: permission.Hint,
 	}
-	if runtime.GOOS == "darwin" {
-		helper := tunHelperInstalledStatus()
-		status.Helper = &helper
-	}
-	return status
 }
 
 // SetTUN 开关 TUN 模式，并按“权限检查 → 热更新 → 持久化”的顺序应用变更。
@@ -72,6 +62,9 @@ func (a *App) SetTUN(enabled bool) error {
 		}
 	}
 
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	if a.cfg.TUN.Enable == enabled {
 		a.mu.Unlock()
@@ -82,35 +75,25 @@ func (a *App) SetTUN(enabled bool) error {
 	a.cfg.TUN.Enable = enabled
 	a.mu.Unlock()
 
-	if err := a.Regenerate(); err != nil {
-		return a.rollbackTUN(old, err)
+	if err := a.regenerateCurrentLocked(); err != nil {
+		return a.rollbackTUNLocked(old, err)
 	}
 
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
 	if err != nil {
-		return a.rollbackTUN(old, err)
+		return a.rollbackTUNLocked(old, err)
 	}
 	return nil
 }
 
-// rollbackTUN 恢复 TUN 配置并重新应用旧的 mihomo 运行态。
-//
-// 参数：
-//   - old: config.TUNConfig，切换前的完整 TUN 配置副本。
-//   - cause: error，触发回滚的生成、热更新或持久化错误。
-//
-// 返回值：
-//   - error：始终保留原始 cause；运行态恢复也失败时通过 errors.Join 同时返回两者。
-//
-// 错误情况：mihomo 的 TUN 创建错误可能只写日志，因此回滚同样经过 Regenerate 的
-// listener 实际状态校验；不能静默宣称已经恢复。
-func (a *App) rollbackTUN(old config.TUNConfig, cause error) error {
+// rollbackTUNLocked 恢复 TUN 配置并重新应用旧的 mihomo 运行态；调用方须持有 refreshing 锁。
+func (a *App) rollbackTUNLocked(old config.TUNConfig, cause error) error {
 	a.mu.Lock()
 	a.cfg.TUN = old
 	a.mu.Unlock()
-	if rollbackErr := a.Regenerate(); rollbackErr != nil {
+	if rollbackErr := a.regenerateCurrentLocked(); rollbackErr != nil {
 		return errors.Join(cause, fmt.Errorf("恢复旧 TUN 运行态失败: %w", rollbackErr))
 	}
 	return cause
@@ -134,6 +117,9 @@ func (a *App) SetDNSPreset(preset string) error {
 		return fmt.Errorf("invalid dns-preset %q (off|fake-ip|redir-host)", preset)
 	}
 
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	if a.cfg.DNSPreset == preset {
 		a.mu.Unlock()
@@ -143,35 +129,25 @@ func (a *App) SetDNSPreset(preset string) error {
 	a.cfg.DNSPreset = preset
 	a.mu.Unlock()
 
-	if err := a.Regenerate(); err != nil {
-		return a.rollbackDNSPreset(old, err)
+	if err := a.regenerateCurrentLocked(); err != nil {
+		return a.rollbackDNSPresetLocked(old, err)
 	}
 
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
 	if err != nil {
-		return a.rollbackDNSPreset(old, err)
+		return a.rollbackDNSPresetLocked(old, err)
 	}
 	return nil
 }
 
-// rollbackDNSPreset 恢复旧 DNS 预设并重新应用此前的 mihomo DNS 行为。
-//
-// 参数：
-//   - old: string，切换前的 dns-preset。
-//   - cause: error，触发回滚的热更新或持久化错误。
-//
-// 返回值：
-//   - error：原始错误；回滚也失败时同时包含回滚错误。
-//
-// 错误情况：回滚生成失败会通过 errors.Join 暴露，避免 UI 收到失败后运行态仍悄悄
-// 使用新 DNS 预设，尤其避免 TUN 场景出现难以定位的解析分裂。
-func (a *App) rollbackDNSPreset(old string, cause error) error {
+// rollbackDNSPresetLocked 恢复旧 DNS 预设并重新应用此前的 mihomo DNS 行为；调用方须持有 refreshing 锁。
+func (a *App) rollbackDNSPresetLocked(old string, cause error) error {
 	a.mu.Lock()
 	a.cfg.DNSPreset = old
 	a.mu.Unlock()
-	if rollbackErr := a.Regenerate(); rollbackErr != nil {
+	if rollbackErr := a.regenerateCurrentLocked(); rollbackErr != nil {
 		return errors.Join(cause, fmt.Errorf("恢复旧 DNS 预设失败: %w", rollbackErr))
 	}
 	return cause

@@ -146,7 +146,6 @@ func (c *Config) Clone() *Config {
 	out.GeoXUrl = cloneConfigMap(c.GeoXUrl)
 	out.Remote = c.Remote.Clone()
 	out.Desktop = c.Desktop.Clone()
-	out.Gateway = c.Gateway.Clone()
 	return &out
 }
 
@@ -272,6 +271,11 @@ func redactManualNode(entry any) any {
 	default:
 		return "<masked>"
 	}
+}
+
+// RedactURL 隐藏代理/订阅 URL 中的用户信息与敏感查询参数，编码型分享链接整体打码。
+func RedactURL(rawURL string) string {
+	return redactURL(rawURL)
 }
 
 // RedactMapping 返回隐藏凭据字段的透传映射深副本，供手动节点等列表接口
@@ -575,11 +579,6 @@ type Config struct {
 	// 底层 token 和端口开放仍由 Remote 作为唯一事实来源。
 	Desktop DesktopConfig `yaml:"desktop,omitempty" json:"desktop"`
 
-	// Gateway 「LAN 网关」旁路由模块：局域网设备把网关/DNS 指向本机即获得分流能力；
-	// 数据面寄生于 proxy 模块的 mihomo（redir/tproxy 入口 + SRC-IP-CIDR 设备规则），
-	// 特权操作平台分治（macOS root helper / Linux setcap，见 docs/adr/0003）；默认关闭。
-	Gateway GatewayConfig `yaml:"gateway,omitempty" json:"gateway"`
-
 	// AdBlock 广告拦截子功能（proxy 模块）：开启后注入 adblock rule-provider +
 	// RULE-SET,adblock,REJECT 规则（排在 custom-rules/rule-urls 之后、内置 rules 之前）；
 	// 默认关闭。主端口恒为规则模式，开启后对规则未命中的流量一致生效。
@@ -831,7 +830,6 @@ func (c *Config) applyDefaults() {
 	}
 	c.TUN.ApplyDefaults()
 	c.Desktop.ApplyDefaults()
-	c.Gateway.ApplyDefaults()
 	c.AdBlock.ApplyDefaults()
 	// geo 下载地址：默认镜像 + 用户按键覆盖
 	merged := make(map[string]any, len(DefaultGeoXUrl))
@@ -924,9 +922,6 @@ func (c *Config) ValidateForAPISecretBootstrap() error {
 // 错误情况：除 api-secret 的临时例外外，所有错误与 Validate 完全一致；
 // 调用方必须在启动任何管理监听前补齐口令并再次调用 Validate。
 func (c *Config) validate(allowMissingAPISecret bool) error {
-	if !c.ProxyDisabled && len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
-		return fmt.Errorf("at least one subscription or manual node is required")
-	}
 	for i, m := range c.ManualNodes {
 		if err := ValidateManualNodeShape(m); err != nil {
 			return fmt.Errorf("manual-nodes[%d]: %w", i, err)
@@ -1051,9 +1046,6 @@ func (c *Config) validate(allowMissingAPISecret bool) error {
 		return err
 	}
 	if err := c.Desktop.Validate(); err != nil {
-		return err
-	}
-	if err := c.checkGateway(); err != nil {
 		return err
 	}
 	if err := c.AdBlock.Validate(); err != nil {

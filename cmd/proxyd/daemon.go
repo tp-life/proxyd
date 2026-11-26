@@ -53,8 +53,7 @@ func cmdStart(args []string) error {
 		return err
 	}
 	if os.Geteuid() == 0 {
-		fmt.Println("提示：sudo 启动将得到 root 实例，状态文件属主会随之变化，一般无需 sudo；")
-		fmt.Println("      TUN 无需 root 实例：proxyd helper install 安装统一特权助手后即可 proxyd tun on。")
+		fmt.Println("提示：当前以 root 启动（支持 TUN；如不使用 TUN，以普通用户启动即可，避免状态文件属主变为 root）。")
 	}
 	warnBrokenSystemService()
 	if pid, alive := readPIDFile(pidPath(cfg)); alive {

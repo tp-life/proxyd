@@ -1,8 +1,8 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package autostart
 
-// 非 macOS 平台保持原有启动行为，仅展示已经实现的平台注册状态。
+// 非 macOS/Linux 平台保持原有启动行为，仅展示已经实现的平台注册状态。
 
 // inspect 查询注册状态。参数：无。返回：RuntimeStatus；尚未实现进程查询时明确标记未知。
 // 错误：平台注册查询错误作为消息返回。

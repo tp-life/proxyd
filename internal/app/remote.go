@@ -22,6 +22,7 @@ import (
 
 // initRemote 创建远程连接管理器；在 New 中调用。
 func (a *App) initRemote() {
+	remote.BypassSelfProxy(a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort)
 	a.remote = remote.NewManager(a.cfg.StateDir, func(format string, args ...any) {
 		log.Printf(format, args...)
 	})
@@ -150,6 +151,24 @@ func (a *App) RemoteAudit(tail int) []remote.AuditEntry {
 // 会话由 remote 模块自带的 shell 服务承载，不要求远程服务端运行或开启 builtin-ssh。
 func (a *App) OpenRemoteWebTerminal(ctx context.Context, size remote.TerminalSize) (*remote.TerminalSession, error) {
 	return a.remote.OpenWebTerminal(ctx, size)
+}
+
+// SetRemoteSessionRelayAddr 告知远程模块管理 API 的实际监听地址，供 Web 终端会话中转使用。
+//
+// 参数说明：addr 为 string，管理 API 监听地址（host:port）。
+// 返回值说明：无。
+// 错误情况：无；非法地址会让远程模块停止签发中转凭据。
+func (a *App) SetRemoteSessionRelayAddr(addr string) {
+	a.remote.SetSessionRelayAddr(addr)
+}
+
+// DialRemoteSession 凭 Web 终端会话中转凭据，以守护进程身份拨号已保存远端。
+//
+// 参数说明：ctx 控制建连；secret 为会话凭据；name 为已保存远端名称；port 为远端 TCP 端口。
+// 返回值说明：net.Conn，调用方负责关闭；会话结束时会被强制断开。
+// 错误情况：凭据无效返回 remote.ErrSessionGrantInvalid；名称未保存或拨号失败返回对应错误。
+func (a *App) DialRemoteSession(ctx context.Context, secret, name string, port int) (net.Conn, error) {
+	return a.remote.DialSessionRemote(ctx, secret, name, port)
 }
 
 // mutateRemote 是远程配置变更的统一事务入口。
@@ -283,9 +302,52 @@ func (a *App) SetRemoteServe(ports []int) error {
 		return err
 	}
 	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		if err := config.ValidateRemoteServeTargets(ports, r.ServeTargets); err != nil {
+			return err
+		}
 		r.Serve = append([]int(nil), ports...)
 		return nil
 	})
+}
+
+// SetRemoteServeTargets 修改经隧道暴露的自定义端口映射（本机异端口、局域网主机或 Unix Socket）并持久化。
+//
+// 参数说明：
+//   - targets: []config.RemoteServeTarget，目标端口映射集合；空列表清空自定义映射。
+//
+// 返回值说明：error，校验、运行态调和与磁盘落盘全部成功时返回 nil。
+//
+// 错误情况：端口冲突、目标格式非法或服务重建失败时返回错误并回滚。
+func (a *App) SetRemoteServeTargets(targets []config.RemoteServeTarget) error {
+	normalized := make([]config.RemoteServeTarget, 0, len(targets))
+	for _, item := range targets {
+		normalized = append(normalized, config.RemoteServeTarget{
+			Port:   item.Port,
+			Target: strings.TrimSpace(item.Target),
+		})
+	}
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		if err := config.ValidateRemoteServeTargets(r.Serve, normalized); err != nil {
+			return err
+		}
+		r.ServeTargets = normalized
+		return nil
+	})
+}
+
+// SetRemoteHybrid 热切换 tailcat v0.8.0 实验性后量子混合握手（ML-KEM-768）并持久化。
+// 切换后服务端会重建，生成的 token 将发生变化，且需要 tailcat v0.8.0+ 客户端连接。
+func (a *App) SetRemoteHybrid(enabled bool) error {
+	return a.mutateRemote(func(r *config.RemoteConfig) error {
+		r.Hybrid = enabled
+		return nil
+	})
+}
+
+// DisconnectRemoteClient 主动断开指定隧道客户端（nodekey:...）及其活动 TCP 连接。
+// 此操作不修改白名单配置；如需禁止该客户端重连，应先将其移出白名单。
+func (a *App) DisconnectRemoteClient(clientKey string) (bool, int, error) {
+	return a.remote.DisconnectClient(clientKey)
 }
 
 // SetRemoteAllow 整体替换客户端授权并持久化；空列表表示用户明确恢复开放模式。

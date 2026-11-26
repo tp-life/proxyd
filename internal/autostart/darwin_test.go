@@ -40,13 +40,15 @@ func TestFdIsTerminalRejectsDevNull(t *testing.T) {
 //
 // 错误情况：临时文件写入失败、plutil 不可执行或系统拒绝 plist 结构时测试失败。
 func TestRenderPlistPassesPlutil(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "com.proxyd.plist")
-	content := RenderPlist("/usr/local/bin/proxyd", "/Users/x/.config/proxyd/config.yaml", "/Users/x/.local/state/proxyd/proxyd.log", "x", "/Users/x", false)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("写入 plist 测试文件失败: %v", err)
-	}
-	if output, err := exec.Command("/usr/bin/plutil", "-lint", path).CombinedOutput(); err != nil {
-		t.Fatalf("plutil 拒绝 LaunchDaemon plist: %v: %s", err, strings.TrimSpace(string(output)))
+	for _, rootDaemon := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "com.proxyd.plist")
+		content := RenderPlist("/usr/local/bin/proxyd", "/Users/x/.config/proxyd/config.yaml", "/Users/x/.local/state/proxyd/proxyd.log", "x", "/Users/x", rootDaemon)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("写入 plist 测试文件失败: %v", err)
+		}
+		if output, err := exec.Command("/usr/bin/plutil", "-lint", path).CombinedOutput(); err != nil {
+			t.Fatalf("plutil 拒绝 LaunchDaemon plist (rootDaemon=%v): %v: %s", rootDaemon, err, strings.TrimSpace(string(output)))
+		}
 	}
 }
 

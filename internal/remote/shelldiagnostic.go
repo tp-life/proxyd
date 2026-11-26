@@ -29,14 +29,14 @@ func (s *diagnosticShellSession) Read(buffer []byte) (int, error) { return 0, io
 // shellUser 为 string，remote.shell-user 配置原值，诊断同样以降权会话用户运行。
 // 返回值说明：无，环境字段与进度标记通过 SSH 输出，退出码由 shell 回传。
 // 错误情况：会话用户解析失败、未申请 PTY、shell 启动失败时返回非零；客户端断开沿用会话清理逻辑。
-func shellDiagnosticHandler(sess ssh.Session, shellUser string) {
+func shellDiagnosticHandler(sess ssh.Session, shellUser, requestedUser string) {
 	io.WriteString(sess, "PROXYD_DIAG_AUTHENTICATED\n")
 	if _, _, ok := sess.Pty(); !ok {
 		io.WriteString(sess.Stderr(), "SSH 诊断需要 PTY\n")
 		sess.Exit(1)
 		return
 	}
-	su, err := resolveSessionUser(shellUser)
+	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\n", err)
 		sess.Exit(1)

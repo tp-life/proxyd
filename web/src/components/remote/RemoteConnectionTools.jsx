@@ -39,7 +39,12 @@ export function RemoteProbeDetail({ name, probe, onRefresh }) {
           <span><b className="text-foreground">RTT：</b>{probe.rtt_ms > 0 ? `${probe.rtt_ms}ms` : "—"}</span>
           <span><b className="text-foreground">检测：</b>{formatRemoteTime(probe.checked_at)}</span>
           {(probe.endpoint || probe.derp_region) && (
-            <span className="break-all sm:col-span-4"><b className="text-foreground">链路：</b>{probe.endpoint || `DERP ${probe.derp_region}`}</span>
+            <span className="break-all sm:col-span-4">
+              <b className="text-foreground">链路：</b>
+              {probe.endpoint
+                ? (probe.derp_region ? `${probe.endpoint}（引导 DERP: ${probe.derp_region}）` : probe.endpoint)
+                : `DERP ${probe.derp_region}`}
+            </span>
           )}
           {probe.error && <span className="break-words text-destructive sm:col-span-4">{probe.error}</span>}
         </div>
@@ -131,7 +136,7 @@ export function maskRemoteKey(value) {
  * 可能的异常/错误情况：无。
  */
 export function formatRemoteAuditAction(action) {
-  return { connected: "建立", rejected: "拒绝", disconnected: "断开", ssh_authenticated: "SSH 已认证", ssh_failed: "SSH 失败", ssh_disconnected: "SSH 结束", ssh_disconnect_requested: "请求断开" }[action] || action || "—";
+  return { connected: "建立", rejected: "拒绝", disconnected: "断开", ssh_authenticated: "SSH 已认证", ssh_failed: "SSH 失败", ssh_disconnected: "SSH 结束", ssh_disconnect_requested: "请求断开", client_disconnect_requested: "断开客户端" }[action] || action || "—";
 }
 
 /**

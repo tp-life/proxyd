@@ -6,9 +6,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strings"
 
 	"proxyd/internal/app"
 	"proxyd/internal/config"
@@ -24,20 +22,30 @@ type desktopSessionResponse struct {
 	Protocol          string `json:"protocol"`
 	RemotePort        int    `json:"remote_port"`
 	Username          string `json:"username,omitempty"`
+	Quality           string `json:"quality,omitempty"`
 	LocalAddress      string `json:"local_address"`
 	StartedAt         string `json:"started_at"`
 	ActiveConnections int64  `json:"active_connections"`
+	Path              string `json:"path,omitempty"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	DERPRegion        string `json:"derp_region,omitempty"`
+	RTTMillis         int64  `json:"rtt_ms,omitempty"`
+	Warming           bool   `json:"warming"`
+	UDPEnabled        bool   `json:"udp_enabled"`
+	TransportError    string `json:"transport_error,omitempty"`
 	LaunchKind        string `json:"launch_kind"`
 	LaunchURL         string `json:"launch_url"`
 }
 
 // desktopStatusResponse 是 GET /api/desktop 的稳定响应结构。
 type desktopStatusResponse struct {
-	Services      []app.DesktopServiceStatus `json:"services"`
-	Connections   []config.DesktopConnection `json:"connections"`
-	Sessions      []desktopSessionResponse   `json:"sessions"`
-	RemoteEnabled bool                       `json:"remote_enabled"`
-	APILoopback   bool                       `json:"api_loopback"`
+	Services           []app.DesktopServiceStatus `json:"services"`
+	Connections        []config.DesktopConnection `json:"connections"`
+	Sessions           []desktopSessionResponse   `json:"sessions"`
+	RemoteEnabled      bool                       `json:"remote_enabled"`
+	APILoopback        bool                       `json:"api_loopback"`
+	SessionIdleTimeout string                     `json:"session_idle_timeout"`
+	SessionMaxLifetime string                     `json:"session_max_lifetime"`
 }
 
 // registerDesktopRoutes 注册「远程桌面」模块的全部路由。
@@ -54,6 +62,7 @@ func (s *Server) registerDesktopRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/desktop/connections/{name}", s.handleUpdateDesktopConnection)
 	mux.HandleFunc("DELETE /api/desktop/connections/{name}", s.handleDeleteDesktopConnection)
 	mux.HandleFunc("POST /api/desktop/sessions", s.handleStartDesktopSession)
+	mux.HandleFunc("POST /api/desktop/sessions/adhoc", s.handleStartAdhocDesktopSession)
 	mux.HandleFunc("DELETE /api/desktop/sessions/{id}", s.handleStopDesktopSession)
 	mux.HandleFunc("GET /api/desktop/sessions/{id}/rdp", s.handleDownloadDesktopRDP)
 }
@@ -170,6 +179,26 @@ func (s *Server) handleStartDesktopSession(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, desktopSessionToResponse(session))
 }
 
+// handleStartAdhocDesktopSession 为本机 proxyd desk CLI 创建复用守护进程共享客户端的临时桌面会话。
+func (s *Server) handleStartAdhocDesktopSession(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Remote     string `json:"remote"`
+		Protocol   string `json:"protocol"`
+		RemotePort int    `json:"remote_port"`
+		Quality    string `json:"quality"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	session, err := s.app.StartAdhocDesktopSession(request.Remote, request.Protocol, request.RemotePort, request.Quality)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, desktopSessionToResponse(session))
+}
+
 // handleStopDesktopSession 显式结束会话并返回 204。
 //
 // 参数说明：路径 id 是会话标识。
@@ -212,11 +241,7 @@ func (s *Server) handleDownloadDesktopRDP(w http.ResponseWriter, r *http.Request
 		http.Error(w, "该桌面会话不是 RDP 协议", http.StatusBadRequest)
 		return
 	}
-	username := strings.NewReplacer("\r", "", "\n", "").Replace(session.Username)
-	content := fmt.Sprintf("full address:s:%s\r\nprompt for credentials:i:1\r\n", session.LocalAddress)
-	if username != "" {
-		content += fmt.Sprintf("username:s:%s\r\n", username)
-	}
+	content := desktop.RenderRDPFile(session.LocalAddress, session.Username, session.Quality)
 	w.Header().Set("Content-Type", "application/x-rdp")
 	w.Header().Set("Content-Disposition", `attachment; filename="proxyd-desktop.rdp"`)
 	w.Header().Set("Cache-Control", "no-store")
@@ -239,11 +264,13 @@ func (s *Server) writeDesktopStatus(w http.ResponseWriter, status app.DesktopSta
 	// API 客户端直接遍历，也避免删除最后一条档案后响应类型发生变化。
 	connections := append(make([]config.DesktopConnection, 0, len(status.Connections)), status.Connections...)
 	writeJSON(w, desktopStatusResponse{
-		Services:      status.Services,
-		Connections:   connections,
-		Sessions:      sessions,
-		RemoteEnabled: status.RemoteEnabled,
-		APILoopback:   status.APILoopback,
+		Services:           status.Services,
+		Connections:        connections,
+		Sessions:           sessions,
+		RemoteEnabled:      status.RemoteEnabled,
+		APILoopback:        status.APILoopback,
+		SessionIdleTimeout: status.SessionIdleTimeout.String(),
+		SessionMaxLifetime: status.SessionMaxLifetime.String(),
 	})
 }
 
@@ -261,9 +288,17 @@ func desktopSessionToResponse(session desktop.Session) desktopSessionResponse {
 		Protocol:          string(session.Protocol),
 		RemotePort:        session.RemotePort,
 		Username:          session.Username,
+		Quality:           session.Quality,
 		LocalAddress:      session.LocalAddress,
 		StartedAt:         session.StartedAt.Format(timeRFC3339Nano),
 		ActiveConnections: session.ActiveConnections,
+		Path:              session.Transport.Path,
+		Endpoint:          session.Transport.Endpoint,
+		DERPRegion:        session.Transport.DERPRegion,
+		RTTMillis:         session.Transport.RTTMillis,
+		Warming:           session.Transport.Warming,
+		UDPEnabled:        session.Transport.UDPEnabled,
+		TransportError:    session.Transport.Error,
 	}
 	switch session.Protocol {
 	case desktop.ProtocolRDP:

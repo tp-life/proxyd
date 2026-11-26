@@ -36,8 +36,8 @@ const SETTINGS_HELP = {
   },
   autostart: {
     heading: "开机自启与模块开关",
-    paragraphs: ["按平台注册 proxyd 系统启动项，macOS 使用 LaunchDaemon，可在用户登录前启动。", "启动后各模块继续遵循各自开关；注册自启不会擅自启用代理或远程服务。"],
-    note: "自启不会自动安装 TUN 特权助手，需要使用 TUN 时请在代理设置中检查助手状态。",
+    paragraphs: ["按平台注册 proxyd 系统启动项，macOS 使用系统级 LaunchDaemon（以 root 运行以原生支持 TUN，同时保留原普通用户配置目录与默认 SSH 降权身份），可在用户登录前启动。", "启动后各模块继续遵循各自开关；注册自启不会擅自启用代理或远程服务。"],
+    note: "如果此前安装过旧版普通用户自启项，可先关闭再重新开启开机自启以刷新 plist。",
   },
 };
 

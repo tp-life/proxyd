@@ -9,6 +9,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"strconv"
@@ -25,28 +26,30 @@ import (
 
 // Status 是远程连接模块的运行时快照，供 API/Web 展示。
 type Status struct {
-	ModuleEnabled   bool                      `json:"module_enabled"`            // 模块开关与服务端开关分别展示。
-	Enabled         bool                      `json:"enabled"`                   // 配置中的服务端开关
-	Running         bool                      `json:"running"`                   // 隧道服务端是否在运行
-	Error           string                    `json:"error,omitempty"`           // 最近一次启动失败原因
-	Token           string                    `json:"token,omitempty"`           // 本机连接 token（tc...，运行中才有）
-	ClientKey       string                    `json:"client_key,omitempty"`      // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
-	Region          string                    `json:"region,omitempty"`          // 配置的 region 原值
-	Serve           []int                     `json:"serve"`                     // 经隧道暴露的本机端口
-	Allow           []config.RemoteAllowEntry `json:"allow"`                     // 客户端公钥白名单（含别名、TTL 与端口限制）
-	AllowRestricted bool                      `json:"allow_restricted"`          // 授权清扫为空后是否继续保持拒绝模式
-	TempKey         string                    `json:"temp_key,omitempty"`        // 临时身份公钥（应急 nodekey）
-	KeyFile         string                    `json:"key_file"`                  // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
-	CustomKeyFile   string                    `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
-	BuiltinSSH      bool                      `json:"builtin_ssh"`               // 内嵌 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
-	ShellUser       string                    `json:"shell_user,omitempty"`      // 配置的远程会话降权账户（remote.shell-user 原值）
-	SessionUser     string                    `json:"session_user"`              // 实际远程会话用户：shell-user 优先，否则为进程用户
-	SSHAuthRequired bool                      `json:"ssh_auth_required"`         // 是否在隧道身份之外额外要求 SSH 公钥
-	SSHKeys         []SSHKeyInfo              `json:"ssh_keys"`                  // 公钥与指纹可以公开展示，永不存储客户端私钥
-	WebTerminal     bool                      `json:"web_terminal"`              // 浏览器终端总开关；默认关闭，API 层关闭时直接返回 404
+	ModuleEnabled   bool                       `json:"module_enabled"`            // 模块开关与服务端开关分别展示。
+	Enabled         bool                       `json:"enabled"`                   // 配置中的服务端开关
+	Hybrid          bool                       `json:"hybrid"`                    // 实验性后量子混合握手开关（ML-KEM-768）
+	Running         bool                       `json:"running"`                   // 隧道服务端是否在运行
+	Error           string                     `json:"error,omitempty"`           // 最近一次启动失败原因
+	Token           string                     `json:"token,omitempty"`           // 本机连接 token（tc...，运行中才有）
+	ClientKey       string                     `json:"client_key,omitempty"`      // 客户端 node 公钥（对端 --allow 白名单用；非凭据，不打码）
+	Region          string                     `json:"region,omitempty"`          // 配置的 region 原值
+	Serve           []int                      `json:"serve"`                     // 经隧道暴露的本机端口
+	ServeTargets    []config.RemoteServeTarget `json:"serve_targets"`             // 经隧道暴露的自定义端口映射（本机异端口/局域网主机/Unix Socket）
+	Allow           []config.RemoteAllowEntry  `json:"allow"`                     // 客户端公钥白名单（含别名、TTL 与端口限制）
+	AllowRestricted bool                       `json:"allow_restricted"`          // 授权清扫为空后是否继续保持拒绝模式
+	TempKey         string                     `json:"temp_key,omitempty"`        // 临时身份公钥（应急 nodekey）
+	KeyFile         string                     `json:"key_file"`                  // 实际使用的服务端密钥文件路径（内置托管或 key-file 指定）
+	CustomKeyFile   string                     `json:"custom_key_file,omitempty"` // key-file 配置原值（空=内置托管密钥）
+	BuiltinSSH      bool                       `json:"builtin_ssh"`               // 内嵌 SSH 服务开关（隧道 22 端口由进程内 SSH 处理）
+	ShellUser       string                     `json:"shell_user,omitempty"`      // 配置的远程会话降权账户（remote.shell-user 原值）
+	SessionUser     string                     `json:"session_user"`              // 实际远程会话用户：shell-user 优先，否则为进程用户
+	SSHAuthRequired bool                       `json:"ssh_auth_required"`         // 是否在隧道身份之外额外要求 SSH 公钥
+	SSHKeys         []SSHKeyInfo               `json:"ssh_keys"`                  // 公钥与指纹可以公开展示，永不存储客户端私钥
+	WebTerminal     bool                       `json:"web_terminal"`              // 浏览器终端总开关；默认关闭，API 层关闭时直接返回 404
 	// ClientActivity 是各已知客户端公钥（白名单+临时身份）当前的入站活动连接数。
 	ClientActivity map[string]int64  `json:"client_activity,omitempty"`
-	Peers          []PeerObservation `json:"peers"`    // 已知入站客户端的连接路径与累计流量
+	Peers          []PeerObservation `json:"peers"`    // 入站客户端快照；tailcat v0.7.0 起才有数据，含未登记公钥
 	Forwards       []ForwardStatus   `json:"forwards"` // 全部转发条目（含禁用项）
 }
 
@@ -58,7 +61,8 @@ type ForwardStatus struct {
 	RemotePort int    `json:"remote_port"`
 	Enabled    bool   `json:"enabled"`
 	Running    bool   `json:"running"`
-	Active     int64  `json:"active"` // 当前活动连接数
+	Active     int64  `json:"active"`                // 当前活动连接数
+	DERPRegion string `json:"derp_region,omitempty"` // 转发客户端当前使用的 DERP 区域（tailcat v0.8.0 Client.DERPRegion）
 	LastError  string `json:"last_error,omitempty"`
 }
 
@@ -78,14 +82,17 @@ type Manager struct {
 	token            string
 	serveErr         string
 	forwards         map[string]*forwardRunner
-	activeClients    map[string]int64    // 已知客户端公钥 → 当前入站活动连接数
-	sshAccess        *sshAccess          // SSH 授权与会话运行态，独立于隧道生命周期
-	audit            *auditLog           // 独立于代理日志的固定容量连接审计环
-	clientLoaded     bool                // 是否已尝试加载客户端身份密钥
-	clientPriv       key.NodePrivate     // 持久客户端身份（对端 --allow 白名单用）
-	clientErr        error               // 客户端密钥加载失败原因（惰性加载只尝试一次）
-	autoRegion       *tailcfg.DERPRegion // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
-	autoRegionMapURL string              // 产生缓存时的 DERPMapURL
+	clients          *clientPool                      // 进程内共享 tailcat 客户端（同 token/身份只建一个）
+	activeClients    map[string]int64                 // 已知客户端公钥 → 当前入站活动连接数
+	clientConns      map[string]map[net.Conn]struct{} // 客户端公钥 → 当前入站活动 TCP 连接，供显式/撤销断开立即关闭
+	sshAccess        *sshAccess                       // SSH 授权与会话运行态，独立于隧道生命周期
+	audit            *auditLog                        // 独立于代理日志的固定容量连接审计环
+	clientLoaded     bool                             // 是否已尝试加载客户端身份密钥
+	clientPriv       key.NodePrivate                  // 持久客户端身份（对端 --allow 白名单用）
+	clientErr        error                            // 客户端密钥加载失败原因（惰性加载只尝试一次）
+	autoRegion       *tailcfg.DERPRegion              // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
+	autoRegionMapURL string                           // 产生缓存时的 DERPMapURL
+	relay            sessionRelay                     // Web 终端会话中转凭据（独立锁，见 sessionrelay.go）
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥
@@ -107,7 +114,9 @@ func NewManager(stateDir string, logf func(format string, args ...any)) *Manager
 		terminalCtx: terminalCtx, terminalCancel: terminalCancel,
 		logf:          logf,
 		forwards:      map[string]*forwardRunner{},
+		clients:       newClientPool(logf),
 		activeClients: map[string]int64{},
+		clientConns:   map[string]map[net.Conn]struct{}{},
 		audit:         audit,
 		sshAccess:     newSSHAccess(audit),
 	}
@@ -146,7 +155,6 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 		}
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	// 运行世代随模块关闭取消，重新开启创建新上下文，旧会话永远不会被自动复活。
 	if cfg.Disabled {
@@ -161,9 +169,12 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 		m.terminalCtx, m.terminalCancel = context.WithCancel(context.Background())
 	}
 	var serveErr error
+	var reusedSrv *tailcat.Server
 	if cfg.Enabled && !cfg.Disabled {
 		if m.srv != nil && m.serverConfigEqual(cfg) {
-			// 服务端配置未变，保留现有隧道（token 不变）。
+			// 服务端配置未变，保留现有隧道（token 不变）；白名单/临时身份通过
+			// tailcat v0.8.0 Server.AllowClient 热生效，随后主动断开被撤销的对端。
+			reusedSrv = m.srv
 		} else {
 			m.stopServerLocked()
 			if err := m.startServerLocked(cfg); err != nil {
@@ -176,21 +187,41 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 	}
 
 	m.reconcileForwardsLocked(cfg)
-	m.cfg = cfg.Clone()
+	nextCfg := cfg.Clone()
+	m.cfg = nextCfg
 	m.sshAccess.update(cfg.SSHAuthRequired, cfg.SSHKeys)
+	m.mu.Unlock()
+
+	if reusedSrv != nil {
+		m.disconnectRevokedClients(reusedSrv, nextCfg)
+	}
 	return serveErr
 }
 
 // effectiveSessionUser 返回展示用的实际远程会话用户：配置 shell-user 优先，
-// 否则为 proxyd 进程用户；账户查询失败时回退到配置原值或空串。
+// 其次为 sudo 启动时的原始普通用户（SUDO_USER），最后回退到 proxyd 进程用户。
 // 参数说明：shellUser 为 string，remote.shell-user 配置原值。
 // 返回值说明：string，用于控制台展示，避免误判会话权限。
 // 错误情况：无；os/user 不可用时静默降级。
 func effectiveSessionUser(shellUser string) string {
+	return effectiveSessionUserFrom(os.Geteuid(), shellUser, os.Getenv, user.Current, user.Lookup)
+}
+
+// effectiveSessionUserFrom 是 effectiveSessionUser 的可注入依赖实现，便于单测覆盖 sudo 场景。
+func effectiveSessionUserFrom(
+	euid int,
+	shellUser string,
+	getenv func(string) string,
+	currentUser func() (*user.User, error),
+	lookup func(string) (*user.User, error),
+) string {
 	if name := strings.TrimSpace(shellUser); name != "" {
 		return name
 	}
-	if u, err := user.Current(); err == nil {
+	if sudoUser := sudoInvokerUserFrom(euid, getenv, lookup); sudoUser != "" {
+		return sudoUser
+	}
+	if u, err := currentUser(); err == nil {
 		return u.Username
 	}
 	return ""
@@ -198,16 +229,17 @@ func effectiveSessionUser(shellUser string) string {
 
 // serverConfigEqual 判断运行中的服务端是否与新配置等价（等价则无需重建隧道）。
 // WebTerminal 只控制本机 HTTP/WS 入口，不改变 tailcat 数据面，因此不参与比较；
-// 切换它不会中断已有隧道连接或改变 token。
+// Allow/TempKey/AllowRestricted 自 tailcat v0.8.0 起由动态 Server.AllowClient 钩子
+// 实时评估，并通过 Server.DisconnectClient 踢出撤销客户端，因此变更白名单不再重建隧道。
 // 参数说明：cfg 为 config.RemoteConfig，目标配置；调用方持有 Manager 锁。
 // 返回值说明：bool，true 表示当前服务可以直接复用。
 // 错误情况：无；SSH 授权由独立策略服务逐次检查，不参与隧道重建判断。
 func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 	old := m.cfg
-	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.TempKey != cfg.TempKey || old.KeyFile != cfg.KeyFile || old.BuiltinSSH != cfg.BuiltinSSH || old.AllowRestricted != cfg.AllowRestricted {
+	if old.Region != cfg.Region || old.DERPMapURL != cfg.DERPMapURL || old.KeyFile != cfg.KeyFile || old.BuiltinSSH != cfg.BuiltinSSH || old.ShellUser != cfg.ShellUser || old.Hybrid != cfg.Hybrid {
 		return false
 	}
-	if len(old.Serve) != len(cfg.Serve) || len(old.Allow) != len(cfg.Allow) {
+	if len(old.Serve) != len(cfg.Serve) || len(old.ServeTargets) != len(cfg.ServeTargets) {
 		return false
 	}
 	ports := map[int]bool{}
@@ -219,12 +251,12 @@ func (m *Manager) serverConfigEqual(cfg config.RemoteConfig) bool {
 			return false
 		}
 	}
-	allowed := map[string]bool{}
-	for _, e := range old.Allow {
-		allowed[e.Key] = true
+	targets := map[int]string{}
+	for _, item := range old.ServeTargets {
+		targets[item.Port] = strings.TrimSpace(item.Target)
 	}
-	for _, e := range cfg.Allow {
-		if !allowed[e.Key] {
+	for _, item := range cfg.ServeTargets {
+		if want, ok := targets[item.Port]; !ok || want != strings.TrimSpace(item.Target) {
 			return false
 		}
 	}
@@ -242,11 +274,13 @@ func (m *Manager) Status() Status {
 	st := Status{
 		ModuleEnabled:   !m.cfg.Disabled,
 		Enabled:         m.cfg.Enabled,
+		Hybrid:          m.cfg.Hybrid,
 		Running:         m.srv != nil,
 		Error:           m.serveErr,
 		Token:           m.token,
 		Region:          m.cfg.Region,
 		Serve:           append([]int(nil), m.cfg.Serve...),
+		ServeTargets:    append([]config.RemoteServeTarget(nil), m.cfg.ServeTargets...),
 		Allow:           m.cfg.Clone().Allow,
 		AllowRestricted: m.cfg.AllowRestricted,
 		TempKey:         m.cfg.TempKey,
@@ -276,6 +310,9 @@ func (m *Manager) Status() Status {
 	if st.Serve == nil {
 		st.Serve = []int{}
 	}
+	if st.ServeTargets == nil {
+		st.ServeTargets = []config.RemoteServeTarget{}
+	}
 	if st.Allow == nil {
 		st.Allow = []config.RemoteAllowEntry{}
 	}
@@ -291,6 +328,7 @@ func (m *Manager) Status() Status {
 		if r, ok := m.forwards[f.Name]; ok {
 			fs.Running = r.ln != nil
 			fs.Active = r.active.Load()
+			fs.DERPRegion = r.derpRegion()
 			fs.LastError = r.lastError()
 		}
 		st.Forwards = append(st.Forwards, fs)
@@ -309,25 +347,33 @@ func (m *Manager) Close() {
 		r.stop()
 		delete(m.forwards, name)
 	}
+	// 转发全部停止后仍有借用者的场景（在途探测/诊断）由兜底关闭收尾。
+	m.clients.closeAll()
 }
 
-// StartTransientForward 使用管理器持久化的客户端身份启动一条临时本地转发。
-//
-// 参数说明：
-//   - token: string，远端完整 tailcat token。
-//   - remotePort: int，远端实际 TCP 服务端口。
-//
-// 返回值说明：*TransientForward 和 error；成功对象由调用方负责 Close。
-//
-// 错误情况：token/端口非法、客户端身份文件不可用或本机回环监听失败时返回错误。
-// 身份文件读取失败时沿用 remote 既有降级语义，使用临时身份继续尝试连接。
+// StartTransientForward 使用管理器持久化的客户端身份启动一条临时本地转发（纯 TCP）。
 func (m *Manager) StartTransientForward(token string, remotePort int) (*TransientForward, error) {
+	return m.StartDesktopTransientForward(token, remotePort, false)
+}
+
+// StartDesktopTransientForward 使用管理器共享客户端启动临时桌面转发：
+// enableUDP=true 时在同一回环端口号上同步转发 UDP（用于 Windows RDP 3389 UDP 传输），
+// 并后台异步执行 DiscoPing 预热 NAT 直连与实时观测链路质量。
+func (m *Manager) StartDesktopTransientForward(token string, remotePort int, enableUDP bool) (*TransientForward, error) {
+	if err := ValidateToken(token); err != nil {
+		return nil, err
+	}
+	if remotePort <= 0 || remotePort > 65535 {
+		return nil, fmt.Errorf("端口 %d 超出 1-65535", remotePort)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cfg.Disabled {
 		return nil, fmt.Errorf("远程访问模块已禁用")
 	}
-	forward, err := StartTransientForward(token, remotePort, m.clientKeyLocked())
+	clientKey := m.clientKeyLocked()
+	client, release := m.clients.acquire(token, clientKey)
+	forward, err := startTransientForwardWithClient(token, remotePort, clientKey, client, release, enableUDP, m.logf)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +387,59 @@ func (m *Manager) StartTransientForward(token string, remotePort int) (*Transien
 		}
 	}()
 	return forward, nil
+}
+
+// sharedConn 是共享客户端拨出的连接；关闭时只归还本次借用，不关闭共享客户端。
+type sharedConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+// Close 关闭底层连接并幂等归还客户端引用。
+func (c *sharedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// dialShared 使用 Manager 共享客户端拨号远端端口。
+//
+// 参数说明：
+//   - ctx: context.Context，控制 DERP 建连与拨号；无 deadline 时套用 dialTimeout。
+//   - token: string，已经由应用层解析出的完整远端 token。
+//   - port: int，远端 TCP 端口。
+//
+// 返回值说明：net.Conn，调用方必须 Close；关闭时自动归还共享客户端引用。
+//
+// 错误情况：token/端口非法、模块禁用、客户端身份不可用或拨号失败时返回错误。
+func (m *Manager) dialShared(ctx context.Context, token string, port int) (net.Conn, error) {
+	if err := ValidateToken(token); err != nil {
+		return nil, err
+	}
+	if port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("端口 %d 超出 1-65535", port)
+	}
+	m.mu.Lock()
+	if m.cfg.Disabled {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("远程访问模块已禁用")
+	}
+	clientKey := m.clientKeyLocked()
+	m.mu.Unlock()
+
+	client, release := m.clients.acquire(token, clientKey)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+	}
+	conn, err := client.DialTCPPort(ctx, uint16(port))
+	if err != nil {
+		release()
+		return nil, err
+	}
+	return &sharedConn{Conn: conn, release: release}, nil
 }
 
 // ResolveToken 把 remotes 名称解析为 token；以 "tc" 开头的输入按 token 原样返回。

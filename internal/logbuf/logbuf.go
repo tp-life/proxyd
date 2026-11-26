@@ -61,12 +61,7 @@ func (r *Ring) Add(line string) {
 		return
 	}
 	if len(line) > maxLineBytes {
-		truncated := line[:maxLineBytes]
-		// 截断点可能落在多字节字符中间，回退到合法 UTF-8 边界（至多 3 字节）。
-		for !utf8.ValidString(truncated) {
-			truncated = truncated[:len(truncated)-1]
-		}
-		line = truncated + "…（日志过长已截断）"
+		line = truncateUTF8(line, maxLineBytes) + "…（日志过长已截断）"
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -197,6 +192,25 @@ func detectLevel(line string) string {
 	default:
 		return "info"
 	}
+}
+
+// truncateUTF8 在不超过 maxBytes 的前提下按 UTF-8 字符边界截断字符串（O(1) 尾部回退），
+// 避免前部存在非法 UTF-8 字节时重复全串扫描退化为 O(N^2) 并误删正文。
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for i := 1; i <= utf8.UTFMax && cut-i >= 0; i++ {
+		if utf8.RuneStart(s[cut-i]) {
+			_, size := utf8.DecodeRuneInString(s[cut-i:])
+			if cut-i+size > cut {
+				cut -= i
+			}
+			break
+		}
+	}
+	return s[:cut]
 }
 
 // Default 是 proxyd 进程内共享日志缓冲。
