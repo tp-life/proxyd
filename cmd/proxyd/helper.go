@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"proxyd/internal/gateway"
 	"proxyd/internal/privhelper"
@@ -80,8 +82,20 @@ func cmdHelperLocal(op string) error {
 // 统一助手前仍可运行。
 func cmdHelperServe(_ []string) error {
 	logf := func(format string, args ...any) { log.Printf(format, args...) }
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithCancel(sigCtx)
+	defer cancel()
+
 	errCh := make(chan error, 2)
-	go func() { errCh <- gateway.RunHelperServer(context.Background(), logf) }()
-	go func() { errCh <- tunhelper.RunHelperServer(context.Background(), logf) }()
-	return <-errCh
+	go func() { errCh <- gateway.RunHelperServer(ctx, logf) }()
+	go func() { errCh <- tunhelper.RunHelperServer(ctx, logf) }()
+
+	firstErr := <-errCh
+	cancel()
+	secondErr := <-errCh
+	if firstErr != nil {
+		return firstErr
+	}
+	return secondErr
 }

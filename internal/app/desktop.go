@@ -379,6 +379,7 @@ func (a *App) StartAdhocDesktopSession(remoteNameOrToken, protocolText string, r
 		Protocol:       protocol,
 		RemotePort:     remotePort,
 		Quality:        quality,
+		Isolated:       true,
 	})
 }
 

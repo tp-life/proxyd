@@ -58,12 +58,12 @@ func helperCall(op string, params any) (helperResponse, error) {
 		return helperResponse{}, fmt.Errorf("helper 握手读取失败: %w", err)
 	}
 	if !ack.OK {
-		return helperResponse{}, fmt.Errorf("helper 握手被拒绝: %s", ack.Error)
+		return helperResponse{}, fmt.Errorf("helper 握手被拒绝: %s（请执行 sudo proxyd helper install 升级 helper）: %w", ack.Error, ErrHelperUnavailable)
 	}
 	if ack.Version != helperProtocolVersion {
 		return helperResponse{}, fmt.Errorf(
-			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 sudo proxyd helper install 升级 helper",
-			helperProtocolVersion, ack.Version,
+			"helper 协议版本不兼容（本端 %d，对端 %d）：请重新执行 sudo proxyd helper install 升级 helper: %w",
+			helperProtocolVersion, ack.Version, ErrHelperUnavailable,
 		)
 	}
 
@@ -121,9 +121,14 @@ func Precheck() PrecheckResult {
 	return result
 }
 
-// Apply 经 helper 应用 pf anchor 文本。
-func (helperRunner) Apply(text string) error {
-	_, err := helperCall(helperOpPFApply, helperPFApplyParams{Anchor: text})
+// Apply 满足 Runner 接口；macOS 特权边界禁止下发原始 pf 文本，实际调用走 ApplyPFSpec。
+func (helperRunner) Apply(_ string) error {
+	return fmt.Errorf("macOS helper 仅支持结构化 pf.apply 参数，不接受原始 pf 文本")
+}
+
+// ApplyPFSpec 经 helper 下发结构化参数，由 root helper 内部校验并渲染 pf anchor。
+func (helperRunner) ApplyPFSpec(params helperPFApplyParams) error {
+	_, err := helperCall(helperOpPFApply, params)
 	return err
 }
 

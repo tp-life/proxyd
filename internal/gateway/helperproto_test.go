@@ -79,7 +79,7 @@ func TestHelperProtocolHandshakeAndDispatch(t *testing.T) {
 	ack, resp := helperRoundTrip(t, ops, helperProtocolVersion, helperRequest{
 		Version: helperProtocolVersion,
 		Op:      helperOpPFApply,
-		Params:  json.RawMessage(`{"anchor":"rdr pass inet proto tcp from any to any -> 127.0.0.1 port 17892"}`),
+		Params:  json.RawMessage(`{"devices":["192.168.1.10"],"redir_port":17892,"dns_redirect":true,"dns_listen_port":1053}`),
 	})
 	if !ack.OK || ack.Version != helperProtocolVersion {
 		t.Fatalf("握手应答 = %+v", ack)
@@ -87,7 +87,7 @@ func TestHelperProtocolHandshakeAndDispatch(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("pf.apply 应答 = %+v", resp)
 	}
-	if len(ops.applied) != 1 || !strings.Contains(ops.applied[0], "rdr pass") {
+	if len(ops.applied) != 1 || !strings.Contains(ops.applied[0], "192.168.1.10") || !strings.Contains(ops.applied[0], "port 17892") || !strings.Contains(ops.applied[0], "port 1053") {
 		t.Fatalf("ops.applied = %v", ops.applied)
 	}
 }
@@ -114,8 +114,10 @@ func TestHelperProtocolRejectsUnknownOpAndFields(t *testing.T) {
 		want string
 	}{
 		{"未知指令", helperRequest{Version: helperProtocolVersion, Op: "shell.exec"}, "白名单"},
-		{"pf.apply 未知字段", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"anchor":"x","cmd":"rm -rf /"}`)}, "params 非法"},
-		{"pf.apply 空 anchor", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"anchor":"  "}`)}, "不能为空"},
+		{"pf.apply 拒绝旧版原始 anchor 注入", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"anchor":"include \"/etc/master.passwd\""}`)}, "params 非法"},
+		{"pf.apply 未知字段", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"devices":["192.168.1.10"],"redir_port":17892,"cmd":"rm -rf /"}`)}, "params 非法"},
+		{"pf.apply 非法 IP 注入", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"devices":["192.168.1.10\ninclude \"/etc/master.passwd\""],"redir_port":17892}`)}, "不是合法 IPv4"},
+		{"pf.apply 非法端口", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply, Params: json.RawMessage(`{"devices":["192.168.1.10"],"redir_port":0}`)}, "redir_port"},
 		{"pf.apply 缺 params", helperRequest{Version: helperProtocolVersion, Op: helperOpPFApply}, "缺少 params"},
 	}
 	for _, tc := range cases {

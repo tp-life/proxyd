@@ -345,7 +345,11 @@ func BuildContribution(req ContributionRequest, used Namespace) (Contribution, e
 	}
 	contribution := Contribution{Subscription: req.Subscription, Meta: source.meta}
 
-	providerNames, providerEntries, err := planProviders(source.providers, used)
+	// 先在局部 Namespace 副本上规划，整份订阅全部校验通过后再合并回调用方的 used，
+	// 避免单个订阅中途失败污染共享命名空间导致后续订阅被无故改名。
+	localUsed := cloneNamespace(used)
+
+	providerNames, providerEntries, err := planProviders(source.providers, localUsed)
 	if err != nil {
 		return Contribution{}, err
 	}
@@ -358,25 +362,25 @@ func BuildContribution(req ContributionRequest, used Namespace) (Contribution, e
 		}
 	}
 
-	// 第一遍：为可用的组分配最终名称。组内没有任何可用成员时跳过该组——mihomo
-	// 不接受空组，而订阅组常见的「只有节点名成员」在节点被过滤后会变成空组；
-	// 用户追加过出口节点的组即使订阅成员全部失效也要保留，否则用户的选择会失效。
+	// 第一遍：不动点迭代确定本轮真正有可用成员的组，彻底消除级联空组（如 A -> B -> 离线节点）
+	// 与无真实出口的纯环引用，避免后续第二遍成员翻译报硬错让整份订阅规则失效。
+	requestedNodes := make(map[string][]string, len(source.groups))
+	for _, group := range source.groups {
+		request := req.GroupRequests[group.Name]
+		requestedNodes[group.Name] = resolveAddedNodes(request.AddedNodes, nodeSet)
+	}
+	activeGroups := resolveActiveGroups(source.groups, requestedNodes, nodeSet)
+
 	groupNames := make(map[string]string, len(source.groups))
 	droppedGroups := map[string]bool{}
 	plannedGroups := make([]proxyGroup, 0, len(source.groups))
-	requestedNodes := map[string][]string{}
 	for _, group := range source.groups {
-		request := req.GroupRequests[group.Name]
-		added := resolveAddedNodes(request.AddedNodes, nodeSet)
-		requestedNodes[group.Name] = added
-		if len(added) == 0 && !groupHasUsableMember(group, source.groups, nodeSet) {
-			// 记下被丢弃的组名：引用它的规则会被单条跳过而不是让整订阅导入失败——
-			// 组被丢弃是 proxyd 侧的节点过滤结果，不是订阅自身的引用错误。
+		if !activeGroups[group.Name] {
 			droppedGroups[group.Name] = true
 			continue
 		}
-		finalName := uniqueGroupName(group.Name, req.Subscription, used.Groups)
-		used.Groups[finalName] = true
+		finalName := uniqueGroupName(group.Name, req.Subscription, localUsed.Groups)
+		localUsed.Groups[finalName] = true
 		groupNames[group.Name] = finalName
 		plannedGroups = append(plannedGroups, group)
 	}
@@ -450,7 +454,74 @@ func BuildContribution(req ContributionRequest, used Namespace) (Contribution, e
 		}
 		contribution.Rules = append(contribution.Rules, rewritten)
 	}
+	// 规划全部成功后才把本订阅占用的名称提交到调用方共享的 used 命名空间。
+	commitNamespace(used, localUsed)
 	return contribution, nil
+}
+
+func cloneNamespace(src Namespace) Namespace {
+	dst := Namespace{
+		Groups:    make(map[string]bool, len(src.Groups)),
+		Providers: make(map[string]bool, len(src.Providers)),
+	}
+	for k, v := range src.Groups {
+		if v {
+			dst.Groups[k] = true
+		}
+	}
+	for k, v := range src.Providers {
+		if v {
+			dst.Providers[k] = true
+		}
+	}
+	return dst
+}
+
+func commitNamespace(dst, src Namespace) {
+	for k, v := range src.Groups {
+		if v && dst.Groups != nil {
+			dst.Groups[k] = true
+		}
+	}
+	for k, v := range src.Providers {
+		if v && dst.Providers != nil {
+			dst.Providers[k] = true
+		}
+	}
+}
+
+// resolveActiveGroups 通过最小不动点迭代找出所有拥有有效成员（可用节点、内置策略、
+// 用户追加节点，或递归指向其它活跃子组）的策略组。级联空组与无真实出口的纯环均不被标记为活跃。
+func resolveActiveGroups(groups []proxyGroup, requestedNodes map[string][]string, nodeSet map[string]bool) map[string]bool {
+	active := make(map[string]bool, len(groups))
+	for {
+		changed := false
+		for _, group := range groups {
+			if active[group.Name] {
+				continue
+			}
+			if len(requestedNodes[group.Name]) > 0 {
+				active[group.Name] = true
+				changed = true
+				continue
+			}
+			for _, member := range group.Members {
+				member = strings.TrimSpace(member)
+				if member == "" || member == group.Name {
+					continue
+				}
+				if nodeSet[member] || active[member] || (defaultPolicies[member] && !groupNameReserved(member)) {
+					active[group.Name] = true
+					changed = true
+					break
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return active
 }
 
 // needsProxyFallback 判断某个订阅策略组是否要把默认出口交给内置 PROXY 组。

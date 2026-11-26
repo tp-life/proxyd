@@ -274,6 +274,15 @@ func (m *Manager) guardUDPFlow(port uint16, handler func(tailcat.ConnPacketConn)
 		peerKey := resolvePeerKey(srv, cfg, flow.RemoteAddr())
 		decision := decideConnectionForKey(cfg, peerKey, int(port), startedAt)
 		if !decision.Allowed {
+			m.audit.Append(AuditEntry{
+				Time:       startedAt,
+				ClientKey:  decision.Key,
+				ClientName: decision.Name,
+				TargetPort: int(port),
+				Action:     AuditActionRejected,
+				Reason:     decision.Reason,
+			})
+			m.logf("[remote] 拒绝客户端 %s 访问 UDP 端口 %d: %s", displayClient(decision), port, decision.Reason)
 			_ = flow.Close()
 			return
 		}

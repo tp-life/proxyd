@@ -167,12 +167,31 @@ func (n *Node) MarkTesting() {
 	if n == nil {
 		return
 	}
+	if d := n.display.Load(); d != nil {
+		value := *d
+		value.Testing = true
+		n.display.Store(&value)
+		return
+	}
 	n.display.Store(&Display{
 		Alive:      n.Alive,
 		Delay:      n.Delay,
 		FailReason: n.FailReason,
 		Testing:    true,
 	})
+}
+
+// ClearTesting 仅通过原子展示行清除「测速中」标记，不读取或修改权威运行态字段，
+// 可在未持有 refreshing 锁的收尾路径安全调用而无数据竞争。
+func (n *Node) ClearTesting() {
+	if n == nil {
+		return
+	}
+	if d := n.display.Load(); d != nil && d.Testing {
+		value := *d
+		value.Testing = false
+		n.display.Store(&value)
+	}
 }
 
 // PublishResult 按节点当前的权威字段发布一行最终结果（Testing 为 false）。
@@ -231,6 +250,25 @@ func (n *Node) Clone() *Node {
 		value := *d
 		cloned.display.Store(&value)
 	}
+	return cloned
+}
+
+// CloneFromDisplay 基于原子展示行复制节点，不读取权威运行态字段 Alive/Delay/FailReason，
+// 供单订阅测速在未持有 refreshing 锁时安全构造私有测速副本，避免与并发全量刷新产生数据竞争。
+func (n *Node) CloneFromDisplay() *Node {
+	if n == nil {
+		return nil
+	}
+	d := n.Display()
+	cloned := &Node{
+		Name:         n.Name,
+		Subscription: n.Subscription,
+		Mapping:      n.Mapping,
+		Alive:        d.Alive,
+		Delay:        d.Delay,
+		FailReason:   d.FailReason,
+	}
+	cloned.display.Store(&d)
 	return cloned
 }
 

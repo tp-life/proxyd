@@ -96,6 +96,29 @@ func TestManagerApplyDisabled(t *testing.T) {
 	if runner.cleared != 1 {
 		t.Errorf("停用应清除已应用规则, cleared=%d", runner.cleared)
 	}
+	if s := m.Status(); s.Enabled || s.Applied || s.Forwarding {
+		t.Errorf("停用后 Enabled/Applied/Forwarding 应全部为 false: %+v", s)
+	}
+}
+
+// clearFailRunner 模拟停用清除规则失败的执行层。
+type clearFailRunner struct{ fakeRunner }
+
+func (c *clearFailRunner) Clear() error { return errors.New("clear failed") }
+
+func TestManagerDisablePropagatesClearError(t *testing.T) {
+	runner := &clearFailRunner{}
+	m := NewManager(t.TempDir(), nil)
+	m.runner = runner
+	if err := m.Apply(config.GatewayConfig{Devices: []config.GatewayDevice{{Name: "a", IP: "10.0.0.1"}}}); err != nil {
+		t.Fatalf("Apply(enable): %v", err)
+	}
+	if err := m.Apply(config.GatewayConfig{Disabled: true}); err == nil {
+		t.Fatal("Clear 失败时 Apply(disabled) 应返回错误")
+	}
+	if s := m.Status(); !s.Applied || s.Err == "" {
+		t.Fatalf("Clear 失败时应保留 Applied=true 并记录错误: %+v", s)
+	}
 }
 
 func TestManagerApplyFailureRecorded(t *testing.T) {

@@ -19,8 +19,10 @@ import (
 )
 
 const (
-	udpRelayBufferSize = 64 << 10
-	udpSweepInterval   = 30 * time.Second
+	udpRelayBufferSize   = 64 << 10
+	udpSweepInterval     = 30 * time.Second
+	maxPendingUDPPackets = 16
+	udpDialBackoff       = 2 * time.Second
 )
 
 // udpForwardRunner 监听一个本机回环 UDP 端口，按客户端源地址复用/创建对应的远端 UDP 流。
@@ -34,9 +36,15 @@ type udpForwardRunner struct {
 	cancel   context.CancelFunc
 	stopOnce sync.Once
 
-	mu      sync.Mutex
-	flows   map[netip.AddrPort]*udpClientFlow
-	stopped bool
+	mu          sync.Mutex
+	flows       map[netip.AddrPort]*udpClientFlow
+	dialing     map[netip.AddrPort]*pendingUDPDial
+	failedUntil map[netip.AddrPort]time.Time
+	stopped     bool
+}
+
+type pendingUDPDial struct {
+	queue [][]byte
 }
 
 type udpClientFlow struct {
@@ -70,13 +78,15 @@ func startUDPForwardRunner(listenAddr string, dial func(ctx context.Context) (ne
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &udpForwardRunner{
-		localConn: conn,
-		dial:      dial,
-		logf:      logf,
-		idle:      tailcat.DefaultUDPIdleTimeout,
-		ctx:       ctx,
-		cancel:    cancel,
-		flows:     map[netip.AddrPort]*udpClientFlow{},
+		localConn:   conn,
+		dial:        dial,
+		logf:        logf,
+		idle:        tailcat.DefaultUDPIdleTimeout,
+		ctx:         ctx,
+		cancel:      cancel,
+		flows:       map[netip.AddrPort]*udpClientFlow{},
+		dialing:     map[netip.AddrPort]*pendingUDPDial{},
+		failedUntil: map[netip.AddrPort]time.Time{},
 	}
 	go r.readLoop()
 	go r.sweepLoop()
@@ -102,55 +112,89 @@ func (r *udpForwardRunner) readLoop() {
 		if n == 0 {
 			continue
 		}
-		flow, err := r.getOrCreateFlow(src)
-		if err != nil {
-			if r.ctx.Err() == nil {
-				r.logf("[remote] UDP 转发拨号失败: %v", err)
-			}
-			continue
-		}
-		flow.touch()
-		if _, err := flow.upstream.Write(buf[:n]); err != nil {
-			r.removeFlow(src, flow)
-		}
+		r.dispatchPacket(src, buf[:n])
 	}
 }
 
-func (r *udpForwardRunner) getOrCreateFlow(src netip.AddrPort) (*udpClientFlow, error) {
+// dispatchPacket 将收到的本地 UDP 报文交给已有流或异步触发新流拨号，
+// 避免单个源地址的慢拨号/超时阻塞整个 readLoop 影响其他流。
+func (r *udpForwardRunner) dispatchPacket(src netip.AddrPort, payload []byte) {
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
-		return nil, net.ErrClosed
+		return
 	}
-	if existing, ok := r.flows[src]; ok {
+	if flow, ok := r.flows[src]; ok {
 		r.mu.Unlock()
-		return existing, nil
+		flow.touch()
+		if _, err := flow.upstream.Write(payload); err != nil {
+			r.removeFlow(src, flow)
+		}
+		return
 	}
+	if pending, ok := r.dialing[src]; ok {
+		if len(pending.queue) < maxPendingUDPPackets {
+			pending.queue = append(pending.queue, append([]byte(nil), payload...))
+		}
+		r.mu.Unlock()
+		return
+	}
+	if until, ok := r.failedUntil[src]; ok && time.Now().Before(until) {
+		r.mu.Unlock()
+		return
+	}
+	pending := &pendingUDPDial{
+		queue: [][]byte{append([]byte(nil), payload...)},
+	}
+	r.dialing[src] = pending
 	r.mu.Unlock()
 
+	go r.dialAndStartFlow(src, pending)
+}
+
+func (r *udpForwardRunner) dialAndStartFlow(src netip.AddrPort, pending *pendingUDPDial) {
 	upstream, err := r.dial(r.ctx)
 	if err != nil {
-		return nil, err
+		r.mu.Lock()
+		if cur, ok := r.dialing[src]; ok && cur == pending {
+			delete(r.dialing, src)
+		}
+		if !r.stopped {
+			r.failedUntil[src] = time.Now().Add(udpDialBackoff)
+		}
+		r.mu.Unlock()
+		if r.ctx.Err() == nil {
+			r.logf("[remote] UDP 转发拨号失败: %v", err)
+		}
+		return
 	}
+
 	flow := &udpClientFlow{upstream: upstream}
 	flow.touch()
 
 	r.mu.Lock()
+	if cur, ok := r.dialing[src]; ok && cur == pending {
+		delete(r.dialing, src)
+	}
+	delete(r.failedUntil, src)
 	if r.stopped {
 		r.mu.Unlock()
 		flow.close()
-		return nil, net.ErrClosed
+		return
 	}
-	if existing, ok := r.flows[src]; ok {
-		r.mu.Unlock()
-		flow.close()
-		return existing, nil
-	}
+	queued := pending.queue
+	pending.queue = nil
 	r.flows[src] = flow
 	r.mu.Unlock()
 
+	for _, pkt := range queued {
+		flow.touch()
+		if _, werr := flow.upstream.Write(pkt); werr != nil {
+			r.removeFlow(src, flow)
+			return
+		}
+	}
 	go r.pumpUpstream(src, flow)
-	return flow, nil
 }
 
 func (r *udpForwardRunner) pumpUpstream(src netip.AddrPort, flow *udpClientFlow) {
@@ -196,6 +240,11 @@ func (r *udpForwardRunner) sweepLoop() {
 					delete(r.flows, src)
 				}
 			}
+			for src, until := range r.failedUntil {
+				if !now.Before(until) {
+					delete(r.failedUntil, src)
+				}
+			}
 			r.mu.Unlock()
 			for _, flow := range expired {
 				flow.close()
@@ -214,6 +263,8 @@ func (r *udpForwardRunner) stop() {
 			flows = append(flows, flow)
 		}
 		clear(r.flows)
+		clear(r.dialing)
+		clear(r.failedUntil)
 		r.mu.Unlock()
 		_ = r.localConn.Close()
 		for _, flow := range flows {

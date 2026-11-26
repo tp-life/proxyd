@@ -13,6 +13,7 @@ import (
 	proxyopenvpn "proxyd/internal/proxy/openvpn"
 	"proxyd/internal/proxy/pool"
 	"proxyd/internal/proxy/subscribe"
+	"proxyd/internal/proxy/tunperm"
 )
 
 // OpenVPNSetupResult 是一次一体化接入事务成功后的可见结果。
@@ -62,10 +63,22 @@ func (a *App) SetupOpenVPN(ctx context.Context, requested proxyopenvpn.Setup) (O
 		return OpenVPNSetupResult{}, err
 	}
 
+	routeRule := setup.RouteRule()
+	if routeRule != "" {
+		if err := tunperm.Require(); err != nil {
+			return OpenVPNSetupResult{}, err
+		}
+	}
+
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
 	a.mu.Lock()
-	oldConfig := a.cfg.Clone()
+	oldManualNodes := append([]any(nil), a.cfg.ManualNodes...)
+	oldGroups := cloneNodeGroups(a.cfg.Groups)
+	oldCustomRules := append([]string(nil), a.cfg.CustomRules...)
+	oldTUN := a.cfg.TUN.Clone()
+	oldNodes := append([]*node.Node(nil), a.nodes...)
+	oldAssigns := append([]pool.Assignment(nil), a.assigns...)
 	nextConfig := a.cfg.Clone()
 	for _, entry := range nextConfig.ManualNodes {
 		if subscribe.ManualNodeName(entry) == setup.Name {
@@ -109,7 +122,6 @@ func (a *App) SetupOpenVPN(ctx context.Context, requested proxyopenvpn.Setup) (O
 	}
 	nextConfig.ManualNodes = append(nextConfig.ManualNodes, mapping)
 	nextConfig.Groups = append(nextConfig.Groups, group)
-	routeRule := setup.RouteRule()
 	if routeRule != "" {
 		if err := config.ValidateCustomRule(routeRule); err != nil {
 			a.mu.Unlock()
@@ -125,17 +137,20 @@ func (a *App) SetupOpenVPN(ctx context.Context, requested proxyopenvpn.Setup) (O
 			return OpenVPNSetupResult{}, err
 		}
 	}
-	a.cfg = nextConfig
+	a.cfg.ManualNodes = nextConfig.ManualNodes
+	a.cfg.Groups = nextConfig.Groups
+	a.cfg.CustomRules = nextConfig.CustomRules
+	a.cfg.TUN = nextConfig.TUN
 	a.mu.Unlock()
 
 	if err := a.refreshLocked(ctx, false); err != nil {
-		return OpenVPNSetupResult{}, a.rollbackOpenVPNSetupLocked(ctx, oldConfig, fmt.Errorf("OpenVPN 接入运行态应用失败: %w", err))
+		return OpenVPNSetupResult{}, a.rollbackOpenVPNSetupLocked(oldManualNodes, oldGroups, oldCustomRules, oldTUN, oldNodes, oldAssigns, fmt.Errorf("OpenVPN 接入运行态应用失败: %w", err), false)
 	}
 	a.mu.Lock()
 	persistErr := a.persistLocked()
 	a.mu.Unlock()
 	if persistErr != nil {
-		return OpenVPNSetupResult{}, a.rollbackOpenVPNSetupLocked(ctx, oldConfig, persistErr)
+		return OpenVPNSetupResult{}, a.rollbackOpenVPNSetupLocked(oldManualNodes, oldGroups, oldCustomRules, oldTUN, oldNodes, oldAssigns, persistErr, true)
 	}
 	return OpenVPNSetupResult{Name: setup.Name, GroupName: setup.GroupName, Port: group.Port, AccessMode: setup.AccessMode, RouteRule: routeRule, Warnings: append([]string(nil), setup.Profile.Warnings...)}, nil
 }
@@ -258,26 +273,37 @@ func (a *App) TerminateOpenVPNSetup(ctx context.Context, name string) (OpenVPNTe
 	return OpenVPNTerminationResult{Name: name, RemovedGroups: removedGroups, RemovedRules: removedRules}, nil
 }
 
-// rollbackOpenVPNSetupLocked 恢复一体化创建前的配置、运行态和磁盘文件。
-//
-// 参数说明：ctx 控制回滚刷新；oldConfig 是事务前深快照；cause 是原始错误。
-//
-// 返回值说明：始终返回包含 cause 的错误，回滚失败通过 errors.Join 合并。
-//
-// 错误情况：调用方必须持有 refreshing 锁；即使运行态恢复失败仍继续恢复磁盘。
-func (a *App) rollbackOpenVPNSetupLocked(ctx context.Context, oldConfig *config.Config, cause error) error {
+// rollbackOpenVPNSetupLocked 恢复一体化创建修改的配置字段、运行态和可选磁盘文件，
+// 不覆盖并发期间其它模块提交的配置，且通过本地 regenerateLocked 恢复运行态而不受请求 ctx 取消影响。
+func (a *App) rollbackOpenVPNSetupLocked(
+	oldManualNodes []any,
+	oldGroups []config.NodeGroup,
+	oldCustomRules []string,
+	oldTUN config.TUNConfig,
+	oldNodes []*node.Node,
+	oldAssigns []pool.Assignment,
+	cause error,
+	restoreDisk bool,
+) error {
 	a.mu.Lock()
-	a.cfg = oldConfig.Clone()
+	a.cfg.ManualNodes = oldManualNodes
+	a.cfg.Groups = cloneNodeGroups(oldGroups)
+	a.cfg.CustomRules = oldCustomRules
+	a.cfg.TUN = oldTUN
+	a.nodes = oldNodes
+	a.assigns = oldAssigns
 	a.mu.Unlock()
 	joined := cause
-	if err := a.refreshLocked(ctx, false); err != nil {
+	if err := a.regenerateLocked(oldAssigns); err != nil {
 		joined = errors.Join(joined, fmt.Errorf("恢复 OpenVPN 接入前运行态失败: %w", err))
 	}
-	a.mu.Lock()
-	if err := a.persistLocked(); err != nil {
-		joined = errors.Join(joined, fmt.Errorf("恢复 OpenVPN 接入前配置文件失败: %w", err))
+	if restoreDisk {
+		a.mu.Lock()
+		if err := a.persistLocked(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("恢复 OpenVPN 接入前配置文件失败: %w", err))
+		}
+		a.mu.Unlock()
 	}
-	a.mu.Unlock()
 	return joined
 }
 

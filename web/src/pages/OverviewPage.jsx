@@ -28,8 +28,9 @@ function formatUptime(seconds) {
 export function OverviewPage({ modules, overview, traffic, feed, snapshotError, theme, onNavigate, onRefresh, onPalette, onToggleTheme }) {
   const { data, errors, loading } = feed;
   const { cards, items } = buildDashboard(modules, { overview, data });
-  const sourceLabels = { system: "系统状态", connections: "代理连接", remote: "远程服务", devices: "设备档案", desktop: "桌面会话" };
-  const failures = Object.entries(errors).filter(([key]) => key === "system" || cards.some((card) => card.id === (key === "connections" ? "proxy" : "remote")));
+  const sourceLabels = { system: "系统状态", connections: "代理连接", remote: "远程服务", devices: "设备档案", desktop: "桌面会话", gateway: "LAN 网关" };
+  const sourceCardId = (key) => (key === "connections" ? "proxy" : key === "gateway" ? "gateway" : "remote");
+  const failures = Object.entries(errors).filter(([key]) => key === "system" || cards.some((card) => card.id === sourceCardId(key)));
   const incomplete = Boolean(snapshotError || failures.length || !data.system || !modules.length);
   const attention = items.length > 0;
   return <div className="dashboard-shell space-y-6">
@@ -42,7 +43,7 @@ export function OverviewPage({ modules, overview, traffic, feed, snapshotError, 
       <div className="flex items-center gap-3">{incomplete || attention ? <CircleAlert className="text-amber-500 shrink-0" size={28} /> : <CheckCircle2 className="text-emerald-500 shrink-0" size={28} />}<div><h2 className="font-semibold">{incomplete ? "部分状态尚未确认" : attention ? "有待处理事项" : cards.length ? "各项功能暂无异常" : "管理服务运行中"}</h2><p className="text-sm text-muted-foreground">{data.system ? "守护进程运行中" : "正在确认守护进程状态"} · 运行时长 {formatUptime(data.system?.uptime_seconds)}</p></div></div>
       <div className="flex flex-wrap gap-2"><Badge variant="outline">{modules.length ? `${cards.length} / ${modules.length} 个模块已启用` : "正在读取模块"}</Badge><Badge variant={attention ? "destructive" : "outline"}>{items.length} 项待处理</Badge></div>
     </section>
-    {(snapshotError || failures.length > 0) && <div role="alert" className="panel p-4 space-y-1 text-sm text-amber-600 dark:text-amber-400">{snapshotError && <p>{snapshotError}；已显示的数据可能尚未更新。</p>}{failures.map(([key, error]) => <p key={key}>{sourceLabels[key]}：{error}</p>)}</div>}
+    {(snapshotError || failures.length > 0) && <div role="alert" className="panel p-4 space-y-1 text-sm text-amber-600 dark:text-amber-400">{snapshotError && <p>{snapshotError}；已显示的数据可能尚未更新。</p>}{failures.map(([key, error]) => <p key={key}>{sourceLabels[key] || key}：{error}</p>)}</div>}
     <section aria-label="功能摘要" className="grid gap-5 lg:grid-cols-2">
       {cards.map((card) => <article className="panel p-5 space-y-5 min-w-0" key={card.id} aria-label={`${card.name}摘要`}>
         <div className="flex items-start justify-between gap-3"><div className="flex gap-3 items-center">{card.id === "proxy" ? <Network size={23} className="text-primary" /> : card.id === "remote" ? <Laptop size={23} className="text-primary" /> : <Layers size={23} />}<div><h2 className="font-semibold">{card.name}</h2><p className="text-sm text-muted-foreground">{card.description}</p></div></div><Badge variant={card.attention ? "destructive" : "outline"}>{card.label}</Badge></div>

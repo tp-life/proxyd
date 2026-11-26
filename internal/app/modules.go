@@ -58,17 +58,29 @@ func (a *App) Modules() []ModuleState {
 func (a *App) SetModuleEnabled(id string, enabled bool) error {
 	switch id {
 	case "proxy":
+		var wasGatewayEnabled bool
 		if !enabled {
 			// ADR 0003 联动：禁用 proxy 前必须先停 gateway（网关数据面寄生于 mihomo）。
 			// 整个「停 gateway → 停 proxy」持有 gatewayMutationMu，保证
 			// SetGatewayEnabled 事务无法插进两者之间造成 proxy 停用而 gateway 残留。
 			a.gatewayMutationMu.Lock()
 			defer a.gatewayMutationMu.Unlock()
+			a.mu.RLock()
+			wasGatewayEnabled = !a.cfg.Gateway.Disabled
+			a.mu.RUnlock()
 			if err := a.stopGatewayForProxyDisableLocked(); err != nil {
 				return err
 			}
 		}
 		if err := a.setProxyModuleEnabled(enabled); err != nil {
+			if !enabled && wasGatewayEnabled {
+				if rbErr := a.mutateGatewayLocked(func(c *config.Config) error {
+					c.Gateway.Disabled = false
+					return nil
+				}); rbErr != nil {
+					return errors.Join(err, fmt.Errorf("恢复网关模块失败: %w", rbErr))
+				}
+			}
 			return err
 		}
 		if enabled {

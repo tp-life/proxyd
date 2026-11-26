@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -39,6 +41,10 @@ const apiIdleTimeout = 2 * time.Minute
 // asyncRefreshTimeout 是一次后台全局刷新或测速允许执行的最长时间。
 // 与原 API 行为保持一致；超时上下文同时作为服务关闭时取消在途任务的边界。
 const asyncRefreshTimeout = 3 * time.Minute
+
+// defaultMaxRequestBodyBytes 是普通管理写接口的默认请求体体积上限（1 MiB）。
+// 文件上传与 OpenVPN 配置导入由各自 handler 设置专用限额。
+const defaultMaxRequestBodyBytes int64 = 1 << 20
 
 // Server 包装自有 API 与 Web 控制台的 HTTP 服务。
 type Server struct {
@@ -147,7 +153,7 @@ func (s *Server) Start() error {
 	// ReadHeaderTimeout 防止慢速请求头长期占用连接；IdleTimeout 只回收请求间的空闲
 	// keep-alive。不能设置全局 WriteTimeout，因为 /api/traffic 是合法的常驻流式响应。
 	s.srv = &http.Server{
-		Handler:           s.requireManagementAuth(mux),
+		Handler:           s.requireManagementAuth(s.guardWriteRequests(mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       apiIdleTimeout,
 	}
@@ -385,6 +391,64 @@ func (s *Server) processMemory() uint64 {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+// writeJSONStatus 先设置 JSON 响应头再写入状态码并编码正文，避免先 WriteHeader 导致 Content-Type 失效。
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// guardWriteRequests 为所有非安全方法（POST/PUT/PATCH/DELETE）增加跨站 CSRF 防护与默认请求体上限：
+// 1. 拒绝 Sec-Fetch-Site: cross-site 与非同源 Origin（含 null）；
+// 2. 拒绝 CORS 简单请求可绕过预检的 text/plain、application/x-www-form-urlencoded，
+//    以及非文件上传接口上的 multipart/form-data；
+// 3. 为未声明更大专用限额的写接口统一施加 1 MiB 请求体上限，防止 OOM。
+func (s *Server) guardWriteRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+				http.Error(w, "cross-site request forbidden", http.StatusForbidden)
+				return
+			}
+			if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, r.Host) {
+					http.Error(w, "cross-origin request forbidden", http.StatusForbidden)
+					return
+				}
+			}
+			if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
+				mediaType, _, err := mime.ParseMediaType(ct)
+				if err == nil {
+					switch strings.ToLower(mediaType) {
+					case "text/plain", "application/x-www-form-urlencoded":
+						http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
+						return
+					case "multipart/form-data":
+						if r.URL.Path != "/api/remote/files/upload" {
+							http.Error(w, "unsupported media type", http.StatusUnsupportedMediaType)
+							return
+						}
+					}
+				}
+			}
+			if !hasDedicatedBodyLimit(r.URL.Path) && r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, defaultMaxRequestBodyBytes)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func hasDedicatedBodyLimit(urlPath string) bool {
+	switch urlPath {
+	case "/api/remote/files/upload", "/api/proxy/openvpn/preview", "/api/proxy/openvpn/setup":
+		return true
+	default:
+		return false
+	}
 }

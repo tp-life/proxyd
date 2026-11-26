@@ -3,6 +3,8 @@ package api
 // 代理域：节点列表、手动节点与 overview 聚合视图接口。
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -212,8 +214,7 @@ func (s *Server) handleAddManualNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.trigger(false)
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, entry)
+	writeJSONStatus(w, http.StatusCreated, entry)
 }
 
 // handleDelManualNode 删除手动节点，并在后台仅使用剩余缓存数据更新运行态。
@@ -247,7 +248,7 @@ func newNodeEntry(n *node.Node, port int) NodeEntry {
 	display := n.Display()
 	return NodeEntry{
 		Name:         n.Name,
-		Key:          n.Key(),
+		Key:          hashNodeKey(n.Key()),
 		Type:         nodeType(n),
 		Subscription: n.Subscription,
 		Delay:        display.Delay,
@@ -257,6 +258,16 @@ func newNodeEntry(n *node.Node, port int) NodeEntry {
 		Tunnel:       n.IsTunnel(),
 		Testing:      display.Testing,
 	}
+}
+
+// hashNodeKey 将包含原始凭据（uuid/password/auth-key/private-key）的内部节点键折叠为
+// 不可逆的稳定摘要，避免 GET /api/overview 明文泄露节点凭据。
+func hashNodeKey(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return "node:" + hex.EncodeToString(sum[:12])
 }
 
 // nodeType 取节点的出站协议名。

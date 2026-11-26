@@ -103,13 +103,17 @@ func TestRenderUnit(t *testing.T) {
 	u := RenderUnit("/usr/local/bin/proxyd", "/home/x/.config/proxyd/config.yaml")
 	for _, want := range []string{
 		"[Service]",
-		"ExecStart=/usr/local/bin/proxyd serve -c /home/x/.config/proxyd/config.yaml",
+		`ExecStart="/usr/local/bin/proxyd" serve -c "/home/x/.config/proxyd/config.yaml"`,
 		"Restart=on-failure",
 		"WantedBy=default.target",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit 缺少 %q:\n%s", want, u)
 		}
+	}
+	spaced := RenderUnit("/opt/my tools/proxyd", "/home/my user/config.yaml")
+	if !strings.Contains(spaced, `ExecStart="/opt/my tools/proxyd" serve -c "/home/my user/config.yaml"`) {
+		t.Errorf("含空格路径未正确加引号:\n%s", spaced)
 	}
 }
 

@@ -32,6 +32,11 @@ type heartbeatPinger interface {
 	Ping() error
 }
 
+// structuredPFApplier 是接受结构化参数而非原始 pf 规则文本的执行层（macOS helperRunner）。
+type structuredPFApplier interface {
+	ApplyPFSpec(params helperPFApplyParams) error
+}
+
 // Status 是网关模块的运行态快照。
 type Status struct {
 	Platform   string `json:"platform"`      // runtime.GOOS
@@ -97,23 +102,32 @@ func (m *Manager) Apply(cfg config.GatewayConfig) error {
 	if m.closed {
 		return fmt.Errorf("gateway 管理器已关闭")
 	}
-	m.cfg = cfg.Clone()
-	m.enabled = !cfg.Disabled
 	if cfg.Disabled {
 		if m.applied {
 			if err := m.runner.Clear(); err != nil {
 				m.logf("[gateway] 清除转发规则失败: %v", err)
+				m.lastErr = err.Error()
+				return err
 			}
 			m.applied = false
 		}
+		m.forwarding = false
+		m.cfg = cfg.Clone()
+		m.enabled = false
 		m.stopHeartbeatLocked()
 		m.lastErr = ""
 		return nil
 	}
-	text := renderRules(cfg, DefaultDNSListenPort)
-	if err := m.runner.Apply(text); err != nil {
-		m.lastErr = err.Error()
-		return err
+	var applyErr error
+	if applier, ok := m.runner.(structuredPFApplier); ok {
+		applyErr = applier.ApplyPFSpec(buildHelperPFParams(cfg, DefaultDNSListenPort))
+	} else {
+		text := renderRules(cfg, DefaultDNSListenPort)
+		applyErr = m.runner.Apply(text)
+	}
+	if applyErr != nil {
+		m.lastErr = applyErr.Error()
+		return applyErr
 	}
 	m.applied = true
 	if err := m.runner.Forwarding(true); err != nil {
@@ -129,6 +143,8 @@ func (m *Manager) Apply(cfg config.GatewayConfig) error {
 		m.lastErr = joined.Error()
 		return joined
 	}
+	m.cfg = cfg.Clone()
+	m.enabled = true
 	m.forwarding = true
 	m.lastErr = ""
 	// 规则已应用后启动看门狗心跳：helper 失联超时会自动清除规则，

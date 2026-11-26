@@ -61,7 +61,7 @@ export function GatewayPage({ overview, precheck, groups, loading, refreshing, e
   const policyOptions = [
     { value: "proxy", label: "代理（默认）" },
     { value: "direct", label: "直连" },
-    ...(groups || []).map((group) => ({ value: `group:${group.name}`, label: `分组：${group.name}` })),
+    ...(groups || []).filter((group) => !group.builtin).map((group) => ({ value: `group:${group.name}`, label: `分组：${group.name}` })),
   ];
 
   /**

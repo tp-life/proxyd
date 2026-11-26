@@ -39,10 +39,11 @@ const (
 )
 
 // helperRun 执行外部命令；包级变量便于测试替换。
+// 原始输出仅返回给服务端日志与状态判定，不拼入 error 回传客户端，防止 pfctl 报错泄露 root 文件内容。
 var helperRun = func(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return string(out), fmt.Errorf("%s %s 执行失败: %w", name, strings.Join(args, " "), err)
 	}
 	return string(out), nil
 }
@@ -109,13 +110,16 @@ func (o *darwinHelperOps) ApplyPF(anchor string) error {
 	}
 	// pf 默认未启用；已启用时 pfctl -e 返回 "pf already enabled"，忽略之。
 	if out, err := o.run("/sbin/pfctl", "-e"); err != nil && !strings.Contains(out, "already enabled") {
-		return fmt.Errorf("启用 pf 失败: %w", err)
+		o.logf("[gateway-helper] 启用 pf 失败: %v (%s)", err, strings.TrimSpace(out))
+		return fmt.Errorf("启用 pf 失败（详见 helper 日志）")
 	}
-	if _, err := o.run("/sbin/pfctl", "-f", gatewayCombinedPFConf); err != nil {
-		return fmt.Errorf("载入 pf 主配置失败: %w", err)
+	if out, err := o.run("/sbin/pfctl", "-f", gatewayCombinedPFConf); err != nil {
+		o.logf("[gateway-helper] 载入 pf 主配置失败: %v (%s)", err, strings.TrimSpace(out))
+		return fmt.Errorf("载入 pf 主配置失败（详见 helper 日志）")
 	}
-	if _, err := o.run("/sbin/pfctl", "-a", gatewayPFAnchor, "-f", gatewayAnchorFile); err != nil {
-		return fmt.Errorf("载入 pf anchor 失败: %w", err)
+	if out, err := o.run("/sbin/pfctl", "-a", gatewayPFAnchor, "-f", gatewayAnchorFile); err != nil {
+		o.logf("[gateway-helper] 载入 pf anchor 失败: %v (%s)", err, strings.TrimSpace(out))
+		return fmt.Errorf("载入 pf anchor 失败（详见 helper 日志）")
 	}
 	o.applied = true
 	o.logf("[gateway-helper] pf anchor 已应用")
@@ -356,6 +360,12 @@ func RunHelperServer(ctx context.Context, logf func(format string, args ...any))
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
+				if ops.Applied() {
+					logf("[gateway-helper] 收到停止信号，退出前清除已应用的 pf 规则")
+					if clearErr := ops.ClearPF(); clearErr != nil {
+						logf("[gateway-helper] 退出清理 pf 规则失败: %v", clearErr)
+					}
+				}
 				return nil
 			}
 			return fmt.Errorf("helper 接受连接失败: %w", err)

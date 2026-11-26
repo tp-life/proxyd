@@ -612,8 +612,12 @@ func (a *App) SetImportedGroupSelected(groupName, nodeName string) error {
 		return fmt.Errorf("分组 %q 类型为 %s，仅 select 分组支持手动选中出口", groupName, target.Type)
 	}
 	alive := map[string]bool{}
+	nonTunnelAlive := 0
 	for _, candidate := range nodes {
 		alive[candidate.Name] = true
+		if !candidate.IsTunnel() {
+			nonTunnelAlive++
+		}
 	}
 	// 出口取值统一成 mihomo 能识别的写法（大小写与空白容错）。
 	nodeName = canonicalExit(nodeName)
@@ -622,10 +626,9 @@ func (a *App) SetImportedGroupSelected(groupName, nodeName string) error {
 	case "DIRECT", "REJECT":
 		// 内置策略始终可选，与内置 PROXY 组的语义一致。
 	case "AUTO":
-		// AUTO 是 proxyd 内置的 url-test 组，可以作为订阅组的出口使用；它只在存在
-		// 健康节点时才会被生成，因此这里要求至少一个可用节点。
-		if len(alive) == 0 {
-			return fmt.Errorf("当前没有可用节点，AUTO 不可选")
+		// AUTO 是 proxyd 内置的 url-test 组，只在存在普通（非隧道）健康节点时生成。
+		if nonTunnelAlive == 0 {
+			return fmt.Errorf("当前没有可用于自动选优的普通代理节点，AUTO 不可选")
 		}
 		if !containsString(added, nodeName) {
 			added = append(added, nodeName)
@@ -653,7 +656,7 @@ func (a *App) SetImportedGroupSelected(groupName, nodeName string) error {
 	selectedPath := a.groupSelectedPath()
 	oldSelected, selErr := groupstate.Load(selectedPath)
 	if selErr != nil {
-		log.Printf("[groupstate] %v (ignored)", oldSelected)
+		log.Printf("[groupstate] %v (ignored)", selErr)
 		oldSelected = map[string]string{}
 	}
 	nextSelected := make(map[string]string, len(oldSelected)+1)
@@ -663,8 +666,8 @@ func (a *App) SetImportedGroupSelected(groupName, nodeName string) error {
 	nextSelected[groupName] = nodeName
 
 	if err := groupstate.Save(selectedPath, nextSelected); err != nil {
-		// 选中状态没写成功时恢复覆盖存档，避免留下「添加了出口但没有选择」。
-		if rollbackErr := a.setOverrideAdded(stateDir, subscription, authored, "", target.AddedNodes); rollbackErr != nil {
+		// 选中状态没写成功时恢复覆盖存档（保留原选中值 target.Selected），避免清空用户既有手选出口。
+		if rollbackErr := a.setOverrideAdded(stateDir, subscription, authored, target.Selected, target.AddedNodes); rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("恢复策略组覆盖存档失败: %w", rollbackErr))
 		}
 		return err

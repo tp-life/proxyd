@@ -23,6 +23,9 @@ func (a *App) Assignments() []pool.Assignment {
 
 // SetAutoPort 设置自动选优端口（0=关闭），持久化并热更新。
 func (a *App) SetAutoPort(port int) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	if err := a.cfg.CheckAutoPort(port); err != nil {
 		a.mu.Unlock()
@@ -31,21 +34,30 @@ func (a *App) SetAutoPort(port int) error {
 	old := a.cfg.AutoPort
 	a.cfg.AutoPort = port
 	a.mu.Unlock()
-	if err := a.Regenerate(); err != nil {
+	if err := a.regenerateCurrentLocked(); err != nil {
 		a.mu.Lock()
 		a.cfg.AutoPort = old
 		a.mu.Unlock()
-		_ = a.Regenerate()
+		if rbErr := a.regenerateCurrentLocked(); rbErr != nil {
+			return errors.Join(err, fmt.Errorf("恢复旧 auto-port 运行态失败: %w", rbErr))
+		}
 		return err
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
 	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
-	if err == nil {
-		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	if err != nil {
+		a.mu.Lock()
+		a.cfg.AutoPort = old
+		a.mu.Unlock()
+		if rbErr := a.regenerateCurrentLocked(); rbErr != nil {
+			return errors.Join(err, fmt.Errorf("恢复旧 auto-port 运行态失败: %w", rbErr))
+		}
+		return err
 	}
-	return err
+	remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	return nil
 }
 
 // SetMainPort 以事务方式修改主端口、mihomo 运行态与系统代理指向。
@@ -126,6 +138,9 @@ func (a *App) rollbackMainPortLocked(oldPort int, systemProxyWasEnabled bool, ca
 // SetPortRange 修改节点映射端口区间并持久化，随后用当前节点
 // （沿用最近一次测速结果，不重新拉订阅/测速）重新分配端口并热更新。
 func (a *App) SetPortRange(lo, hi int) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	// 端口冲突是配置领域不变量，运行时变更必须与启动校验共用
 	// 同一规则。特别是 API 和 mihomo 控制端口，一旦落入映射区间，
@@ -135,23 +150,45 @@ func (a *App) SetPortRange(lo, hi int) error {
 		return err
 	}
 	old := a.cfg.PortRange
+	oldAssigns := append([]pool.Assignment(nil), a.assigns...)
 	a.cfg.PortRange = [2]int{lo, hi}
 	a.mu.Unlock()
-	if err := a.reallocate(); err != nil {
+
+	assigns, err := a.reallocateLocked(lo, hi)
+	if err != nil {
 		a.mu.Lock()
 		a.cfg.PortRange = old
+		a.assigns = oldAssigns
 		a.mu.Unlock()
-		_ = a.reallocate()
+		if rbErr := a.regenerateLocked(oldAssigns); rbErr != nil {
+			return errors.Join(err, fmt.Errorf("恢复旧端口区间运行态失败: %w", rbErr))
+		}
 		return err
 	}
 	a.mu.Lock()
-	err := a.persistLocked()
+	err = a.persistLocked()
 	listen, mixedPort, autoPort := a.cfg.Listen, a.cfg.MixedPort, a.cfg.AutoPort
 	a.mu.Unlock()
-	if err == nil {
-		remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	if err != nil {
+		a.mu.Lock()
+		a.cfg.PortRange = old
+		a.assigns = oldAssigns
+		a.mu.Unlock()
+		if rbErr := a.regenerateLocked(oldAssigns); rbErr != nil {
+			return errors.Join(err, fmt.Errorf("恢复旧端口区间运行态失败: %w", rbErr))
+		}
+		return err
 	}
-	return err
+	// 快照只在运行态与配置文件都提交成功后更新，避免失败回滚破坏旧端口亲和关系。
+	snap := &pool.Snapshot{Mapping: make(map[string]int, len(assigns))}
+	for _, as := range assigns {
+		snap.Mapping[as.Node.Key()] = as.Port
+	}
+	if snapErr := pool.SaveSnapshot(a.snapshotPath(), snap); snapErr != nil {
+		log.Printf("[alloc] save snapshot: %v", snapErr)
+	}
+	remote.BypassSelfProxy(listen, mixedPort, autoPort)
+	return nil
 }
 
 // SetPortMapping 开关健康节点的一对一本地端口 listener，并以“热更新成功后再持久化”
@@ -227,11 +264,9 @@ func (a *App) rollbackPortMappingLocked(old *bool, cause error, restoreDisk bool
 	return joined
 }
 
-// reallocate 用当前节点列表重新分配端口、保存快照并热更新核心（无网络操作）。
-func (a *App) reallocate() error {
-	a.refreshing.Lock()
-	defer a.refreshing.Unlock()
-
+// reallocateLocked 用当前节点列表按新区间重新分配端口并热更新核心（无网络操作、不写快照）；
+// 调用方须持有 refreshing 锁，并在主配置落盘成功后再持久化快照。
+func (a *App) reallocateLocked(lo, hi int) ([]pool.Assignment, error) {
 	var alive []*node.Node
 	for _, n := range a.Nodes() {
 		if n.Alive {
@@ -242,25 +277,13 @@ func (a *App) reallocate() error {
 	if err != nil {
 		log.Printf("[alloc] load snapshot: %v (ignored)", err)
 	}
-	a.mu.RLock()
-	lo, hi := a.cfg.PortRange[0], a.cfg.PortRange[1]
-	a.mu.RUnlock()
 	assigns := pool.Allocate(alive, lo, hi, prev)
-	snap := &pool.Snapshot{Mapping: make(map[string]int, len(assigns))}
-	for _, as := range assigns {
-		snap.Mapping[as.Node.Key()] = as.Port
-	}
-	if err := pool.SaveSnapshot(a.snapshotPath(), snap); err != nil {
-		log.Printf("[alloc] save snapshot: %v", err)
-	}
-
 	if err := a.regenerateLocked(assigns); err != nil {
-		return err
+		return nil, err
 	}
-
 	a.mu.Lock()
 	a.assigns = assigns
 	a.mu.Unlock()
 	log.Printf("[alloc] port range changed: %d ports mapped to %d-%d", len(assigns), lo, hi)
-	return nil
+	return assigns, nil
 }

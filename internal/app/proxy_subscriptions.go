@@ -262,7 +262,10 @@ func (a *App) UpdateSubscription(_ context.Context, currentName string, next con
 	if snapshotErr != nil {
 		log.Printf("[alloc] load snapshot for subscription update: %v (ignored)", snapshotErr)
 	}
-	nextAssignments := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], previousSnapshot)
+	a.mu.RLock()
+	portRange := a.cfg.PortRange
+	a.mu.RUnlock()
+	nextAssignments := pool.Allocate(alive, portRange[0], portRange[1], previousSnapshot)
 
 	a.mu.Lock()
 	a.cfg.Subscriptions = nextSubscriptions
@@ -422,7 +425,7 @@ func cloneSubscriptionImports(imports map[string]*subscriptionImport) map[string
 	return out
 }
 
-// RemoveSubscription 按名字删除订阅并持久化；不允许删除最后一个订阅。
+// RemoveSubscription 按名字删除订阅并持久化；不允许删除最后一个订阅或仍被策略组引用的订阅。
 func (a *App) RemoveSubscription(name string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -431,14 +434,27 @@ func (a *App) RemoveSubscription(name string) error {
 			if len(a.cfg.Subscriptions) == 1 && len(a.cfg.ManualNodes) == 0 {
 				return fmt.Errorf("不能删除最后一个订阅")
 			}
+			for _, g := range a.cfg.Groups {
+				if g.Subscription == name {
+					return fmt.Errorf("分组 %q 仍引用订阅 %q，请先修改或删除该分组", g.Name, name)
+				}
+			}
+			oldSubs := append([]config.Subscription(nil), a.cfg.Subscriptions...)
+			oldImport, hadImport := a.subImports[name]
 			a.cfg.Subscriptions = append(a.cfg.Subscriptions[:i], a.cfg.Subscriptions[i+1:]...)
-			// 订阅已删除：它的路由导入计划与覆盖存档必须一起消失，否则下一轮配置
-			// 生成仍会写入指向该订阅的策略组与规则集引用。
 			delete(a.subImports, name)
+			if err := a.persistLocked(); err != nil {
+				a.cfg.Subscriptions = oldSubs
+				if hadImport {
+					a.subImports[name] = oldImport
+				}
+				return err
+			}
+			// 仅在主配置持久化成功后再清理覆盖存档，避免失败回滚丢失用户已保存的出口覆盖。
 			if err := a.writeGroupOverrides(name, nil, nil); err != nil {
 				log.Printf("[subscribe] %v", err)
 			}
-			return a.persistLocked()
+			return nil
 		}
 	}
 	return fmt.Errorf("订阅 %q 不存在", name)
@@ -515,8 +531,9 @@ func (a *App) RefreshSubscription(ctx context.Context, name string) error {
 		}
 	}
 	markTesting(counterparts)
-	// 提前返回（订阅已被改动、来源为空）也必须复位展示行，不能留下永久「测速中」。
-	defer settleDisplay(counterparts)
+	// 提前返回（订阅已被改动、来源为空）也必须复位展示行，不能留下永久「测速中」；
+	// 仅走原子 ClearTesting，避免 defer 在 refreshing.Unlock 之后读取权威字段。
+	defer clearTestingDisplay(counterparts)
 
 	// fresh 是本次拉取的私有对象（尚未经 Merge 改名/挂接共享状态），合并前测速
 	// 不读写共享节点，因此不需要 refreshing 锁，可与其它订阅的操作并行。
@@ -587,7 +604,7 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 	}
 
 	// 克隆待测节点：pool.Check 会原地写回 Alive/Delay/FailReason，直接检测共享
-	// 节点会与并发的概览读取、其它订阅提交产生数据竞争。提交时按 Key 回填结果。
+	// 节点会与并发的概览读取、其它订阅提交产生数据竞争。基于原子展示行构造副本，提交时替换副本而非原地改写。
 	nodes := a.Nodes()
 	published := make(map[string]*node.Node, len(nodes))
 	var checkList, counterparts []*node.Node
@@ -596,16 +613,16 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 		if n.Subscription != name {
 			continue
 		}
-		checkList = append(checkList, n.Clone())
+		checkList = append(checkList, n.CloneFromDisplay())
 		counterparts = append(counterparts, n)
 	}
 	if len(checkList) == 0 {
 		return fmt.Errorf("订阅 %s 当前没有节点", name)
 	}
 	// 已发布节点在测速期间显示「测速中…」，每测完一个立即换成它的新延迟（只转发
-	// 展示行，权威字段仍等提交回填）；提前返回或提交后由 settleDisplay 复位。
+	// 展示行，权威字段仍等提交替换）；提前返回或提交后由 clearTestingDisplay 原子复位。
 	markTesting(counterparts)
-	defer settleDisplay(counterparts)
+	defer clearTestingDisplay(counterparts)
 	a.checkNodes(ctx, checkList, pool.CheckOptions{OnResult: func(checked *node.Node) {
 		if existing := published[checked.DedupKey()]; existing != nil {
 			existing.PublishDisplay(checked.Display())
@@ -627,9 +644,11 @@ func (a *App) TestSubscription(ctx context.Context, name string) error {
 		if current == nil {
 			continue // 测速期间节点已被其它操作移除或替换
 		}
+		// 权威字段的写入严格受 refreshing 锁保护，锁外读者全部经由原子 Display() 读取。
 		current.Alive = checked.Alive
 		current.Delay = checked.Delay
 		current.FailReason = checked.FailReason
+		current.PublishResult()
 	}
 	return a.applyNodes(ctx, latest)
 }
@@ -738,7 +757,8 @@ type ManualNodeEntry struct {
 }
 
 // ManualNodes 返回配置中的手动节点列表（供 API 展示）。
-// 结构化条目的出站映射经 config.RedactMapping 打码，完整凭据不进入列表响应。
+// 字符串 URL 经 config.RedactURL 打码，结构化出站映射经 config.RedactMapping 打码，
+// 完整凭据不进入列表响应。
 func (a *App) ManualNodes() []ManualNodeEntry {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -747,7 +767,7 @@ func (a *App) ManualNodes() []ManualNodeEntry {
 		item := ManualNodeEntry{Index: i, Name: subscribe.ManualNodeName(entry)}
 		switch typed := entry.(type) {
 		case string:
-			item.URL = typed
+			item.URL = config.RedactURL(typed)
 		case map[string]any:
 			item.Type, _ = typed["type"].(string)
 			item.Proxy = config.RedactMapping(typed)
@@ -775,14 +795,16 @@ func (a *App) AddManualNode(rawURL, name string) (ManualNodeEntry, error) {
 	defer a.mu.Unlock()
 	for _, e := range a.cfg.ManualNodes {
 		if e == rawURL {
-			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", rawURL)
+			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", subscribe.ManualNodeName(rawURL))
 		}
 	}
+	oldNodes := append([]any(nil), a.cfg.ManualNodes...)
 	a.cfg.ManualNodes = append(a.cfg.ManualNodes, rawURL)
 	if err := a.persistLocked(); err != nil {
+		a.cfg.ManualNodes = oldNodes
 		return ManualNodeEntry{}, err
 	}
-	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, URL: rawURL, Name: subscribe.ManualNodeName(rawURL)}, nil
+	return ManualNodeEntry{Index: len(a.cfg.ManualNodes) - 1, URL: config.RedactURL(rawURL), Name: subscribe.ManualNodeName(rawURL)}, nil
 }
 
 // AddManualProxy 添加结构化隧道类（VPN）手动节点并持久化。
@@ -809,8 +831,10 @@ func (a *App) AddManualProxy(mapping map[string]any, name string) (ManualNodeEnt
 			return ManualNodeEntry{}, fmt.Errorf("节点 %q 已存在", parsed.Name)
 		}
 	}
+	oldNodes := append([]any(nil), a.cfg.ManualNodes...)
 	a.cfg.ManualNodes = append(a.cfg.ManualNodes, candidate)
 	if err := a.persistLocked(); err != nil {
+		a.cfg.ManualNodes = oldNodes
 		return ManualNodeEntry{}, err
 	}
 	typ, _ := candidate["type"].(string)
@@ -824,9 +848,21 @@ func (a *App) RemoveManualNode(index int) error {
 	if index < 0 || index >= len(a.cfg.ManualNodes) {
 		return fmt.Errorf("手动节点下标 %d 不存在", index)
 	}
-	if len(a.cfg.ManualNodes) == 1 && len(a.cfg.Subscriptions) == 0 {
-		return fmt.Errorf("不能删除最后一个节点来源（已无订阅）")
+	if len(a.cfg.ManualNodes) == 1 {
+		if len(a.cfg.Subscriptions) == 0 {
+			return fmt.Errorf("不能删除最后一个节点来源（已无订阅）")
+		}
+		for _, g := range a.cfg.Groups {
+			if g.Subscription == subscribe.ManualSubscription {
+				return fmt.Errorf("分组 %q 仍引用手动节点来源，请先修改或删除该分组", g.Name)
+			}
+		}
 	}
+	oldNodes := append([]any(nil), a.cfg.ManualNodes...)
 	a.cfg.ManualNodes = append(a.cfg.ManualNodes[:index], a.cfg.ManualNodes[index+1:]...)
-	return a.persistLocked()
+	if err := a.persistLocked(); err != nil {
+		a.cfg.ManualNodes = oldNodes
+		return err
+	}
+	return nil
 }

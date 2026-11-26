@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
 	"text/tabwriter"
 
 	"proxyd/internal/app"
@@ -67,7 +69,9 @@ func cmdGatewayHelperLocal(args []string) error {
 //
 // 错误情况：非 root、非 macOS 或监听失败时返回错误，launchd 按 KeepAlive 重启。
 func cmdGatewayHelperServe(_ []string) error {
-	return gateway.RunHelperServer(context.Background(), func(format string, args ...any) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return gateway.RunHelperServer(ctx, func(format string, args ...any) {
 		log.Printf(format, args...)
 	})
 }

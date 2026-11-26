@@ -105,8 +105,8 @@ func (a *App) applyGatewayRuntime(cfg config.GatewayConfig) error {
 		complete("disabled", false, "当前平台不支持 LAN 网关（docs/adr/0003）", 0)
 		return nil
 	case errors.Is(err, gateway.ErrHelperUnavailable):
-		// helper 缺失是可恢复状态：配置照常提交，装好后经重试/手动 Retry 收敛。
-		complete("degraded", false, "统一特权助手未安装或未运行：请执行 sudo proxyd helper install 安装", 30*time.Second)
+		// helper 缺失或协议版本不兼容属于可恢复状态：配置照常提交，装好/升级后经重试收敛。
+		complete("degraded", false, "统一特权助手未就绪或协议版本不兼容：请执行 sudo proxyd helper install 安装/升级", 30*time.Second)
 		return nil
 	default:
 		complete("failed", false, "网关转发规则应用失败: "+firstErrorLine(err.Error()), 30*time.Second)

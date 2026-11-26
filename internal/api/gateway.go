@@ -86,8 +86,7 @@ func (s *Server) handleAddGatewayDevice(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, device)
+	writeJSONStatus(w, http.StatusCreated, device)
 }
 
 // handleUpdateGatewayDevice 原位更新一台已登记设备（暂不支持改名）。

@@ -15,6 +15,7 @@ import (
 	"proxyd/internal/proxy/pool"
 	"proxyd/internal/proxy/subscribe"
 	proxytailscale "proxyd/internal/proxy/tailscale"
+	"proxyd/internal/proxy/tunperm"
 )
 
 // TailscaleSetupResult 是一次一体化接入事务成功后的可见结果。
@@ -53,10 +54,22 @@ func (a *App) SetupTailscale(ctx context.Context, requested proxytailscale.Setup
 		return TailscaleSetupResult{}, err
 	}
 
+	routeRule := setup.RouteRule()
+	if routeRule != "" {
+		if err := tunperm.Require(); err != nil {
+			return TailscaleSetupResult{}, err
+		}
+	}
+
 	a.refreshing.Lock()
 	defer a.refreshing.Unlock()
 	a.mu.Lock()
-	oldConfig := a.cfg.Clone()
+	oldManualNodes := append([]any(nil), a.cfg.ManualNodes...)
+	oldGroups := cloneNodeGroups(a.cfg.Groups)
+	oldCustomRules := append([]string(nil), a.cfg.CustomRules...)
+	oldTUN := a.cfg.TUN.Clone()
+	oldNodes := append([]*node.Node(nil), a.nodes...)
+	oldAssigns := append([]pool.Assignment(nil), a.assigns...)
 	nextConfig := a.cfg.Clone()
 	for _, entry := range nextConfig.ManualNodes {
 		if subscribe.ManualNodeName(entry) == setup.Name {
@@ -105,7 +118,6 @@ func (a *App) SetupTailscale(ctx context.Context, requested proxytailscale.Setup
 	}
 	nextConfig.ManualNodes = append(nextConfig.ManualNodes, mapping)
 	nextConfig.Groups = append(nextConfig.Groups, group)
-	routeRule := setup.RouteRule()
 	if routeRule != "" {
 		if err := config.ValidateCustomRule(routeRule); err != nil {
 			a.mu.Unlock()
@@ -121,18 +133,21 @@ func (a *App) SetupTailscale(ctx context.Context, requested proxytailscale.Setup
 			return TailscaleSetupResult{}, err
 		}
 	}
-	a.cfg = nextConfig
+	a.cfg.ManualNodes = nextConfig.ManualNodes
+	a.cfg.Groups = nextConfig.Groups
+	a.cfg.CustomRules = nextConfig.CustomRules
+	a.cfg.TUN = nextConfig.TUN
 	a.mu.Unlock()
 
 	a.runner.BeginTailscaleEnrollment(setup.Name, string(setup.AuthMode))
 	if err := a.refreshLocked(ctx, false); err != nil {
-		return TailscaleSetupResult{}, a.rollbackTailscaleSetupLocked(ctx, oldConfig, setup.Name, fmt.Errorf("Tailscale 接入运行态应用失败: %w", err))
+		return TailscaleSetupResult{}, a.rollbackTailscaleSetupLocked(oldManualNodes, oldGroups, oldCustomRules, oldTUN, oldNodes, oldAssigns, setup.Name, fmt.Errorf("Tailscale 接入运行态应用失败: %w", err), false)
 	}
 	a.mu.Lock()
 	persistErr := a.persistLocked()
 	a.mu.Unlock()
 	if persistErr != nil {
-		return TailscaleSetupResult{}, a.rollbackTailscaleSetupLocked(ctx, oldConfig, setup.Name, persistErr)
+		return TailscaleSetupResult{}, a.rollbackTailscaleSetupLocked(oldManualNodes, oldGroups, oldCustomRules, oldTUN, oldNodes, oldAssigns, setup.Name, persistErr, true)
 	}
 
 	// tsnet 出站采用懒启动；事务提交后用有界探测主动触发认证。该探测不会被当作
@@ -455,29 +470,39 @@ func nextTunnelGroupPort(cfg *config.Config, group config.NodeGroup) (int, error
 	return 0, fmt.Errorf("没有可用于 VPN 接入的分组端口")
 }
 
-// rollbackTailscaleSetupLocked 恢复一体化接入事务前的配置、运行态和注册状态。
-//
-// 参数说明：ctx 控制回滚刷新；oldConfig 是事务前深快照；name 是临时注册会话名；
-// cause 是触发回滚的原始错误。
-//
-// 返回值说明：始终包含 cause；运行态或磁盘恢复失败时通过 errors.Join 一并返回。
-//
-// 错误情况：调用方必须持有 refreshing 锁；即使运行态恢复失败也会继续尝试恢复磁盘，
-// 避免内存、进程和配置文件静默分叉。
-func (a *App) rollbackTailscaleSetupLocked(ctx context.Context, oldConfig *config.Config, name string, cause error) error {
+// rollbackTailscaleSetupLocked 恢复一体化接入事务修改的配置字段、运行态和注册状态，
+// 不覆盖并发期间其它模块提交的配置，且通过本地 regenerateLocked 恢复运行态而不受请求 ctx 取消影响。
+func (a *App) rollbackTailscaleSetupLocked(
+	oldManualNodes []any,
+	oldGroups []config.NodeGroup,
+	oldCustomRules []string,
+	oldTUN config.TUNConfig,
+	oldNodes []*node.Node,
+	oldAssigns []pool.Assignment,
+	name string,
+	cause error,
+	restoreDisk bool,
+) error {
 	a.runner.RemoveTailscaleEnrollment(name)
 	a.mu.Lock()
-	a.cfg = oldConfig.Clone()
+	a.cfg.ManualNodes = oldManualNodes
+	a.cfg.Groups = cloneNodeGroups(oldGroups)
+	a.cfg.CustomRules = oldCustomRules
+	a.cfg.TUN = oldTUN
+	a.nodes = oldNodes
+	a.assigns = oldAssigns
 	a.mu.Unlock()
 	joined := cause
-	if err := a.refreshLocked(ctx, false); err != nil {
+	if err := a.regenerateLocked(oldAssigns); err != nil {
 		joined = errors.Join(joined, fmt.Errorf("恢复 Tailscale 接入前运行态失败: %w", err))
 	}
-	a.mu.Lock()
-	if err := a.persistLocked(); err != nil {
-		joined = errors.Join(joined, fmt.Errorf("恢复 Tailscale 接入前配置文件失败: %w", err))
+	if restoreDisk {
+		a.mu.Lock()
+		if err := a.persistLocked(); err != nil {
+			joined = errors.Join(joined, fmt.Errorf("恢复 Tailscale 接入前配置文件失败: %w", err))
+		}
+		a.mu.Unlock()
 	}
-	a.mu.Unlock()
 	return joined
 }
 

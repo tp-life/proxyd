@@ -397,6 +397,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	if err := validatePlannedGroupNames(groups, nodeNames, plan.Groups); err != nil {
 		return nil, err
 	}
+	skippedPlanGroups := map[string]bool{}
 	for _, group := range plan.Groups {
 		members := normalizeMembers(group.Proxies)
 		if !autoGroupOn {
@@ -407,6 +408,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 		}
 		if len(members) == 0 {
 			log.Printf("[core] 订阅策略组 %q 在本轮没有可用成员（可能只剩未生成的 AUTO），跳过", group.Name)
+			skippedPlanGroups[group.Name] = true
 			continue
 		}
 		planned := map[string]any{
@@ -429,6 +431,9 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	m["proxy-groups"] = groups
 
+	planRules := filterSkippedGroupRules(plan.Rules, skippedPlanGroups)
+	planFallbackRules := filterSkippedGroupRules(plan.FallbackRules, skippedPlanGroups)
+
 	// 规则合并顺序：gateway 设备规则（SRC-IP-CIDR）最前 → 用户 custom-rules →
 	// rule-urls 导入规则 → 订阅自带规则 → 广告拦截 RULE-SET → 内置规则 → 订阅兜底规则。
 	// 订阅规则排在用户显式规则与规则源之后，是因为用户的白名单/直连意图必须能覆盖
@@ -438,7 +443,7 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	//
 	// 这里同时记录每条规则的来源（ruleEntries）：来源只存在于生成阶段，最终配置里没有
 	// 任何字段可以反推它，控制台「当前生效规则」直接消费这份标注。
-	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(plan.Rules)+len(cfg.Rules)+len(plan.FallbackRules)+2)
+	ruleEntries := make([]RuleEntry, 0, len(cfg.Gateway.Devices)+len(cfg.CustomRules)+len(imported)+len(planRules)+len(cfg.Rules)+len(planFallbackRules)+2)
 	if gatewayActive(cfg) {
 		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceGateway, gatewayDeviceRules(cfg, groups))
 	}
@@ -449,12 +454,12 @@ func generate(cfg *config.Config, assigns []Assignment, nodes []*node.Node, impo
 	}
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceCustom, cfg.CustomRules)
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceRuleURL, imported)
-	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscription, plan.Rules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscription, planRules)
 	if cfg.AdBlock.Enable {
 		ruleEntries = appendRuleEntries(ruleEntries, RuleSourceAdBlock, []string{adBlockRule})
 	}
 	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceBuiltin, cfg.Rules)
-	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscriptionFallback, plan.FallbackRules)
+	ruleEntries = appendRuleEntries(ruleEntries, RuleSourceSubscriptionFallback, planFallbackRules)
 	rules := ruleEntriesToLines(ruleEntries)
 	m["rules"] = rules
 	ruleProviders := cfg.RuleProviders
@@ -877,4 +882,33 @@ func firstLine(s string) string {
 func isLoopback(addr string) bool {
 	ip, err := netip.ParseAddr(addr)
 	return err == nil && ip.IsLoopback()
+}
+
+// filterSkippedGroupRules 过滤引用已被本轮跳过的订阅策略组的规则，
+// 避免 mihomo 因 proxy not found 拒绝整份配置。
+func filterSkippedGroupRules(rules []string, skipped map[string]bool) []string {
+	if len(skipped) == 0 || len(rules) == 0 {
+		return rules
+	}
+	out := make([]string, 0, len(rules))
+	for _, line := range rules {
+		if target := ruleLineTarget(line); skipped[target] {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// ruleLineTarget 提取 mihomo 规则行的目标策略名（跳过尾部 no-resolve/src 等参数段）。
+func ruleLineTarget(line string) string {
+	parts := strings.Split(line, ",")
+	for i := len(parts) - 1; i >= 1; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part == "" || part == "no-resolve" || part == "src" {
+			continue
+		}
+		return part
+	}
+	return ""
 }

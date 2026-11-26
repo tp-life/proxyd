@@ -259,9 +259,29 @@ type remoteStatusResponse struct {
 	APILoopback bool   `json:"api_loopback"`    // false 时开启动作必须二次确认
 }
 
-// handleGetRemote 返回远程连接模块状态（token 打码）。
+// maskForwardRemote 对转发目标中直填的 tailcat token 打码，远端别名保持原样。
+func maskForwardRemote(target string) string {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return ""
+	}
+	if remote.ValidateToken(trimmed) == nil || (strings.HasPrefix(trimmed, "tc") && len(trimmed) > 24) {
+		return maskToken(trimmed)
+	}
+	return target
+}
+
+// handleGetRemote 返回远程连接模块状态（token 及转发内直填 token 均打码）。
 func (s *Server) handleGetRemote(w http.ResponseWriter, _ *http.Request) {
 	st := s.app.RemoteStatus()
+	if len(st.Forwards) > 0 {
+		masked := make([]remote.ForwardStatus, len(st.Forwards))
+		copy(masked, st.Forwards)
+		for i := range masked {
+			masked[i].Remote = maskForwardRemote(masked[i].Remote)
+		}
+		st.Forwards = masked
+	}
 	apiListen, apiLoopback := s.app.RemoteAPIExposure()
 	writeJSON(w, remoteStatusResponse{
 		Status:      st,
@@ -827,8 +847,7 @@ func (s *Server) handleAddRemote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, remotePeerEntry{Name: peer.Name, Token: maskToken(peer.Token)})
+	writeJSONStatus(w, http.StatusCreated, remotePeerEntry{Name: peer.Name, Token: maskToken(peer.Token)})
 }
 
 // handleDelRemote 删除保存的远端。
@@ -870,8 +889,8 @@ func (s *Server) handleAddRemoteForward(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, created)
+	created.Remote = maskForwardRemote(created.Remote)
+	writeJSONStatus(w, http.StatusCreated, created)
 }
 
 // handleSetRemoteForward 启停单条转发（请求体 { "enabled": bool }）。

@@ -380,34 +380,63 @@ func (a *App) RuleURLs() []RuleURLStat {
 	return out
 }
 
-// AddRuleURL 新增规则源：持久化后立即拉取该源并热更新（失败仅记录状态，不报错）。
+// AddRuleURL 新增规则源：校验、拉取并热更新后持久化；任一步失败整体回滚。
 func (a *App) AddRuleURL(ru config.RuleURL) error {
 	ru.Name = strings.TrimSpace(ru.Name)
 	ru.URL = strings.TrimSpace(ru.URL)
+	a.mu.RLock()
+	if err := a.cfg.CheckRuleURL(ru); err != nil {
+		a.mu.RUnlock()
+		return err
+	}
+	stateDir := a.cfg.StateDir
+	a.mu.RUnlock()
+
+	// 添加规则源是用户明确发起的远端操作，因此立即拉取这一个源；网络拉取在锁外执行，
+	// 失败只记入状态，等用户下一次执行全局手动同步时再试。
+	res := ruleurl.Fetch(context.Background(), ru, stateDir)
+
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	if err := a.cfg.CheckRuleURL(ru); err != nil {
 		a.mu.Unlock()
 		return err
 	}
+	oldRuleURLs := append([]config.RuleURL(nil), a.cfg.RuleURLs...)
 	a.cfg.RuleURLs = append(a.cfg.RuleURLs, ru)
 	a.mu.Unlock()
 
-	// 添加规则源是用户明确发起的远端操作，因此立即拉取这一个源；失败只记入状态，
-	// 等用户下一次执行全局手动同步时再试，不创建后台周期下载。
-	res := ruleurl.Fetch(context.Background(), ru, a.cfg.StateDir)
 	a.applyRuleResults([]ruleurl.Result{res})
-
-	if err := a.Regenerate(); err != nil {
-		return err
+	rollback := func(cause error) error {
+		a.mu.Lock()
+		a.cfg.RuleURLs = oldRuleURLs
+		delete(a.imported, ru.Name)
+		delete(a.ruleStats, ru.Name)
+		a.mu.Unlock()
+		if rbErr := a.regenerateCurrentLocked(); rbErr != nil {
+			return errors.Join(cause, fmt.Errorf("恢复旧规则源运行态失败: %w", rbErr))
+		}
+		return cause
+	}
+	if err := a.regenerateCurrentLocked(); err != nil {
+		return rollback(err)
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
-	return err
+	if err != nil {
+		return rollback(err)
+	}
+	return nil
 }
 
-// RemoveRuleURL 按名字删除规则源，移除其导入规则，持久化并热更新。
+// RemoveRuleURL 按名字删除规则源，移除其导入规则，热更新并持久化；任一步失败整体回滚。
 func (a *App) RemoveRuleURL(name string) error {
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
+
 	a.mu.Lock()
 	idx := -1
 	for i, ru := range a.cfg.RuleURLs {
@@ -420,17 +449,39 @@ func (a *App) RemoveRuleURL(name string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("规则源 %q 不存在", name)
 	}
+	oldRuleURLs := append([]config.RuleURL(nil), a.cfg.RuleURLs...)
+	oldImported, hadImported := a.imported[name]
+	oldStat, hadStat := a.ruleStats[name]
 	a.cfg.RuleURLs = append(a.cfg.RuleURLs[:idx], a.cfg.RuleURLs[idx+1:]...)
 	delete(a.imported, name)
 	delete(a.ruleStats, name)
 	a.mu.Unlock()
-	if err := a.Regenerate(); err != nil {
-		return err
+
+	rollback := func(cause error) error {
+		a.mu.Lock()
+		a.cfg.RuleURLs = oldRuleURLs
+		if hadImported {
+			a.imported[name] = oldImported
+		}
+		if hadStat {
+			a.ruleStats[name] = oldStat
+		}
+		a.mu.Unlock()
+		if rbErr := a.regenerateCurrentLocked(); rbErr != nil {
+			return errors.Join(cause, fmt.Errorf("恢复旧规则源运行态失败: %w", rbErr))
+		}
+		return cause
+	}
+	if err := a.regenerateCurrentLocked(); err != nil {
+		return rollback(err)
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
-	return err
+	if err != nil {
+		return rollback(err)
+	}
+	return nil
 }
 
 // RuleURLContent 返回规则源适合直接阅读的内容。

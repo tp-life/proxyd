@@ -615,6 +615,7 @@ func (a *App) Shutdown() {
 	// 核心关闭后运行态不再对应任何配置；清空记录避免重复 Shutdown/再次启动时误判配置未变。
 	a.clearAppliedConfig()
 	a.runner.Shutdown()
+	a.releaseTUNFDLocked(false)
 }
 
 func (a *App) snapshotPath() string {

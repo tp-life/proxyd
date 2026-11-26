@@ -59,6 +59,9 @@ type SessionSpec struct {
 	RemotePort     int
 	Username       string
 	Quality        string
+	// Isolated 为 true 时每次 Start 均创建独立会话，不按 ConnectionName 复用；
+	// 供 proxyd desk 等临时 CLI 多窗口并发连接同一远端时隔离各自生命周期。
+	Isolated bool
 }
 
 // Validate 校验创建会话所需的业务不变量。
@@ -235,10 +238,12 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 		m.mu.Unlock()
 		return Session{}, ErrManagerClosed
 	}
-	if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
-		snapshot := m.snapshotLocked(existing)
-		m.mu.Unlock()
-		return snapshot, nil
+	if !spec.Isolated {
+		if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
+			snapshot := m.snapshotLocked(existing)
+			m.mu.Unlock()
+			return snapshot, nil
+		}
 	}
 	m.mu.Unlock()
 
@@ -260,11 +265,13 @@ func (m *Manager) Start(spec SessionSpec) (Session, error) {
 		_ = forward.Close()
 		return Session{}, ErrManagerClosed
 	}
-	if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
-		snapshot := m.snapshotLocked(existing)
-		m.mu.Unlock()
-		_ = forward.Close()
-		return snapshot, nil
+	if !spec.Isolated {
+		if existing := m.findByConnectionLocked(spec.ConnectionName); existing != nil {
+			snapshot := m.snapshotLocked(existing)
+			m.mu.Unlock()
+			_ = forward.Close()
+			return snapshot, nil
+		}
 	}
 	now := m.now()
 	session := &managedSession{

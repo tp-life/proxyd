@@ -94,6 +94,13 @@ func RenderPlist(exe, cfgPath, logPath, userName, homeDir string, rootDaemon boo
 // 返回值说明：string，可写入 systemd user unit 的配置文本。
 //
 // 错误情况：无；调用方负责文件写入和 systemctl 错误处理。
+// systemdQuote 按 systemd ExecStart 语法对路径做双引号与反斜杠/% 转义，
+// 避免二进制或配置路径包含空格时 systemd 拆错参数导致启动失败。
+func systemdQuote(s string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s)
+	return `"` + escaped + `"`
+}
+
 func RenderUnit(exe, cfgPath string) string {
 	return fmt.Sprintf(`[Unit]
 Description=proxyd — multi-node port-mapping proxy
@@ -107,7 +114,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
-`, exe, cfgPath)
+`, systemdQuote(exe), systemdQuote(cfgPath))
 }
 
 // RenderRunCommand 生成 Windows 注册表 Run 项的命令行：

@@ -132,8 +132,7 @@ func (s *Server) handleAddGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, g)
+	writeJSONStatus(w, http.StatusCreated, g)
 }
 
 // handleUpdateGroup 修改现有策略分组的端口、类型或成员来源。

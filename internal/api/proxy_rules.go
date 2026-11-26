@@ -105,8 +105,7 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, s.app.CustomRules())
+	writeJSONStatus(w, http.StatusCreated, s.app.CustomRules())
 }
 
 func (s *Server) handleDelRule(w http.ResponseWriter, r *http.Request) {
@@ -192,8 +191,7 @@ func (s *Server) handleAddRuleURL(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, s.app.RuleURLs())
+	writeJSONStatus(w, http.StatusCreated, s.app.RuleURLs())
 }
 
 func (s *Server) handleDelRuleURL(w http.ResponseWriter, r *http.Request) {

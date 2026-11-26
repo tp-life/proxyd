@@ -308,7 +308,7 @@ func TestDurationMillis(t *testing.T) {
 // TestDynamicAllowClientAndDisconnect 验证 tailcat v0.8.0 动态 AllowClient 语义
 // 及 DisconnectClient 会立即关闭活动连接并写入审计记录。
 func TestDynamicAllowClientAndDisconnect(t *testing.T) {
-	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	allowedKey := key.NewNode().Public()
 	tempKey := key.NewNode().Public()
 	strangerKey := key.NewNode().Public()
@@ -328,13 +328,13 @@ func TestDynamicAllowClientAndDisconnect(t *testing.T) {
 		Allow: []config.RemoteAllowEntry{{
 			Name:      "维护设备",
 			Key:       allowedKey.String(),
-			ExpiresAt: timePointer(now.Add(time.Minute)),
+			ExpiresAt: timePointer(now.Add(time.Hour)),
 		}},
 	}
 	if !isClientAllowed(cfg, allowedKey.String(), now) {
 		t.Fatal("有效白名单客户端应获准接入")
 	}
-	if isClientAllowed(cfg, allowedKey.String(), now.Add(time.Minute)) {
+	if isClientAllowed(cfg, allowedKey.String(), now.Add(time.Hour)) {
 		t.Fatal("已过期白名单客户端应在动态钩子层即被拒绝")
 	}
 	if !isClientAllowed(cfg, tempKey.String(), now) {

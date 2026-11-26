@@ -256,3 +256,37 @@ func containsLine(content, line string) bool {
 	}
 	return false
 }
+
+// TestIsolatedSessionsDoNotCollide 验证 Isolated=true 的临时会话（如多窗口 proxyd desk）
+// 即使 ConnectionName 相同也会分配独立会话 ID，停止其中一个不会影响另一个。
+func TestIsolatedSessionsDoNotCollide(t *testing.T) {
+	manager := NewManager(func(spec SessionSpec) (Forward, error) {
+		return &fakeForward{}, nil
+	}, Options{})
+	defer manager.Close()
+
+	spec := SessionSpec{
+		ConnectionName: "cli:rdp:office:3389",
+		Remote:         "office",
+		Protocol:       ProtocolRDP,
+		RemotePort:     3389,
+		Isolated:       true,
+	}
+	s1, err := manager.Start(spec)
+	if err != nil {
+		t.Fatalf("Start s1: %v", err)
+	}
+	s2, err := manager.Start(spec)
+	if err != nil {
+		t.Fatalf("Start s2: %v", err)
+	}
+	if s1.ID == s2.ID {
+		t.Fatalf("独立会话不应复用同一 ID: %s", s1.ID)
+	}
+	if err := manager.Stop(s1.ID); err != nil {
+		t.Fatalf("Stop s1: %v", err)
+	}
+	if _, err := manager.Get(s2.ID); err != nil {
+		t.Fatalf("关闭 s1 不应影响 s2: %v", err)
+	}
+}

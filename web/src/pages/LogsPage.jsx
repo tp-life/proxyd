@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Copy, Download, Pause, Play, RefreshCw, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,6 +29,8 @@ export function LogsPage() {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [paused, setPaused] = useState(false);
+  const controllerRef = useRef(null);
+  const requestTokenRef = useRef(0);
 
   /**
    * loadLogs 拉取日志尾部。
@@ -40,16 +42,23 @@ export function LogsPage() {
    * 返回 Promise<void>。
    *
    * 可能的异常/错误情况：
-   * tail 非数字时由后端按默认值处理；网络错误会写入 error 状态。
+   * tail 非数字时由后端按默认值处理；网络错误会写入 error 状态，过期或已取消请求静默忽略。
    */
   const loadLogs = useCallback(async (silent = false) => {
+    const token = requestTokenRef.current + 1;
+    requestTokenRef.current = token;
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
     try {
-      const query = new URLSearchParams({ tail: tail || "200" });
-      if (level) query.set("level", level);
-      const data = await requestJSON(`/api/logs?${query.toString()}`);
+      const params = new URLSearchParams({ tail: tail || "200" });
+      if (level) params.set("level", level);
+      const data = await requestJSON(`/api/logs?${params.toString()}`, { signal: controller.signal });
+      if (requestTokenRef.current !== token) return;
       setLogs(data?.entries || []);
       setError("");
     } catch (err) {
+      if (err?.name === "AbortError" || requestTokenRef.current !== token) return;
       if (!silent) setError(err.message);
     }
   }, [tail, level]);
@@ -57,7 +66,10 @@ export function LogsPage() {
   useEffect(() => {
     loadLogs();
     const timer = paused ? 0 : window.setInterval(() => loadLogs(true), 4000);
-    return () => { if (timer) window.clearInterval(timer); };
+    return () => {
+      if (timer) window.clearInterval(timer);
+      controllerRef.current?.abort();
+    };
   }, [loadLogs, paused]);
 
   const visibleLogs = useMemo(() => {
@@ -143,8 +155,8 @@ export function LogsPage() {
             {visibleLogs.length === 0 ? (
               <pre>暂无日志</pre>
             ) : (
-              visibleLogs.map((entry) => (
-                <pre className={classNames("log-line", `level-${entry.level || "info"}`)} key={`${entry.time}:${entry.line}`}>{entry.line}</pre>
+              visibleLogs.map((entry, index) => (
+                <pre className={classNames("log-line", `level-${entry.level || "info"}`)} key={`${index}:${entry.time}:${entry.line}`}>{entry.line}</pre>
               ))
             )}
           </div>

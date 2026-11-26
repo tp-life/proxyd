@@ -5,11 +5,17 @@ package gateway
 // 平台执行能力（pfctl/sysctl/socket）经 helperOps 接口注入。
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 	"strings"
+	"time"
+
+	"proxyd/internal/config"
 )
 
 // helperSocketPath 是 helper 的 unix socket 地址（0600 + 对端属主校验由服务端保证）。
@@ -17,7 +23,18 @@ import (
 const helperSocketPath = "/var/run/com.proxyd.gateway.sock"
 
 // helperProtocolVersion 是协议主版本；握手时主版本不一致即拒绝并提示重装 helper。
-const helperProtocolVersion = 1
+// v2 起 pf.apply 改为结构化参数（设备 IPv4 列表 + 端口 + DNS 开关），由 root helper
+// 内部渲染 pf anchor，彻底杜绝任意 pf 规则注入与 include 读文件风险。
+const helperProtocolVersion = 2
+
+const (
+	// maxHelperRequestBytes 限制单条 helper 请求体积（64 KiB），防止内存/磁盘耗尽。
+	maxHelperRequestBytes = 64 << 10
+	// helperReadTimeout 限制单条 helper 请求读取超时，避免空闲或慢速连接永久挂起。
+	helperReadTimeout = 10 * time.Second
+	// maxHelperPFDevices 限制单次下发的下游 IPv4 设备数量上限。
+	maxHelperPFDevices = 1024
+)
 
 // 阶段一白名单指令集；服务端按名分发，白名单外一律拒绝。
 const (
@@ -43,9 +60,57 @@ type helperResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// helperPFApplyParams 是 pf.apply 的参数：完整 pf anchor 文本。
+// helperPFApplyParams 是 pf.apply 的结构化参数；root helper 校验全部字段后在内部
+// 调用 RenderPFAnchor 生成规则文本，绝不接受客户端拼装的原始 pf.conf 片段。
 type helperPFApplyParams struct {
-	Anchor string `json:"anchor"`
+	Devices       []string `json:"devices"`
+	RedirPort     int      `json:"redir_port"`
+	DNSRedirect   bool     `json:"dns_redirect,omitempty"`
+	DNSListenPort int      `json:"dns_listen_port,omitempty"`
+}
+
+// buildHelperPFParams 从网关配置提取 pf.apply 所需的最小结构化参数。
+func buildHelperPFParams(cfg config.GatewayConfig, dnsListenPort int) helperPFApplyParams {
+	return helperPFApplyParams{
+		Devices:       deviceIPList(cfg),
+		RedirPort:     cfg.EffectiveRedirPort(),
+		DNSRedirect:   cfg.DNSRedirect,
+		DNSListenPort: dnsListenPort,
+	}
+}
+
+// validateAndRenderHelperPF 严格校验结构化 pf 参数并在特权边界内渲染 pf anchor 文本。
+func validateAndRenderHelperPF(params helperPFApplyParams) (string, error) {
+	if params.RedirPort < 1 || params.RedirPort > 65535 {
+		return "", fmt.Errorf("redir_port %d 超出 1-65535", params.RedirPort)
+	}
+	if params.DNSRedirect && (params.DNSListenPort < 1 || params.DNSListenPort > 65535) {
+		return "", fmt.Errorf("dns_listen_port %d 超出 1-65535", params.DNSListenPort)
+	}
+	if len(params.Devices) > maxHelperPFDevices {
+		return "", fmt.Errorf("设备数量 %d 超过上限 %d", len(params.Devices), maxHelperPFDevices)
+	}
+	devices := make([]config.GatewayDevice, 0, len(params.Devices))
+	seen := make(map[string]struct{}, len(params.Devices))
+	for _, raw := range params.Devices {
+		ipText := strings.TrimSpace(raw)
+		addr, err := netip.ParseAddr(ipText)
+		if err != nil || !addr.Is4() || addr.Zone() != "" {
+			return "", fmt.Errorf("设备 IP %q 不是合法 IPv4 地址", raw)
+		}
+		canonical := addr.String()
+		if _, dup := seen[canonical]; dup {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		devices = append(devices, config.GatewayDevice{IP: canonical})
+	}
+	cfg := config.GatewayConfig{
+		RedirPort:   params.RedirPort,
+		DNSRedirect: params.DNSRedirect,
+		Devices:     devices,
+	}
+	return RenderPFAnchor(cfg, params.DNSListenPort), nil
 }
 
 // helperForwardSetParams 是 forward.set 的参数。
@@ -116,10 +181,11 @@ func dispatchHelperRequest(req helperRequest, ops helperOps) helperResponse {
 		if err := decodeHelperParams(req.Params, &params); err != nil {
 			return fail("pf.apply %v", err)
 		}
-		if strings.TrimSpace(params.Anchor) == "" {
-			return fail("pf.apply 的 anchor 不能为空")
+		anchor, err := validateAndRenderHelperPF(params)
+		if err != nil {
+			return fail("pf.apply 参数非法: %v", err)
 		}
-		if err := ops.ApplyPF(params.Anchor); err != nil {
+		if err := ops.ApplyPF(anchor); err != nil {
 			return fail("pf.apply 执行失败: %v", err)
 		}
 		resp.OK = true
@@ -165,19 +231,46 @@ func dispatchHelperRequest(req helperRequest, ops helperOps) helperResponse {
 //
 // 错误情况：解码失败（含 EOF）静默结束连接；单条指令的失败以应答返回，不断开连接。
 func serveHelperConn(conn net.Conn, ops helperOps, onActivity func()) {
-	decoder := json.NewDecoder(conn)
+	reader := bufio.NewReaderSize(conn, 4096)
 	encoder := json.NewEncoder(conn)
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(helperReadTimeout))
+		line, err := readBoundedLine(reader, maxHelperRequestBytes)
+		if err != nil {
+			return
+		}
 		var req helperRequest
-		if err := decoder.Decode(&req); err != nil {
+		if err := json.Unmarshal(line, &req); err != nil {
 			return
 		}
 		resp := dispatchHelperRequest(req, ops)
 		if resp.OK && onActivity != nil {
 			onActivity()
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(helperReadTimeout))
 		if err := encoder.Encode(resp); err != nil {
 			return
+		}
+	}
+}
+
+// readBoundedLine 读取单行 JSON 请求并强制不超过 maxBytes，避免超大请求耗尽 root helper 内存。
+func readBoundedLine(r *bufio.Reader, maxBytes int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, isPrefix, err := r.ReadLine()
+		if err != nil {
+			if err == io.EOF && len(buf) > 0 {
+				return buf, nil
+			}
+			return nil, err
+		}
+		if len(buf)+len(chunk) > maxBytes {
+			return nil, fmt.Errorf("请求超过 %d 字节上限", maxBytes)
+		}
+		buf = append(buf, chunk...)
+		if !isPrefix {
+			return buf, nil
 		}
 	}
 }

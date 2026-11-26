@@ -27,7 +27,7 @@ export const NAV_ITEMS = [
   { id: "gateway", keywords: "旁路由 网关 LAN 设备 分流 helper", label: "LAN 网关", group: "gateway", icon: Router, detail: "登记局域网设备，把它的网关/DNS 指向本机即可分流。" },
   { id: "remote/devices", keywords: "SSH 连接 诊断 diagnose 设备", label: "设备与连接", group: "remote", icon: Laptop, detail: "保存远端设备，连接 SSH 并检查链路。" },
   { id: "remote/files", keywords: "SFTP SCP 上传 下载 目录 文件 传输", label: "文件传输", group: "remote", icon: FolderUp, detail: "浏览远端目录，上传或下载文件。" },
-  { id: "remote/services", label: "本机服务", group: "remote", icon: Server, detail: "管理本机隧道、SSH、浏览器终端和暴露端口。" },
+  { id: "remote/services", keywords: "DERP 中继 隧道 SSH 终端 端口 暴露", label: "本机服务", group: "remote", icon: Server, detail: "管理本机隧道、DERP 中继、SSH、浏览器终端和暴露端口。" },
   { id: "remote/access", keywords: "SSH 公钥 私钥 密钥 key 授权 白名单 到期", label: "访问授权", group: "remote", icon: KeyRound, detail: "管理 SSH 公钥、客户端白名单及隧道身份。" },
   { id: "remote/forwards", label: "端口转发", group: "remote", icon: ArrowLeftRight, detail: "将本机监听端口转发到远端设备。" },
   { id: "remote/audit", label: "连接审计", group: "remote", icon: History, detail: "查看隧道连接、SSH 认证和会话结束事件。" },

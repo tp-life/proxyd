@@ -539,3 +539,60 @@ func groupNameList(c Contribution) []string {
 	}
 	return out
 }
+
+// TestBuildContributionCascadingEmptyGroupsAndNamespaceIsolation 验证：
+// 1. 级联空组（组 A → 组 B → 离线节点）会被整链剔除并跳过对应规则，不导致整订阅导入失败；
+// 2. 订阅规划中途失败时不会污染调用方传入的共享 used 命名空间。
+func TestBuildContributionCascadingEmptyGroupsAndNamespaceIsolation(t *testing.T) {
+	body := `
+proxy-groups:
+  - name: Leaf
+    type: select
+    proxies: [OfflineNode]
+  - name: Parent
+    type: select
+    proxies: [Leaf]
+  - name: AliveGroup
+    type: select
+    proxies: [LiveNode]
+rules:
+  - DOMAIN,dead.example,Parent
+  - DOMAIN,ok.example,AliveGroup
+`
+	used := Namespace{Groups: map[string]bool{}, Providers: map[string]bool{}}
+	c, err := BuildContribution(ContributionRequest{
+		Subscription: "sub",
+		Body:         []byte(body),
+		NodeNames:    []string{"LiveNode"},
+	}, used)
+	if err != nil {
+		t.Fatalf("级联空组不应导致整份订阅失败: %v", err)
+	}
+	if len(c.Groups) != 1 || c.Groups[0].Name != "AliveGroup" {
+		t.Fatalf("期望仅保留 AliveGroup，实际: %+v", c.Groups)
+	}
+	if len(c.SkippedRules) != 1 || len(c.Rules) != 1 {
+		t.Fatalf("期望跳过 1 条死组规则并保留 1 条规则，实际 skipped=%d rules=%d", len(c.SkippedRules), len(c.Rules))
+	}
+
+	// 失败路径不应污染 used
+	badBody := `
+proxy-groups:
+  - name: ShouldNotLeak
+    type: select
+    proxies: [LiveNode]
+rules:
+  - DOMAIN,bad.example,NonExistentGroup
+`
+	cleanUsed := Namespace{Groups: map[string]bool{}, Providers: map[string]bool{}}
+	if _, err := BuildContribution(ContributionRequest{
+		Subscription: "bad",
+		Body:         []byte(badBody),
+		NodeNames:    []string{"LiveNode"},
+	}, cleanUsed); err == nil {
+		t.Fatal("悬空未知组引用应返回错误")
+	}
+	if cleanUsed.Groups["ShouldNotLeak"] {
+		t.Fatal("失败的 BuildContribution 不应污染调用方 used.Groups")
+	}
+}

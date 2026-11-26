@@ -89,7 +89,7 @@ func (a *App) regenerateLocked(assigns []pool.Assignment) error {
 	// 调和结果（策略组、规则、规则集引用），顺序颠倒会用到上一轮的旧计划。
 	a.reconcileSubscriptionRouting()
 	a.mu.RLock()
-	cfg := a.cfg
+	cfg := a.cfg.Clone()
 	imported := a.mergedImportedLocked()
 	plan := a.mergedRoutingLocked()
 	a.mu.RUnlock()
@@ -196,7 +196,13 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 		// 热更新失败时 mihomo 可能只应用了一半，运行态不再对应该配置；清空记录让下一轮
 		// 重新自检并重试，而不是把失败状态误当成“已生效、无需再试”。
 		a.clearAppliedConfig()
-		releaseOnError()
+		if !a.runner.TUNEnabled() {
+			// mihomo 未处于 TUN 运行态时，缓存的 fd 已失效或被关闭；acquired=true 则关闭
+			// 未移交的 fd，acquired=false 则清零句柄避免下一轮继续注入陈旧 fd 编号。
+			a.releaseTUNFDLocked(acquired)
+		} else {
+			releaseOnError()
+		}
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
 	// mihomo 的 ReCreateTun 在创建虚拟网卡失败时只写日志，不把错误返回给 hub.Parse。
@@ -204,7 +210,11 @@ func (a *App) applyConfigLocked(cfg *config.Config, assigns []pool.Assignment, i
 	// 但运行时 TUN 已关闭。状态不一致作为应用失败返回，上层会恢复旧配置。
 	if active := a.runner.TUNEnabled(); active != cfg.TUN.Enable {
 		a.clearAppliedConfig()
-		releaseOnError()
+		if !active {
+			a.releaseTUNFDLocked(acquired)
+		} else {
+			releaseOnError()
+		}
 		return fmt.Errorf("mihomo TUN 实际状态与请求不一致（期望 enable=%t，实际 active=%t）；请检查 TUN 日志、stack 与系统权限", cfg.TUN.Enable, active)
 	}
 	a.markConfigApplied(cfgYAML, built.Rules())
@@ -465,6 +475,14 @@ func markTesting(nodes []*node.Node) {
 func settleDisplay(nodes []*node.Node) {
 	for _, n := range nodes {
 		n.PublishResult()
+	}
+}
+
+// clearTestingDisplay 仅清除展示行的 Testing 标记而不读取权威字段，
+// 供未持有 refreshing 锁的单订阅操作 defer 收尾，避免与并发刷新形成数据竞争。
+func clearTestingDisplay(nodes []*node.Node) {
+	for _, n := range nodes {
+		n.ClearTesting()
 	}
 }
 
@@ -738,9 +756,10 @@ func (a *App) restoreSnapshot() error {
 	// 订阅不应因为进程重启而丢失分流策略，而这条路径不允许访问任何订阅地址。
 	a.mu.Lock()
 	a.nodes = nodes
+	portRange := a.cfg.PortRange
 	a.mu.Unlock()
 	a.reconcileSubscriptionRouting()
-	assigns := pool.Allocate(alive, a.cfg.PortRange[0], a.cfg.PortRange[1], prev)
+	assigns := pool.Allocate(alive, portRange[0], portRange[1], prev)
 	if err := a.regenerateLocked(assigns); err != nil {
 		return fmt.Errorf("从节点快照生成启动配置失败: %w", err)
 	}

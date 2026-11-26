@@ -23,9 +23,15 @@ func (a *App) SetMode(mode string) error {
 	if !ok {
 		return fmt.Errorf("invalid mode %q (rule|global|direct)", mode)
 	}
+	a.refreshing.Lock()
+	defer a.refreshing.Unlock()
 	a.mu.Lock()
+	old := a.cfg.Mode
 	a.cfg.Mode = m.String()
 	err := a.persistLocked()
+	if err != nil {
+		a.cfg.Mode = old
+	}
 	a.mu.Unlock()
 	if err != nil {
 		return err

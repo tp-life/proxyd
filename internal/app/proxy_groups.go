@@ -60,19 +60,19 @@ func (a *App) AddGroup(g config.NodeGroup) error {
 			return fmt.Errorf("分组名 %q 与节点名冲突", g.Name)
 		}
 	}
+	oldGroups := cloneNodeGroups(a.cfg.Groups)
 	a.cfg.Groups = append(a.cfg.Groups, g)
 	a.mu.Unlock()
 	if err := a.regenerateCurrentLocked(); err != nil {
-		a.mu.Lock()
-		a.cfg.Groups = a.cfg.Groups[:len(a.cfg.Groups)-1]
-		a.mu.Unlock()
-		_ = a.regenerateCurrentLocked()
-		return fmt.Errorf("分组配置未通过 mihomo 校验: %w", err)
+		return a.rollbackGroupsLocked(oldGroups, fmt.Errorf("分组配置未通过 mihomo 校验: %w", err), false)
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
-	return err
+	if err != nil {
+		return a.rollbackGroupsLocked(oldGroups, err, false)
+	}
+	return nil
 }
 
 // UpdateGroup 原位修改一个策略分组的端口、策略和成员来源，并作为单个事务热更新与持久化。
@@ -189,23 +189,19 @@ func (a *App) RemoveGroup(name string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("分组 %q 不存在", name)
 	}
-	removed := a.cfg.Groups[idx]
+	oldGroups := cloneNodeGroups(a.cfg.Groups)
 	a.cfg.Groups = append(a.cfg.Groups[:idx], a.cfg.Groups[idx+1:]...)
 	a.mu.Unlock()
 	if err := a.regenerateCurrentLocked(); err != nil {
-		a.mu.Lock()
-		gs := append(a.cfg.Groups, config.NodeGroup{})
-		copy(gs[idx+1:], gs[idx:])
-		gs[idx] = removed
-		a.cfg.Groups = gs
-		a.mu.Unlock()
-		_ = a.regenerateCurrentLocked()
-		return err
+		return a.rollbackGroupsLocked(oldGroups, err, false)
 	}
 	a.mu.Lock()
 	err := a.persistLocked()
 	a.mu.Unlock()
-	return err
+	if err != nil {
+		return a.rollbackGroupsLocked(oldGroups, err, false)
+	}
+	return nil
 }
 
 // SetGroupSelected 修改 select 类型分组的手动选中节点，并以「落盘 → 热更新 → 失败回滚」

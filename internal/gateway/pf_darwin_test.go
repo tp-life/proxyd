@@ -24,8 +24,11 @@ func TestHelperCallDialFailure(t *testing.T) {
 		t.Errorf("错误应含安装指引与 socket 路径: %v", err)
 	}
 	// Runner 各操作同样以指引错误失败。
-	if err := (helperRunner{}).Apply("anchor text"); err == nil || !strings.Contains(err.Error(), "helper 未安装") {
-		t.Errorf("Apply: %v", err)
+	if err := (helperRunner{}).ApplyPFSpec(helperPFApplyParams{Devices: []string{"192.168.1.10"}, RedirPort: 17892}); err == nil || !strings.Contains(err.Error(), "helper 未安装") {
+		t.Errorf("ApplyPFSpec: %v", err)
+	}
+	if err := (helperRunner{}).Apply("raw anchor"); err == nil {
+		t.Errorf("raw Apply 应被拒绝")
 	}
 	if err := (helperRunner{}).Clear(); err == nil || !strings.Contains(err.Error(), "helper 未安装") {
 		t.Errorf("Clear: %v", err)

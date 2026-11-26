@@ -274,6 +274,11 @@ func redactManualNode(entry any) any {
 	}
 }
 
+// RedactURL 隐藏代理/订阅 URL 中的用户信息与敏感查询参数，编码型分享链接整体打码。
+func RedactURL(rawURL string) string {
+	return redactURL(rawURL)
+}
+
 // RedactMapping 返回隐藏凭据字段的透传映射深副本，供手动节点等列表接口
 // 展示结构化 VPN 出站（auth-key/private-key/tls-crypt 等替换为 `***`）。
 //

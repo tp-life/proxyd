@@ -318,20 +318,43 @@ func (m *Manager) serveTargetConn(c net.Conn, port uint16, network, addr, rawTar
 // serveUDPFlow 把隧道内的 UDP 流（例如 Windows RDP 3389 UDP 传输）转发到本机或局域网 UDP 目标。
 func (m *Manager) serveUDPFlow(flow tailcat.ConnPacketConn, port uint16, network, addr, rawTarget string) {
 	defer flow.Close()
-	targetAddr := addr
+	var (
+		upstream net.Conn
+		err      error
+	)
 	if network == "loopback" {
-		targetAddr = net.JoinHostPort("127.0.0.1", addr)
+		upstream, err = dialLoopbackUDP(addr)
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), loopbackDialTimeout)
+		defer cancel()
+		var dialer net.Dialer
+		upstream, err = dialer.DialContext(ctx, "udp", addr)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), loopbackDialTimeout)
-	defer cancel()
-	var dialer net.Dialer
-	upstream, err := dialer.DialContext(ctx, "udp", targetAddr)
 	if err != nil {
 		m.logf("[remote] 隧道 UDP 端口 %d → %s 失败: %v", port, rawTarget, err)
 		return
 	}
 	defer upstream.Close()
 	relayUDP(flow, upstream)
+}
+
+// dialLoopbackUDP 依次尝试 127.0.0.1 与 ::1 建立本机 UDP 连接，兼容纯 IPv6 回环环境。
+func dialLoopbackUDP(portStr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), loopbackDialTimeout)
+	defer cancel()
+	var dialer net.Dialer
+	var failures []string
+	for _, host := range loopbackHosts {
+		conn, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(host, portStr))
+		if err == nil {
+			return conn, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", host, err))
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, fmt.Errorf("连接本机 UDP 端口 %s 失败（%s）", portStr, strings.Join(failures, "; "))
 }
 
 // dialServeTarget 按解析后的目标类型拨号上游服务：loopback 走 127.0.0.1/::1 回退，
