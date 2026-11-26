@@ -153,6 +153,24 @@ func (a *App) OpenRemoteWebTerminal(ctx context.Context, size remote.TerminalSiz
 	return a.remote.OpenWebTerminal(ctx, size)
 }
 
+// SetRemoteSessionRelayAddr 告知远程模块管理 API 的实际监听地址，供 Web 终端会话中转使用。
+//
+// 参数说明：addr 为 string，管理 API 监听地址（host:port）。
+// 返回值说明：无。
+// 错误情况：无；非法地址会让远程模块停止签发中转凭据。
+func (a *App) SetRemoteSessionRelayAddr(addr string) {
+	a.remote.SetSessionRelayAddr(addr)
+}
+
+// DialRemoteSession 凭 Web 终端会话中转凭据，以守护进程身份拨号已保存远端。
+//
+// 参数说明：ctx 控制建连；secret 为会话凭据；name 为已保存远端名称；port 为远端 TCP 端口。
+// 返回值说明：net.Conn，调用方负责关闭；会话结束时会被强制断开。
+// 错误情况：凭据无效返回 remote.ErrSessionGrantInvalid；名称未保存或拨号失败返回对应错误。
+func (a *App) DialRemoteSession(ctx context.Context, secret, name string, port int) (net.Conn, error) {
+	return a.remote.DialSessionRemote(ctx, secret, name, port)
+}
+
 // mutateRemote 是远程配置变更的统一事务入口。
 //
 // 参数说明：

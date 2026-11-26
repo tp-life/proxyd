@@ -23,7 +23,7 @@ var errShellTerminalUnsupported = errors.New("当前平台不支持 Web 终端")
 // 返回值说明：func(net.Conn) 恒为 nil；error 恒为平台不支持错误。
 //
 // 错误情况：无条件返回 errShellTerminalUnsupported。
-func localShellSSHHandler(_, _ string) (func(net.Conn), error) {
+func localShellSSHHandler(_, _ string, _ ...string) (func(net.Conn), error) {
 	return nil, errShellTerminalUnsupported
 }
 
@@ -40,6 +40,7 @@ type shellSSHOptions struct {
 	allowLocalForwarding bool
 	allowRequestedUser   bool
 	peerKeyLookup        func(net.Addr) string
+	extraEnv             []string
 }
 
 // managedShellSSHHandler 为不支持的平台保留动态授权入口。

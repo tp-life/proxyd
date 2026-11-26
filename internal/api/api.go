@@ -150,6 +150,8 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.ln = ln
+	// Web 终端会话中转需要知道实际监听地址（":0" 等场景只有监听后才确定）。
+	s.app.SetRemoteSessionRelayAddr(ln.Addr().String())
 	// ReadHeaderTimeout 防止慢速请求头长期占用连接；IdleTimeout 只回收请求间的空闲
 	// keep-alive。不能设置全局 WriteTimeout，因为 /api/traffic 是合法的常驻流式响应。
 	s.srv = &http.Server{
@@ -179,6 +181,11 @@ func (s *Server) requireManagementAuth(next http.Handler) http.Handler {
 	expectedUserHash := sha256.Sum256([]byte("proxyd"))
 	expectedSecretHash := sha256.Sum256([]byte(secret))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Web 终端会话中转以会话凭据（而非管理口令）认证，由 handler 自行校验。
+		if isRemoteSessionPipeRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		username, password, ok := r.BasicAuth()
 		usernameHash := sha256.Sum256([]byte(username))
 		passwordHash := sha256.Sum256([]byte(password))

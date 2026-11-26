@@ -82,16 +82,17 @@ type Manager struct {
 	token            string
 	serveErr         string
 	forwards         map[string]*forwardRunner
-	clients          *clientPool                     // 进程内共享 tailcat 客户端（同 token/身份只建一个）
-	activeClients    map[string]int64                // 已知客户端公钥 → 当前入站活动连接数
+	clients          *clientPool                      // 进程内共享 tailcat 客户端（同 token/身份只建一个）
+	activeClients    map[string]int64                 // 已知客户端公钥 → 当前入站活动连接数
 	clientConns      map[string]map[net.Conn]struct{} // 客户端公钥 → 当前入站活动 TCP 连接，供显式/撤销断开立即关闭
-	sshAccess        *sshAccess                      // SSH 授权与会话运行态，独立于隧道生命周期
-	audit            *auditLog                       // 独立于代理日志的固定容量连接审计环
-	clientLoaded     bool                            // 是否已尝试加载客户端身份密钥
-	clientPriv       key.NodePrivate                 // 持久客户端身份（对端 --allow 白名单用）
-	clientErr        error                           // 客户端密钥加载失败原因（惰性加载只尝试一次）
-	autoRegion       *tailcfg.DERPRegion             // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
-	autoRegionMapURL string                          // 产生缓存时的 DERPMapURL
+	sshAccess        *sshAccess                       // SSH 授权与会话运行态，独立于隧道生命周期
+	audit            *auditLog                        // 独立于代理日志的固定容量连接审计环
+	clientLoaded     bool                             // 是否已尝试加载客户端身份密钥
+	clientPriv       key.NodePrivate                  // 持久客户端身份（对端 --allow 白名单用）
+	clientErr        error                            // 客户端密钥加载失败原因（惰性加载只尝试一次）
+	autoRegion       *tailcfg.DERPRegion              // 自动就近模式的探测结果缓存（进程内粘性，防 token 漂移）
+	autoRegionMapURL string                           // 产生缓存时的 DERPMapURL
+	relay            sessionRelay                     // Web 终端会话中转凭据（独立锁，见 sessionrelay.go）
 }
 
 // NewManager 创建远程连接管理器；stateDir 用于持久化服务端密钥

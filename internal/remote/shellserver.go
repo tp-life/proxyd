@@ -50,9 +50,13 @@ var shellHostKeyMu sync.Mutex
 //
 // 错误情况：状态目录创建、host key 读写或解析失败时返回错误，
 // 不会返回半成品处理器。
-func localShellSSHHandler(stateDir, shellUser string) (func(net.Conn), error) {
+//
+// extraEnv 为追加到 shell 会话的服务端环境变量（Web 终端会话中转凭据），可省略。
+func localShellSSHHandler(stateDir, shellUser string, extraEnv ...string) (func(net.Conn), error) {
 	// Web 终端依赖管理 API 与一次性回环令牌认证，不受远程 SSH 公钥开关影响。
-	return configuredShellSSHHandler(stateDir, false, nil, shellUser)
+	policy := newSSHAccess(newAuditLog(remoteAuditCapacity))
+	policy.update(false, nil)
+	return managedShellSSHHandlerWithOptions(stateDir, policy, shellUser, shellSSHOptions{extraEnv: extraEnv})
 }
 
 // configuredShellSSHHandler 创建保留本项目 PTY、环境与断连清理逻辑的 SSH 服务。
@@ -82,6 +86,9 @@ type shellSSHOptions struct {
 	allowRequestedUser bool
 	// peerKeyLookup 从入站隧道连接解析已认证的 tailcat nodekey，用于注入 TAILCAT_PEER_KEY。
 	peerKeyLookup func(net.Addr) string
+	// extraEnv 为服务端追加到每个 shell 会话的环境变量（如 Web 终端的会话中转凭据）；
+	// 由服务端构造，不受客户端 SetEnv 白名单约束。
+	extraEnv []string
 }
 
 // managedShellSSHHandler 构造共享动态授权策略的 SSH 入口（默认不开启本地转发）。
@@ -128,7 +135,7 @@ func managedShellSSHHandlerWithOptions(stateDir string, policy *sshAccess, shell
 				if opts.peerKeyLookup != nil {
 					peerKey = opts.peerKeyLookup(sess.RemoteAddr())
 				}
-				shellSessionHandlerWithPeerKey(sess, shellUser, requestedUserFor(sess), peerKey)
+				shellSessionHandlerWithPeerKey(sess, shellUser, requestedUserFor(sess), peerKey, opts.extraEnv...)
 			},
 			HandshakeTimeout:            30 * time.Second,
 			ChannelHandlers:             channelHandlers,
@@ -323,8 +330,9 @@ func shellSessionHandler(sess ssh.Session, shellUser string) {
 	shellSessionHandlerWithPeerKey(sess, shellUser, "", "")
 }
 
-// shellSessionHandlerWithPeerKey 在解析会话用户后启动 shell，并在已知隧道对端身份时注入 TAILCAT_PEER_KEY。
-func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, requestedUser, peerKey string) {
+// shellSessionHandlerWithPeerKey 在解析会话用户后启动 shell，并在已知隧道对端身份时注入 TAILCAT_PEER_KEY；
+// extraEnv 为服务端追加的环境变量。
+func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, requestedUser, peerKey string, extraEnv ...string) {
 	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
@@ -335,6 +343,7 @@ func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, requestedUser, 
 	if peerKey != "" {
 		cmd.Env = append(cmd.Env, "TAILCAT_PEER_KEY="+peerKey)
 	}
+	cmd.Env = append(cmd.Env, extraEnv...)
 	runShellSessionCommand(sess, cmd)
 }
 

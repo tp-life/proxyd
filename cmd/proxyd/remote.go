@@ -120,6 +120,10 @@ func cmdRemote(args []string) error {
 	if sub == "pipe" {
 		return cmdRemotePipe(rest[1:], cfgFile)
 	}
+	// session-pipe 是 Web 终端会话内经守护进程中转的 ProxyCommand，凭据来自环境变量。
+	if sub == "session-pipe" {
+		return cmdRemoteSessionPipe(rest[1:])
+	}
 	// genkey 生成应急客户端身份（纯本地，不触碰守护进程与 state-dir）。
 	if sub == "genkey" {
 		privText, pubText := remote.GenerateClientKey()
@@ -186,7 +190,7 @@ func cmdRemote(args []string) error {
 	case "forwards":
 		return cmdRemoteForwards(c, rest[1:])
 	}
-	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|hybrid|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe）", sub)
+	return fmt.Errorf("未知子命令 %q（status|on|off|token|serve|hybrid|relay|allow|audit|tempkey|keyfile|ssh-keys|builtin-ssh|shell-user|web-terminal|remotes|forwards|genkey|pipe|session-pipe）", sub)
 }
 
 // remotePrintStatus 打印远程连接状态汇总。
@@ -1543,16 +1547,37 @@ func cmdSSH(args []string) error {
 	name := parsed.name
 
 	// 名称 → token：读配置文件的 remotes；直接给 tc... token 时原样使用（无需配置文件）。
+	// 本地解析不到且处于 Web 终端会话（守护进程注入了中转凭据）时，改由守护进程代拨：
+	// root 守护进程降权后的会话既读不到 root 配置里的 token，也没有守护进程的客户端身份。
 	var token string
+	viaSession := false
 	if strings.HasPrefix(name, "tc") {
 		token = name
 	} else {
+		var resolveErr error
 		peers, err := config.LoadRemotePeers(cfgFile)
 		if err != nil {
-			return fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", cfgFile, err)
+			resolveErr = fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", cfgFile, err)
+		} else {
+			token, resolveErr = remote.ResolveToken(peers, name)
 		}
-		if token, err = remote.ResolveToken(peers, name); err != nil {
-			return err
+		if resolveErr != nil {
+			if !sessionRelayAvailable() {
+				return resolveErr
+			}
+			viaSession = true
+		}
+	}
+	if viaSession {
+		if diagnose {
+			return fmt.Errorf("远端 %q 经守护进程会话中转连接，暂不支持 --diagnose（可在守护进程所在账户下运行）", name)
+		}
+		if clientKeyText != "" {
+			return fmt.Errorf("远端 %q 经守护进程会话中转连接，使用守护进程身份，不能同时指定 --client-key", name)
+		}
+		// 名称会拼进由 shell 执行的 ProxyCommand，只放行安全字符集，无需处理转义。
+		if !isSafeRelayName(name) {
+			return fmt.Errorf("远端名 %q 含特殊字符，无法经会话中转（仅支持字母、数字与 ._-）", name)
 		}
 	}
 
@@ -1586,6 +1611,10 @@ func cmdSSH(args []string) error {
 		quotedCfg = "\"" + cfgFile + "\""
 	}
 	proxyCmd := fmt.Sprintf("%s remote -c %s pipe %s %d", quotedExe, quotedCfg, token, portNum)
+	if viaSession {
+		// 凭据与 API 地址经环境变量（ssh 原样传给 ProxyCommand）获取，不出现在命令行。
+		proxyCmd = fmt.Sprintf("%s remote session-pipe %s %d", quotedExe, name, portNum)
+	}
 
 	argv := []string{
 		"-o", "UpdateHostKeys no",

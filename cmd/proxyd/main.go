@@ -251,6 +251,7 @@ usage:
   proxyd scp [--client-key 私钥] [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
   proxyd desk [-c 配置] [--client-key 私钥] <rdp|vnc> <远端名|token>   临时转发并打开本机远程桌面客户端
   proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
+  proxyd remote session-pipe <远端名> <端口>   Web 终端会话内经守护进程中转（proxyd ssh 找不到本地远端时自动使用）
 
 flags:
   -c <文件>      配置文件路径（默认 ~/.config/proxyd/config.yaml；命令行给的订阅地址会自动保存进去）

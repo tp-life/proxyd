@@ -48,6 +48,7 @@ func (s *Server) registerRemoteRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/remote/shell-user", s.handleSetRemoteShellUser)
 	mux.HandleFunc("POST /api/remote/web-terminal", s.handleSetRemoteWebTerminal)
 	mux.HandleFunc("GET /api/remote/terminal", s.handleRemoteTerminal)
+	mux.HandleFunc("GET "+remote.SessionPipePath, s.handleRemoteSessionPipe)
 	mux.HandleFunc("GET /api/remote/tempkey", s.handleGetRemoteTempKey)
 	mux.HandleFunc("POST /api/remote/tempkey/reset", s.handleResetRemoteTempKey)
 	mux.HandleFunc("GET /api/remote/remotes", s.handleListRemotes)

@@ -141,3 +141,42 @@ func TestOpenWebTerminalPTY(t *testing.T) {
 		t.Fatalf("等待 PTY 输出超时: %v", ctx.Err())
 	}
 }
+
+// TestOpenWebTerminalInjectsSessionRelay 验证 Web 终端会话获得中转凭据，且终端关闭即撤销。
+func TestOpenWebTerminalInjectsSessionRelay(t *testing.T) {
+	if _, err := localShellSSHHandler(t.TempDir(), ""); err != nil {
+		t.Skip("当前平台不支持进程内 shell 服务")
+	}
+	manager := NewManager(t.TempDir(), nil)
+	manager.cfg.WebTerminal = true
+	manager.SetSessionRelayAddr("127.0.0.1:19091")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	session, err := manager.OpenWebTerminal(ctx, TerminalSize{Columns: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("打开进程内 PTY 失败: %v", err)
+	}
+	client := startTerminalTestClient(t, session)
+	if _, err := session.Write([]byte("printf 'RELAY:%s:' \"$PROXYD_API\"; printenv PROXYD_SESSION | wc -c; exit\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.done:
+	case <-ctx.Done():
+		t.Fatalf("等待输出超时: %v", ctx.Err())
+	}
+	text := client.String()
+	// 用 printenv|wc 兼容 fish 与 POSIX shell：64 位十六进制凭据加换行共 65 字节。
+	if !strings.Contains(strings.Join(strings.Fields(text), " "), "RELAY:127.0.0.1:19091: 65") &&
+		!strings.Contains(text, "RELAY:127.0.0.1:19091:65") {
+		t.Fatalf("会话未注入中转环境变量，输出: %q", text)
+	}
+	_ = session.Close()
+	manager.relay.mu.Lock()
+	remaining := len(manager.relay.grants)
+	manager.relay.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("终端关闭后中转授权未撤销，剩余 %d", remaining)
+	}
+}
