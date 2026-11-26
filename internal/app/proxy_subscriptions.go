@@ -425,15 +425,12 @@ func cloneSubscriptionImports(imports map[string]*subscriptionImport) map[string
 	return out
 }
 
-// RemoveSubscription 按名字删除订阅并持久化；不允许删除最后一个订阅或仍被策略组引用的订阅。
+// RemoveSubscription 按名字删除订阅并持久化；仍被策略组引用时拒绝删除。
 func (a *App) RemoveSubscription(name string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i, s := range a.cfg.Subscriptions {
 		if s.Name == name {
-			if len(a.cfg.Subscriptions) == 1 && len(a.cfg.ManualNodes) == 0 {
-				return fmt.Errorf("不能删除最后一个订阅")
-			}
 			for _, g := range a.cfg.Groups {
 				if g.Subscription == name {
 					return fmt.Errorf("分组 %q 仍引用订阅 %q，请先修改或删除该分组", g.Name, name)
@@ -849,9 +846,6 @@ func (a *App) RemoveManualNode(index int) error {
 		return fmt.Errorf("手动节点下标 %d 不存在", index)
 	}
 	if len(a.cfg.ManualNodes) == 1 {
-		if len(a.cfg.Subscriptions) == 0 {
-			return fmt.Errorf("不能删除最后一个节点来源（已无订阅）")
-		}
 		for _, g := range a.cfg.Groups {
 			if g.Subscription == subscribe.ManualSubscription {
 				return fmt.Errorf("分组 %q 仍引用手动节点来源，请先修改或删除该分组", g.Name)

@@ -334,6 +334,16 @@ func (a *App) refreshLocked(ctx context.Context, fetch bool) (resultErr error) {
 		stateDir := a.cfg.StateDir
 		currentInfos := cloneSubscriptionInfos(a.subInfos)
 		a.mu.RUnlock()
+		// 零订阅且无手动节点时直接收敛为空节点 DIRECT 待机态，不刷健康检查报错，
+		// 删除最后一个节点来源后也能及时释放旧的一对一端口映射。
+		if len(subscriptions) == 0 && len(manualEntries) == 0 {
+			a.mu.Lock()
+			a.nodes = nil
+			a.assigns = nil
+			a.subInfos = map[string]subscribe.UserInfo{}
+			a.mu.Unlock()
+			return a.regenerateLocked(nil)
+		}
 		manual, manualErrs := subscribe.ParseManualNodes(manualEntries)
 		for _, err := range manualErrs {
 			if err != nil {

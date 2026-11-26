@@ -1534,37 +1534,13 @@ func cmdSSH(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 解析 -p 端口（默认 22）；首个非 flag 参数为 [user@]<远端名|token>，其余透传给 ssh。
-	port := "22"
-	var dst string
-	var sshArgs []string
-	for i := 0; i < len(rest); i++ {
-		a := rest[i]
-		switch {
-		case a == "-p" && i+1 < len(rest):
-			port = rest[i+1]
-			i++
-		case strings.HasPrefix(a, "-p") && len(a) > 2:
-			port = a[2:]
-		case dst == "" && !strings.HasPrefix(a, "-"):
-			dst = a
-		default:
-			sshArgs = append(sshArgs, a)
-		}
+	parsed, err := parseSSHCommandArgs(rest)
+	if err != nil {
+		return err
 	}
-	if dst == "" {
-		return fmt.Errorf("用法: proxyd ssh [-c 配置] [-p 端口] [--client-key privkey:私钥] [user@]<远端名|token> [ssh 参数/远端命令...]")
-	}
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum <= 0 || portNum > 65535 {
-		return fmt.Errorf("端口 %q 无效", port)
-	}
-
-	user, name, hasUser := strings.Cut(dst, "@")
-	if !hasUser {
-		name = user
-		user = ""
-	}
+	portNum := parsed.port
+	user := parsed.user
+	name := parsed.name
 
 	// 名称 → token：读配置文件的 remotes；直接给 tc... token 时原样使用（无需配置文件）。
 	var token string
@@ -1617,16 +1593,17 @@ func cmdSSH(args []string) error {
 		"-o", "UserKnownHostsFile " + os.DevNull,
 		"-o", "LogLevel ERROR",
 		"-o", "ProxyCommand=" + proxyCmd,
-		sshDst,
 	}
+	argv = append(argv, parsed.preSSHArgs...)
 	if diagnose {
 		// 诊断参数放在目标之前；BatchMode 禁止无人值守密码提示，子系统使用真实交互 PTY。
-		diagnosticArgs := append([]string{}, argv[:len(argv)-1]...)
-		diagnosticArgs = append(diagnosticArgs, sshArgs...)
+		diagnosticArgs := append([]string{}, argv...)
+		diagnosticArgs = append(diagnosticArgs, parsed.postSSHArgs...)
 		diagnosticArgs = append(diagnosticArgs, "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-tt", "-s", sshDst, "proxyd-diagnostics")
 		return runSSHDiagnostic(sshExe, diagnosticArgs, cfgFile, token, clientKeyText, portNum)
 	}
-	argv = append(argv, sshArgs...)
+	argv = append(argv, sshDst)
+	argv = append(argv, parsed.postSSHArgs...)
 
 	cmd := exec.Command(sshExe, argv...)
 	cmd.Stdin = os.Stdin
@@ -1649,4 +1626,97 @@ func cmdSSH(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// sshCommandArgs 保存解析后的 proxyd ssh 参数，区分目标前 SSH 选项与目标后透传参数/远端命令。
+type sshCommandArgs struct {
+	port        int
+	user        string
+	name        string
+	preSSHArgs  []string
+	postSSHArgs []string
+}
+
+// isSSHValueFlag 判断单个短参数是否为 OpenSSH 需要紧跟值的选项（不含已单独处理的 -p/-l）。
+func isSSHValueFlag(arg string) bool {
+	return len(arg) == 2 && arg[0] == '-' && strings.ContainsRune("BbDEeFIiJLmOQRSwW", rune(arg[1]))
+}
+
+// parseSSHCommandArgs 解析 proxyd ssh 的端口、目标用户、远端名及透传参数。
+// 支持 -p <端口>/-p<端口>、-l <用户>/-l<用户> 与 [user@]<远端名|token>；
+// 目标前的 OpenSSH 带值选项（如 -i key、-o K=V）会被识别并保留在目标之前，
+// 避免其参数值被误判为远端名；进入远端命令后的参数一律原样透传。
+func parseSSHCommandArgs(rest []string) (sshCommandArgs, error) {
+	port := "22"
+	var dst, flagUser string
+	var preArgs, postArgs []string
+	seenRemoteCmd := false
+
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if seenRemoteCmd {
+			postArgs = append(postArgs, a)
+			continue
+		}
+		switch {
+		case a == "-p":
+			if i+1 >= len(rest) {
+				return sshCommandArgs{}, fmt.Errorf("-p 缺少端口参数")
+			}
+			port = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "-p") && len(a) > 2:
+			port = a[2:]
+		case a == "-l":
+			if i+1 >= len(rest) {
+				return sshCommandArgs{}, fmt.Errorf("-l 缺少用户名参数")
+			}
+			flagUser = rest[i+1]
+			i++
+		case strings.HasPrefix(a, "-l") && len(a) > 2:
+			flagUser = a[2:]
+		case dst == "" && isSSHValueFlag(a):
+			preArgs = append(preArgs, a)
+			if i+1 < len(rest) {
+				preArgs = append(preArgs, rest[i+1])
+				i++
+			}
+		case dst == "" && strings.HasPrefix(a, "-"):
+			preArgs = append(preArgs, a)
+		case dst == "":
+			dst = a
+		case !strings.HasPrefix(a, "-"):
+			seenRemoteCmd = true
+			postArgs = append(postArgs, a)
+		default:
+			postArgs = append(postArgs, a)
+			if isSSHValueFlag(a) && i+1 < len(rest) {
+				postArgs = append(postArgs, rest[i+1])
+				i++
+			}
+		}
+	}
+	if dst == "" {
+		return sshCommandArgs{}, fmt.Errorf("用法: proxyd ssh [-c 配置] [-p 端口] [-l 用户] [--client-key privkey:私钥] [user@]<远端名|token> [ssh 参数/远端命令...]")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum <= 0 || portNum > 65535 {
+		return sshCommandArgs{}, fmt.Errorf("端口 %q 无效", port)
+	}
+
+	user, name, hasUser := strings.Cut(dst, "@")
+	if !hasUser {
+		name = user
+		user = flagUser
+	}
+	if name == "" {
+		return sshCommandArgs{}, fmt.Errorf("远端目标 %q 无效", dst)
+	}
+	return sshCommandArgs{
+		port:        portNum,
+		user:        user,
+		name:        name,
+		preSSHArgs:  preArgs,
+		postSSHArgs: postArgs,
+	}, nil
 }

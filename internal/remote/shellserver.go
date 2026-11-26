@@ -77,6 +77,9 @@ type shellSSHOptions struct {
 	// allowLocalForwarding 为 true 时允许 SSH 本地端口转发（ssh -L / ssh -D），
 	// 仅限服务端回环 IP 字面量（127.0.0.1 / ::1），用于 VS Code Remote-SSH 等场景。
 	allowLocalForwarding bool
+	// allowRequestedUser 为 true 时允许在 sudo 运行且未锁定 remote.shell-user 的情况下，
+	// 根据 SSH 客户端请求用户名降权到对应本机普通用户（不存在或 root 时回退 SUDO_USER）。
+	allowRequestedUser bool
 	// peerKeyLookup 从入站隧道连接解析已认证的 tailcat nodekey，用于注入 TAILCAT_PEER_KEY。
 	peerKeyLookup func(net.Addr) string
 }
@@ -113,21 +116,27 @@ func managedShellSSHHandlerWithOptions(stateDir string, policy *sshAccess, shell
 				return port > 0 && port <= 65535 && net.ParseIP(host).IsLoopback()
 			}
 		}
+		requestedUserFor := func(sess ssh.Session) string {
+			if opts.allowRequestedUser {
+				return sess.User()
+			}
+			return ""
+		}
 		srv := &ssh.Server{
 			Handler: func(sess ssh.Session) {
 				peerKey := ""
 				if opts.peerKeyLookup != nil {
 					peerKey = opts.peerKeyLookup(sess.RemoteAddr())
 				}
-				shellSessionHandlerWithPeerKey(sess, shellUser, peerKey)
+				shellSessionHandlerWithPeerKey(sess, shellUser, requestedUserFor(sess), peerKey)
 			},
 			HandshakeTimeout:            30 * time.Second,
 			ChannelHandlers:             channelHandlers,
 			RequestHandlers:             map[string]ssh.RequestHandler{},
 			LocalPortForwardingCallback: localForwardCallback,
 			SubsystemHandlers: map[string]ssh.SubsystemHandler{
-				"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser) },
-				"sftp":               func(sess ssh.Session) { shellSFTPHandler(sess, shellUser) },
+				"proxyd-diagnostics": func(sess ssh.Session) { shellDiagnosticHandler(sess, shellUser, requestedUserFor(sess)) },
+				"sftp":               func(sess ssh.Session) { shellSFTPHandler(sess, shellUser, requestedUserFor(sess)) },
 			},
 		}
 		srv.PublicKeyHandler = func(_ ssh.Context, public ssh.PublicKey) error {
@@ -160,8 +169,8 @@ func managedShellSSHHandlerWithOptions(stateDir string, policy *sshAccess, shell
 // 错误情况：用户解析、SFTP 初始化或协议处理失败时写入 stderr 并返回退出码 1。
 // 当会话无需降权时可在当前进程安全运行；需要从 root 切换到 shell-user 时必须启动
 // 独立子进程，避免并发 goroutine 中修改整个 Go 进程的有效 UID。
-func shellSFTPHandler(sess ssh.Session, shellUser string) {
-	su, err := resolveSessionUser(shellUser)
+func shellSFTPHandler(sess ssh.Session, shellUser, requestedUser string) {
+	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
 		_ = sess.Exit(1)
@@ -311,12 +320,12 @@ func loadOrCreateShellHostKey(stateDir string) (gossh.Signer, error) {
 //
 // 错误情况：无法解析会话用户（含 root 未配置 shell-user）时向会话写错误并以退出码 1 结束。
 func shellSessionHandler(sess ssh.Session, shellUser string) {
-	shellSessionHandlerWithPeerKey(sess, shellUser, "")
+	shellSessionHandlerWithPeerKey(sess, shellUser, "", "")
 }
 
 // shellSessionHandlerWithPeerKey 在解析会话用户后启动 shell，并在已知隧道对端身份时注入 TAILCAT_PEER_KEY。
-func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, peerKey string) {
-	su, err := resolveSessionUser(shellUser)
+func shellSessionHandlerWithPeerKey(sess ssh.Session, shellUser, requestedUser, peerKey string) {
+	su, err := resolveSessionUserForSSH(shellUser, requestedUser)
 	if err != nil {
 		fmt.Fprintf(sess.Stderr(), "%v\r\n", err)
 		sess.Exit(1)

@@ -6,6 +6,7 @@ package remote
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/user"
 	"runtime"
 	"strings"
@@ -13,16 +14,46 @@ import (
 	"proxyd/internal/config"
 )
 
-// errRootShellUserRequired 表示 root 运行下未配置 shell-user 时的 fail-closed 拒绝：
+// errRootShellUserRequired 表示 root 运行下既未配置 shell-user 也无法识别普通 sudo 调用者时的 fail-closed 拒绝：
 // 内嵌 SSH 与 Web 终端绝不默认提供 root shell。
-var errRootShellUserRequired = errors.New("proxyd 以 root 运行：必须先在 remote.shell-user 配置远程会话用户，才能开启内嵌 SSH 或 Web 终端（拒绝默认提供 root shell）")
+var errRootShellUserRequired = errors.New("proxyd 以 root 运行且未检测到普通 sudo 用户：必须先在 remote.shell-user 配置远程会话用户，才能开启内嵌 SSH 或 Web 终端（拒绝默认提供 root shell）")
+
+// sudoInvokerUser 返回以 sudo 启动 root 进程时的原始普通用户名。
+// 非 root 运行、Windows 平台、SUDO_USER 为空/root/非法或系统账户不存在（或 UID 为 0）时返回空串。
+func sudoInvokerUser() string {
+	return sudoInvokerUserFrom(os.Geteuid(), os.Getenv, user.Lookup)
+}
+
+// sudoInvokerUserFrom 使用可注入的 euid、环境变量与账户查询函数解析 sudo 原始普通用户。
+func sudoInvokerUserFrom(euid int, getenv func(string) string, lookup func(string) (*user.User, error)) string {
+	if euid != 0 || runtime.GOOS == "windows" {
+		return ""
+	}
+	name := strings.TrimSpace(getenv("SUDO_USER"))
+	if name == "" || strings.EqualFold(name, "root") {
+		return ""
+	}
+	if config.ValidateRemoteShellUser(name) != nil {
+		return ""
+	}
+	u, err := lookup(name)
+	if err != nil || u == nil || u.Uid == "0" {
+		return ""
+	}
+	return u.Username
+}
 
 // checkSessionUserAllowed 判定当前进程权限下是否允许开启远程 shell 会话。
 // 参数说明：euid 为 int，进程有效 UID（Windows 传 -1）；shellUser 为 string，配置原值。
 // 返回值说明：error，允许时为 nil。
-// 错误情况：euid 为 0 且 shell-user 为空时返回 errRootShellUserRequired。
+// 错误情况：euid 为 0、shell-user 为空且无有效普通 SUDO_USER 时返回 errRootShellUserRequired。
 func checkSessionUserAllowed(euid int, shellUser string) error {
-	if euid == 0 && strings.TrimSpace(shellUser) == "" {
+	return checkSessionUserAllowedWithSudo(euid, shellUser, sudoInvokerUserFrom(euid, os.Getenv, user.Lookup))
+}
+
+// checkSessionUserAllowedWithSudo 结合已校验的 sudo 普通用户判定是否允许开启远程 shell 会话。
+func checkSessionUserAllowedWithSudo(euid int, shellUser, sudoUser string) error {
+	if euid == 0 && strings.TrimSpace(shellUser) == "" && strings.TrimSpace(sudoUser) == "" {
 		return errRootShellUserRequired
 	}
 	return nil

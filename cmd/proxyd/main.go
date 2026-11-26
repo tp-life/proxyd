@@ -247,7 +247,7 @@ usage:
   proxyd remote remotes list|add <名> <token>|del <名>          保存的远端
   proxyd remote forwards list|add <名> <监听> <远端> <端口>|del <名>|on|off <名>   本地转发
   proxyd remote genkey                   生成应急客户端身份（公钥录入对端白名单，私钥自行保存）
-  proxyd ssh [-p 端口] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
+  proxyd ssh [-p 端口] [-l 用户] [--client-key 私钥] [user@]<远端名|token> [ssh 参数...]   经隧道 SSH（无需守护进程）
   proxyd scp [--client-key 私钥] [scp选项...] <源...> <目标>   经隧道 SCP（远端以 tc... token 作为主机名，无需守护进程）
   proxyd desk [-c 配置] [--client-key 私钥] <rdp|vnc> <远端名|token>   临时转发并打开本机远程桌面客户端
   proxyd remote pipe <token> <端口>      stdio 管道（OpenSSH ProxyCommand 用）
@@ -281,8 +281,9 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 	urls := fs.Args()
 
 	if _, err := os.Stat(*cfgFile); err != nil {
-		// 配置文件不存在
-		if len(urls) == 0 {
+		// 配置文件不存在：serve/start 模式允许零订阅直接启动，先落盘默认空配置，
+		// 用户随后在 Web 控制台或 CLI 中添加订阅/手动节点即可。
+		if len(urls) == 0 && !persist {
 			return nil, "", firstRunGuide(*cfgFile)
 		}
 		cfg, err := config.Quick(urls, *portRange)
@@ -292,6 +293,8 @@ func loadConfig(args []string, persist bool) (*config.Config, string, error) {
 		if persist {
 			if err := cfg.Save(*cfgFile); err != nil {
 				log.Printf("[proxyd] 保存配置失败（不影响本次运行）: %v", err)
+			} else if len(urls) == 0 {
+				log.Printf("[proxyd] 未找到配置文件，已生成默认配置 %s；启动后可在控制台（http://%s/）添加订阅或手动节点", *cfgFile, cfg.APIListen)
 			} else {
 				log.Printf("[proxyd] 订阅已保存到 %s，下次直接 proxyd serve 即可", *cfgFile)
 			}

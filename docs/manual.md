@@ -795,7 +795,7 @@ proxyd 解析设备名称，复用持久客户端 nodekey，经 token 指定的 
 
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
-内嵌 SSH 在 Linux/macOS 上按**远程会话用户**（`remote.shell-user`，缺省为服务端 proxyd 运行用户）的账户配置启动登录 shell，并加载该 shell 的用户启动文件；`user@` 不会切换系统用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
+内嵌 SSH 在 Linux/macOS 上按**远程会话用户**启动登录 shell 并加载该用户的启动文件：显式配置 `remote.shell-user` 时严格锁定到该普通账户；未配置且通过 `sudo` 运行时，默认自动降权为原始普通用户（`SUDO_USER`），也支持通过 `proxyd ssh alice@home` 或 `proxyd ssh -l alice home` 切换到服务端存在的其他普通账户（请求 `root` 或跨机不存在的用户名时自动回退到 `SUDO_USER`，绝不提供 root shell）；非 root 进程运行时保持进程自身用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
 
 ### SSH 私钥文件登录与服务端公钥管理
 

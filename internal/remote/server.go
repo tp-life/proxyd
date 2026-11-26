@@ -197,6 +197,7 @@ func (m *Manager) startServerLocked(cfg config.RemoteConfig) error {
 		}
 		sshHandler, err = managedShellSSHHandlerWithOptions(m.stateDir, m.sshAccess, cfg.ShellUser, shellSSHOptions{
 			allowLocalForwarding: true,
+			allowRequestedUser:   true,
 			peerKeyLookup:        peerKeyLookup,
 		})
 		if err != nil {

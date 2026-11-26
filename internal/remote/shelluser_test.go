@@ -19,22 +19,25 @@ import (
 //
 // 错误情况：任一分支放行 root 空配置或误拒非 root 时测试失败。
 func TestCheckSessionUserAllowed(t *testing.T) {
+	t.Setenv("SUDO_USER", "")
 	cases := []struct {
 		name      string
 		euid      int
 		shellUser string
+		sudoUser  string
 		wantErr   bool
 	}{
-		{"非 root 无配置", 1000, "", false},
-		{"非 root 有配置", 1000, "tp", false},
-		{"root 无配置拒绝", 0, "", true},
-		{"root 空白配置拒绝", 0, "  ", true},
-		{"root 有配置放行", 0, "tp", false},
-		{"Windows 语义（-1）", -1, "", false},
+		{"非 root 无配置", 1000, "", "", false},
+		{"非 root 有配置", 1000, "tp", "", false},
+		{"纯 root 无配置拒绝", 0, "", "", true},
+		{"纯 root 空白配置拒绝", 0, "  ", "", true},
+		{"root 有配置放行", 0, "tp", "", false},
+		{"sudo root 自动识别普通用户放行", 0, "", "tp", false},
+		{"Windows 语义（-1）", -1, "", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkSessionUserAllowed(tc.euid, tc.shellUser)
+			err := checkSessionUserAllowedWithSudo(tc.euid, tc.shellUser, tc.sudoUser)
 			if tc.wantErr && !errors.Is(err, errRootShellUserRequired) {
 				t.Fatalf("期望 errRootShellUserRequired，got %v", err)
 			}
@@ -42,6 +45,49 @@ func TestCheckSessionUserAllowed(t *testing.T) {
 				t.Fatalf("期望放行，got %v", err)
 			}
 		})
+	}
+	if err := checkSessionUserAllowed(0, ""); !errors.Is(err, errRootShellUserRequired) {
+		t.Fatalf("清空 SUDO_USER 时 root 空配置应返回 errRootShellUserRequired，got %v", err)
+	}
+}
+
+// TestSudoInvokerUserFrom 验证 sudo 原始用户识别规则：只接受 root 进程下的合法非 root 账户。
+func TestSudoInvokerUserFrom(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不使用 SUDO_USER")
+	}
+	users := map[string]*user.User{
+		"alice": {Username: "alice", Uid: "1000", Gid: "1000"},
+		"toor":  {Username: "toor", Uid: "0", Gid: "0"},
+	}
+	lookup := func(name string) (*user.User, error) {
+		if u, ok := users[name]; ok {
+			return u, nil
+		}
+		return nil, user.UnknownUserError(name)
+	}
+	envOf := func(v string) func(string) string {
+		return func(k string) string {
+			if k == "SUDO_USER" {
+				return v
+			}
+			return ""
+		}
+	}
+	if got := sudoInvokerUserFrom(0, envOf("alice"), lookup); got != "alice" {
+		t.Fatalf("合法 SUDO_USER = %q, want alice", got)
+	}
+	if got := sudoInvokerUserFrom(1000, envOf("alice"), lookup); got != "" {
+		t.Fatalf("非 root 进程不应读取 SUDO_USER，got %q", got)
+	}
+	if got := sudoInvokerUserFrom(0, envOf("root"), lookup); got != "" {
+		t.Fatalf("root 不应被识别为普通 sudo 用户，got %q", got)
+	}
+	if got := sudoInvokerUserFrom(0, envOf("toor"), lookup); got != "" {
+		t.Fatalf("UID 0 账户不应被识别为普通 sudo 用户，got %q", got)
+	}
+	if got := sudoInvokerUserFrom(0, envOf("missing"), lookup); got != "" {
+		t.Fatalf("不存在账户不应被识别，got %q", got)
 	}
 }
 
@@ -122,6 +168,30 @@ func TestValidateShellUser(t *testing.T) {
 func TestEffectiveSessionUser(t *testing.T) {
 	if got := effectiveSessionUser("  tp "); got != "tp" {
 		t.Fatalf("配置值应去空白优先返回，got %q", got)
+	}
+	if runtime.GOOS != "windows" {
+		alice := &user.User{Username: "alice", Uid: "1000", Gid: "1000"}
+		root := &user.User{Username: "root", Uid: "0", Gid: "0"}
+		got := effectiveSessionUserFrom(
+			0,
+			"",
+			func(k string) string {
+				if k == "SUDO_USER" {
+					return "alice"
+				}
+				return ""
+			},
+			func() (*user.User, error) { return root, nil },
+			func(name string) (*user.User, error) {
+				if name == "alice" {
+					return alice, nil
+				}
+				return nil, user.UnknownUserError(name)
+			},
+		)
+		if got != "alice" {
+			t.Fatalf("sudo root 未配置 shell-user 时应展示 SUDO_USER，got %q", got)
+		}
 	}
 	current, err := user.Current()
 	if err != nil {

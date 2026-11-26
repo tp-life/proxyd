@@ -30,3 +30,8 @@ func resolveSessionUser(shellUser string) (*sessionUser, error) {
 	}
 	return &sessionUser{user: u}, nil
 }
+
+// resolveSessionUserForSSH 在 Windows 上与 resolveSessionUser 保持一致，不支持跨用户降权。
+func resolveSessionUserForSSH(shellUser, _ string) (*sessionUser, error) {
+	return resolveSessionUser(shellUser)
+}

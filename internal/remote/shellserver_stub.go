@@ -38,6 +38,7 @@ func configuredShellSSHHandler(_ string, _ bool, _ []config.RemoteSSHKey, _ stri
 
 type shellSSHOptions struct {
 	allowLocalForwarding bool
+	allowRequestedUser   bool
 	peerKeyLookup        func(net.Addr) string
 }
 

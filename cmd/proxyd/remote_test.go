@@ -184,3 +184,99 @@ func TestParseServeMappingArg(t *testing.T) {
 		}
 	}
 }
+
+// TestParseSSHCommandArgs 验证 proxyd ssh 对 -l/-p、user@host、目标前选项及远端命令的解析规则。
+func TestParseSSHCommandArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantPort int
+		wantUser string
+		wantName string
+		wantPre  []string
+		wantPost []string
+		wantErr  bool
+	}{
+		{
+			name:     "基础远端名",
+			args:     []string{"office"},
+			wantPort: 22,
+			wantName: "office",
+		},
+		{
+			name:     "user@host 写法",
+			args:     []string{"alice@office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 空格写法在目标前",
+			args:     []string{"-l", "alice", "office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 紧贴写法",
+			args:     []string{"-lalice", "office"},
+			wantPort: 22,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "-l 与 -p 在目标后",
+			args:     []string{"office", "-l", "alice", "-p", "2222"},
+			wantPort: 2222,
+			wantUser: "alice",
+			wantName: "office",
+		},
+		{
+			name:     "目标前带值选项与远端命令中的 -l/-p 不冲突",
+			args:     []string{"-i", "/tmp/id_ed25519", "-l", "alice", "-p", "2222", "office", "ls", "-l", "/tmp", "-p"},
+			wantPort: 2222,
+			wantUser: "alice",
+			wantName: "office",
+			wantPre:  []string{"-i", "/tmp/id_ed25519"},
+			wantPost: []string{"ls", "-l", "/tmp", "-p"},
+		},
+		{
+			name:     "user@ 优先于 -l",
+			args:     []string{"-l", "alice", "bob@office"},
+			wantPort: 22,
+			wantUser: "bob",
+			wantName: "office",
+		},
+		{
+			name:    "-l 缺少参数报错",
+			args:    []string{"-l"},
+			wantErr: true,
+		},
+		{
+			name:    "-p 缺少参数报错",
+			args:    []string{"-p"},
+			wantErr: true,
+		},
+		{
+			name:    "缺少远端目标报错",
+			args:    []string{"-l", "alice"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSSHCommandArgs(tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseSSHCommandArgs(%v) err=%v wantErr=%v", tc.args, err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if got.port != tc.wantPort || got.user != tc.wantUser || got.name != tc.wantName ||
+				!reflect.DeepEqual(got.preSSHArgs, tc.wantPre) || !reflect.DeepEqual(got.postSSHArgs, tc.wantPost) {
+				t.Fatalf("parseSSHCommandArgs(%v) = %+v, want port=%d user=%q name=%q pre=%v post=%v",
+					tc.args, got, tc.wantPort, tc.wantUser, tc.wantName, tc.wantPre, tc.wantPost)
+			}
+		})
+	}
+}

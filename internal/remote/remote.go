@@ -198,15 +198,29 @@ func (m *Manager) Apply(cfg config.RemoteConfig) error {
 }
 
 // effectiveSessionUser 返回展示用的实际远程会话用户：配置 shell-user 优先，
-// 否则为 proxyd 进程用户；账户查询失败时回退到配置原值或空串。
+// 其次为 sudo 启动时的原始普通用户（SUDO_USER），最后回退到 proxyd 进程用户。
 // 参数说明：shellUser 为 string，remote.shell-user 配置原值。
 // 返回值说明：string，用于控制台展示，避免误判会话权限。
 // 错误情况：无；os/user 不可用时静默降级。
 func effectiveSessionUser(shellUser string) string {
+	return effectiveSessionUserFrom(os.Geteuid(), shellUser, os.Getenv, user.Current, user.Lookup)
+}
+
+// effectiveSessionUserFrom 是 effectiveSessionUser 的可注入依赖实现，便于单测覆盖 sudo 场景。
+func effectiveSessionUserFrom(
+	euid int,
+	shellUser string,
+	getenv func(string) string,
+	currentUser func() (*user.User, error),
+	lookup func(string) (*user.User, error),
+) string {
 	if name := strings.TrimSpace(shellUser); name != "" {
 		return name
 	}
-	if u, err := user.Current(); err == nil {
+	if sudoUser := sudoInvokerUserFrom(euid, getenv, lookup); sudoUser != "" {
+		return sudoUser
+	}
+	if u, err := currentUser(); err == nil {
 		return u.Username
 	}
 	return ""

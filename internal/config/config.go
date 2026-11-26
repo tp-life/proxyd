@@ -929,9 +929,6 @@ func (c *Config) ValidateForAPISecretBootstrap() error {
 // 错误情况：除 api-secret 的临时例外外，所有错误与 Validate 完全一致；
 // 调用方必须在启动任何管理监听前补齐口令并再次调用 Validate。
 func (c *Config) validate(allowMissingAPISecret bool) error {
-	if !c.ProxyDisabled && len(c.Subscriptions) == 0 && len(c.ManualNodes) == 0 {
-		return fmt.Errorf("at least one subscription or manual node is required")
-	}
 	for i, m := range c.ManualNodes {
 		if err := ValidateManualNodeShape(m); err != nil {
 			return fmt.Errorf("manual-nodes[%d]: %w", i, err)

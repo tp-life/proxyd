@@ -130,9 +130,6 @@ func (a *App) setProxyModuleEnabled(enabled bool) error {
 			return err
 		}
 	}
-	if enabled && len(cfg.Subscriptions) == 0 && len(cfg.ManualNodes) == 0 {
-		return fmt.Errorf("启用代理前请先添加订阅或手动节点")
-	}
 	a.mu.Lock()
 	a.cfg.ProxyDisabled = !enabled
 	a.mu.Unlock()

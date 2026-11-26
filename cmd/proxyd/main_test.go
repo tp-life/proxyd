@@ -31,6 +31,30 @@ func TestFirstRunGuide(t *testing.T) {
 	}
 }
 
+// TestLoadConfigAllowsZeroSubscriptionBootstrap 验证无配置文件且未传订阅地址时，
+// serve/start（persist=true）自动生成并保存默认空配置，允许启动后再通过控制台添加订阅。
+func TestLoadConfigAllowsZeroSubscriptionBootstrap(t *testing.T) {
+	cfgPath := t.TempDir() + "/config.yaml"
+	cfg, gotPath, err := loadConfig([]string{"-c", cfgPath}, true)
+	if err != nil {
+		t.Fatalf("零订阅首次启动应自动生成默认配置: %v", err)
+	}
+	if gotPath != cfgPath {
+		t.Fatalf("cfgPath = %q, want %q", gotPath, cfgPath)
+	}
+	if len(cfg.Subscriptions) != 0 || len(cfg.ManualNodes) != 0 {
+		t.Fatalf("默认空配置不应含预设订阅或节点: subs=%d manual=%d", len(cfg.Subscriptions), len(cfg.ManualNodes))
+	}
+	// 再次加载已落盘的空配置也应直接通过。
+	cfg2, _, err := loadConfig([]string{"-c", cfgPath}, true)
+	if err != nil {
+		t.Fatalf("重新加载已落盘空配置失败: %v", err)
+	}
+	if len(cfg2.Subscriptions) != 0 {
+		t.Fatalf("重新加载后订阅数应为 0，got %d", len(cfg2.Subscriptions))
+	}
+}
+
 // TestHealthEndpointRespondsHasBoundedTimeout 验证占用 API 端口但不返回
 // HTTP 响应头的异常服务，不会让 start/status 命令永久卡住。
 //
