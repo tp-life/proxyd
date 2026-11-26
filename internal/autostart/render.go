@@ -117,6 +117,35 @@ WantedBy=default.target
 `, systemdQuote(exe), systemdQuote(cfgPath))
 }
 
+// RenderSystemUnit 生成 Linux systemd 系统级 unit 内容（root 运行，供 TUN 使用）。
+//
+// 参数说明：
+//   - exe: string，proxyd 可执行文件绝对路径。
+//   - cfgPath: string，proxyd 配置文件绝对路径。
+//
+// 返回值说明：string，可写入 /etc/systemd/system/proxyd.service 的配置文本。
+//
+// 错误情况：无；调用方负责文件写入和 systemctl 错误处理。
+func RenderSystemUnit(exe, cfgPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=proxyd — multi-node port-mapping proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+ExecStart=%s serve -c %s
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+`, systemdQuote(exe), systemdQuote(cfgPath))
+}
+
 // RenderRunCommand 生成 Windows 注册表 Run 项的命令行：
 // 登录时执行 `proxyd start`（派生 detached 后台 serve 进程后退出），避免常驻控制台窗口。
 //

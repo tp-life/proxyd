@@ -132,3 +132,18 @@ func TestRenderRunCommand(t *testing.T) {
 		t.Errorf("Run 命令 = %q, want %q", c, want)
 	}
 }
+
+// TestRenderSystemUnit 验证 Linux root（TUN）场景的系统级 unit 关键字段。
+func TestRenderSystemUnit(t *testing.T) {
+	u := RenderSystemUnit("/usr/local/bin/proxyd", "/root/.config/proxyd/config.yaml")
+	for _, want := range []string{
+		"User=root",
+		`ExecStart="/usr/local/bin/proxyd" serve -c "/root/.config/proxyd/config.yaml"`,
+		"Restart=on-failure",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("system unit 缺少 %q:\n%s", want, u)
+		}
+	}
+}

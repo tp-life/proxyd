@@ -2,7 +2,7 @@
 
 package autostart
 
-// Linux 平台自启托管运行态查询：通过 `systemctl --user show` 获取 systemd user unit
+// Linux 平台自启托管运行态查询：通过 `systemctl [--user] show` 获取 systemd unit
 // 的加载状态与 MainPID，并在无 D-Bus 环境下回退识别 INVOCATION_ID，确保受 systemd
 // 托管的实例触发重启时走受控非零退出由 systemd 拉起，而非在同 cgroup 内派生子进程被杀。
 
@@ -20,7 +20,7 @@ func inspect() RuntimeStatus {
 		s.Message = err.Error()
 		return s
 	}
-	out, runErr := run("systemctl", "--user", "show", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID", "-p", "ExecMainStatus", unitName)
+	out, runErr := systemctl("show", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID", "-p", "ExecMainStatus", unitName)
 	if runErr != nil {
 		// 容器/无 user session bus 场景下，如果当前进程由 systemd 拉起（存在 INVOCATION_ID），
 		// 仍需准确报告托管 PID，避免 API 重启误走 spawnRestarter 导致停服。
@@ -39,7 +39,7 @@ func inspect() RuntimeStatus {
 	return parseSystemdShow(out, enabled)
 }
 
-// parseSystemdShow 解析 `systemctl --user show` 的 key=value 输出。
+// parseSystemdShow 解析 `systemctl [--user] show` 的 key=value 输出。
 func parseSystemdShow(out string, enabled bool) RuntimeStatus {
 	kv := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
@@ -64,10 +64,10 @@ func parseSystemdShow(out string, enabled bool) RuntimeStatus {
 	if s.State == "active" && s.PID > 0 {
 		s.Running = true
 		s.State = "running"
-		s.Message = "systemd user unit 运行中"
+		s.Message = scopeLabel() + " 运行中"
 	} else if !s.Loaded {
 		s.State = "stopped"
-		s.Message = "systemd user unit 未加载"
+		s.Message = scopeLabel() + " 未加载"
 	}
 	return s
 }

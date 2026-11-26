@@ -1,6 +1,7 @@
 // Package autostart 管理 proxyd 的开机自启项：
 // macOS 写 /Library/LaunchDaemons/com.proxyd.plist（系统启动即托管 serve）；
-// Linux 写 ~/.config/systemd/user/proxyd.service 并 systemctl --user enable；
+// Linux 普通用户写 ~/.config/systemd/user/proxyd.service 并 systemctl --user enable，
+// root（TUN）写 /etc/systemd/system/proxyd.service 并 systemctl enable；
 // Windows 写注册表 HKCU\...\Run（执行 start 派生后台进程，避免弹控制台窗口）。
 // 不支持的平台返回 ErrUnsupported。
 package autostart
