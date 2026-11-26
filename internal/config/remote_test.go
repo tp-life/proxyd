@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 // TestValidateRemoteRelay 验证中继值对象接受自动、固定区域、自建主机和私有地图，
 // 同时在进入运行态前拒绝含端口的主机、非 HTTP(S) URL 与非法区域。
@@ -73,5 +77,24 @@ func TestValidateRemoteServeTargets(t *testing.T) {
 		if err := ValidateRemoteServeTargets(nil, []RemoteServeTarget{bad}); err == nil {
 			t.Errorf("非法映射 %+v 应被拒绝", bad)
 		}
+	}
+}
+
+// TestLoadRemotePeersIgnoresProxySection 验证精简配置（缺 port-range/rules）仍可解析远端名。
+func TestLoadRemotePeersIgnoresProxySection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "mode: rule\nremote:\n  remotes:\n    - name: mac\n      token: tcAAAA\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("前提：完整 Load 应拒绝缺 port-range 的配置")
+	}
+	peers, err := LoadRemotePeers(path)
+	if err != nil {
+		t.Fatalf("LoadRemotePeers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].Name != "mac" {
+		t.Errorf("peers = %+v", peers)
 	}
 }

@@ -140,11 +140,11 @@ func resolveDesktopToken(configFile, target string) (string, error) {
 		}
 		return target, nil
 	}
-	cfg, err := config.Load(configFile)
+	peers, err := config.LoadRemotePeers(configFile)
 	if err != nil {
 		return "", fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", configFile, err)
 	}
-	return remote.ResolveToken(cfg.Remote.Remotes, target)
+	return remote.ResolveToken(peers, target)
 }
 
 // desktopClientKey 解析 desk 命令使用的客户端身份。

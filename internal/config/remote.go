@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -469,6 +470,37 @@ func (c *Config) checkRemote() error {
 }
 
 // checkRemotePeer 校验单个远端条目的必填字段；token 合法性由 remote 包解析兜底。
+// LoadRemotePeers 只读取配置文件中的 remote.remotes 段，供 CLI 把远端名解析为 token。
+//
+// 参数说明：
+//   - path: string，proxyd 配置文件路径。
+//
+// 返回值说明：[]RemotePeer 和 error；成功返回已逐条校验的保存远端列表。
+//
+// 错误情况：文件读取、YAML 解析失败或某条远端不合法时返回错误。刻意不走完整 Load：
+// 纯客户端命令（ssh/desk）只需要远端表，不应因代理段缺字段（如未写 port-range/rules
+// 的精简配置）而拒绝工作。
+func LoadRemotePeers(path string) ([]RemotePeer, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var doc struct {
+		Remote struct {
+			Remotes []RemotePeer `yaml:"remotes"`
+		} `yaml:"remote"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	for i, p := range doc.Remote.Remotes {
+		if err := checkRemotePeer(p); err != nil {
+			return nil, fmt.Errorf("remote.remotes[%d]: %w", i, err)
+		}
+	}
+	return doc.Remote.Remotes, nil
+}
+
 func checkRemotePeer(p RemotePeer) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return fmt.Errorf("名称不能为空")

@@ -1547,11 +1547,11 @@ func cmdSSH(args []string) error {
 	if strings.HasPrefix(name, "tc") {
 		token = name
 	} else {
-		cfg, err := config.Load(cfgFile)
+		peers, err := config.LoadRemotePeers(cfgFile)
 		if err != nil {
 			return fmt.Errorf("读取配置 %s 失败（用于解析远端名）: %w", cfgFile, err)
 		}
-		if token, err = remote.ResolveToken(cfg.Remote.Remotes, name); err != nil {
+		if token, err = remote.ResolveToken(peers, name); err != nil {
 			return err
 		}
 	}
