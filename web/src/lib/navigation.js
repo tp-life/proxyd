@@ -2,12 +2,11 @@
  * 导航注册表统一维护页面归属、URL 与命令菜单，新增任务页只需在本文件登记。
  * 页面组件仍负责自己的业务交互；不在导航模型中嵌入 API 或配置写入规则。
  */
-import { Activity, FolderUp, Gauge, Laptop, Layers, Link2, ListFilter, Monitor, Network, Router, Rss, Settings, Shield, Terminal, Server, KeyRound, ArrowLeftRight, History } from "lucide-react";
+import { Activity, FolderUp, Gauge, Laptop, Layers, Link2, ListFilter, Monitor, Network, Rss, Settings, Shield, Terminal, Server, KeyRound, ArrowLeftRight, History } from "lucide-react";
 
 export const NAV_GROUPS = [
   { id: "overview", label: "总览", icon: Activity },
   { id: "proxy", module: "proxy", label: "代理", icon: Network },
-  { id: "gateway", module: "gateway", label: "网关", icon: Router },
   { id: "remote", module: "remote", label: "远程访问", icon: Laptop },
   { id: "system", label: "系统", icon: Settings },
 ];
@@ -24,7 +23,6 @@ export const NAV_ITEMS = [
   { id: "proxy/tailscale", label: "Tailscale", group: "proxy", section: "VPN 接入", icon: Network, keywords: "Tailnet Headscale tsnet VPN 接入" },
   { id: "proxy/openvpn", label: "OpenVPN", group: "proxy", section: "VPN 接入", icon: Shield, keywords: "OpenVPN VPN 隧道 证书" },
   { id: "proxy/settings", label: "代理设置", group: "proxy", section: "代理配置", icon: Settings, keywords: "DNS TUN 系统代理 端口 默认出口" },
-  { id: "gateway", keywords: "旁路由 网关 LAN 设备 分流 helper", label: "LAN 网关", group: "gateway", icon: Router, detail: "登记局域网设备，把它的网关/DNS 指向本机即可分流。" },
   { id: "remote/devices", keywords: "SSH 连接 诊断 diagnose 设备", label: "设备与连接", group: "remote", icon: Laptop, detail: "保存远端设备，连接 SSH 并检查链路。" },
   { id: "remote/files", keywords: "SFTP SCP 上传 下载 目录 文件 传输", label: "文件传输", group: "remote", icon: FolderUp, detail: "浏览远端目录，上传或下载文件。" },
   { id: "remote/services", keywords: "DERP 中继 隧道 SSH 终端 端口 暴露", label: "本机服务", group: "remote", icon: Server, detail: "管理本机隧道、DERP 中继、SSH、浏览器终端和暴露端口。" },

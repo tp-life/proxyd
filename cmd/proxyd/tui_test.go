@@ -73,8 +73,6 @@ func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 			payload = map[string]any{"uptime_seconds": 3600, "pending_restart": false}
 		case "/api/modules":
 			payload = []any{}
-		case "/api/gateway":
-			payload = map[string]any{"platform": "darwin", "supported": true, "devices": []any{}, "runner": "helper"}
 		case "/api/desktop":
 			payload = map[string]any{"services": []any{}, "connections": []any{}, "sessions": []any{}}
 		case "/api/remote/audit":
@@ -112,7 +110,7 @@ func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 	if message.Overview == nil || message.Connections == nil || message.Logs == nil || message.Remote == nil || message.Peers == nil || message.RuleURLs == nil {
 		t.Fatalf("快照存在未加载的数据块: %#v", message)
 	}
-	if message.System == nil || message.Modules == nil || message.Gateway == nil || message.Desktop == nil || message.Audit == nil {
+	if message.System == nil || message.Modules == nil || message.Desktop == nil || message.Audit == nil {
 		t.Fatalf("快照存在未加载的新数据块: %#v", message)
 	}
 	if message.EffectiveRules == nil || message.EffectiveRules.Total != 3 {
@@ -123,8 +121,8 @@ func TestFetchTUISnapshotUsesGETOnly(t *testing.T) {
 	}
 	mutex.Lock()
 	defer mutex.Unlock()
-	if len(methods) != 12 {
-		t.Fatalf("请求数=%d，期望 12：%v", len(methods), methods)
+	if len(methods) != 11 {
+		t.Fatalf("请求数=%d，期望 11：%v", len(methods), methods)
 	}
 	for _, method := range methods {
 		if !strings.HasPrefix(method, http.MethodGet+" ") {
@@ -177,16 +175,12 @@ func TestTUIRenderIncludesAllSections(t *testing.T) {
 	model.connections = connListResponse{Connections: []connEntry{{ID: "0123456789", Rule: "MATCH"}}}
 	model.peers = tuiRemotePeersResponse{Remotes: []tuiRemotePeer{{Name: "nas", Token: "tcomFw…DRYQ8u"}}}
 	model.modules = []app.ModuleState{{ID: "proxy", Name: "代理", Enabled: true}}
-	model.gateway = &app.GatewayOverview{RedirPort: 5300, Devices: nil}
-	model.gateway.Supported = true
-	model.gateway.Platform = "darwin"
-	model.gateway.Enabled = true
 	model.desktop = &app.DesktopStatus{
 		Services: []app.DesktopServiceStatus{{Protocol: "rdp", Port: 3389, Listening: true}},
 	}
 	model.audit = []tuiAuditEntry{{Time: time.Now(), Action: "accept", ClientName: "nas", TargetPort: 22}}
 
-	expected := []string{"模块状态", "手动节点", "端口映射", "选中出口", "自定义访问规则", "活动连接", "审计事件", "登记设备", "桌面服务", "运行日志"}
+	expected := []string{"模块状态", "手动节点", "端口映射", "选中出口", "自定义访问规则", "活动连接", "审计事件", "桌面服务", "运行日志"}
 	for page, marker := range expected {
 		model.page = tuiPage(page)
 		rendered, _ := model.renderCurrentPage(118)
@@ -357,8 +351,6 @@ func tuiMockPayload(path string) any {
 		return []any{}
 	case "/api/system/status":
 		return map[string]any{"uptime_seconds": 1, "pending_restart": false}
-	case "/api/gateway":
-		return map[string]any{"platform": "darwin", "supported": true, "devices": []any{}}
 	case "/api/desktop":
 		return map[string]any{"services": []any{}, "connections": []any{}, "sessions": []any{}}
 	case "/api/remote/audit":

@@ -127,7 +127,6 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd check ...` | 一次性自检：打印节点/端口映射表，参数同 serve |
 | `proxyd sysproxy [-c 配置] on\|off\|status` | 开关/查看系统代理（指向主端口；flag 需放在操作前） |
 | `proxyd tun [-c 配置] on\|off\|status` | 开关/查看 TUN 模式及当前进程权限（操作运行中实例） |
-| `proxyd helper install\|uninstall\|status` | macOS 统一特权助手（TUN 与 LAN 网关共用）的本地安装管理（install 需一次性管理员授权）；旧的 `proxyd tun helper ...` / `proxyd gateway helper ...` 写法仍兼容 |
 | `proxyd autostart [-c 配置] on\|off\|status` | 开关/查看开机自启（macOS 为系统级 LaunchDaemon，flag 需放在操作前） |
 
 ### 本地管理命令（CLI ↔ Web 对齐）
@@ -147,7 +146,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd nodes add --proxy '<出站JSON>' [名称]` | 添加隧道类（VPN）手动节点：`<出站JSON>` 是 mihomo 出站映射，type 限 `tailscale\|openvpn\|zerotier\|wireguard\|ssh`（tailscale 的 auth-key 可选，缺失时由 tsnet 输出交互注册链接；openvpn 必填 server/port/ca） |
 | `proxyd nodes del <名称\|下标>` | 删除手动节点 |
 | `proxyd rules list\|add "<规则>"\|set <下标> "<规则>"\|move <从> <到>\|del <下标>` | 自定义规则的增改删与优先级调整 |
-| `proxyd rules effective [--source 来源] [--grep 关键字] [--limit N]` | 打印**当前生效的全部规则**（含订阅导入、广告拦截与内置规则），按真实匹配顺序带序号与来源；`--source` 可填来源键（`gateway`/`custom`/`rule-url`/`subscription`/`subscription-fallback`/`adblock`/`builtin`）或中文名，`--grep` 按规则文本子串过滤，`--limit` 为每页拉取条数（服务端上限 1000） |
+| `proxyd rules effective [--source 来源] [--grep 关键字] [--limit N]` | 打印**当前生效的全部规则**（含订阅导入、广告拦截与内置规则），按真实匹配顺序带序号与来源；`--source` 可填来源键（`custom`/`rule-url`/`subscription`/`subscription-fallback`/`adblock`/`builtin`）或中文名，`--grep` 按规则文本子串过滤，`--limit` 为每页拉取条数（服务端上限 1000） |
 | `proxyd rule-urls list\|add <名> <url>\|del <名>\|show <名>` | 远程规则源；`show` 打印原始内容（未解析） |
 | `proxyd groups list\|add [--type 类型] [--subscription 订阅名] <名> <端口> [节点名...]\|del <名>` | 节点分组（list 含类型与 select 组的当前选中项；type 支持 `url-test\|fallback\|load-balance\|select`） |
 | `proxyd groups set [--type 类型] [--subscription 订阅名] [--port 端口] <名> [节点名...]` | 修改分组；未给出的字段保持原值，给出节点名时整体替换成员 |
@@ -157,12 +156,12 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 | `proxyd port-range <起-止>` | 修改节点映射端口区间 |
 | `proxyd auto-port <端口\|off>` | 设置/关闭自动选优端口；无参查看 |
 | `proxyd main-port <端口>` | 修改主端口（热更新；系统代理开启时自动重绑）；无参查看 |
-| `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复命令（macOS 为 `proxyd helper install`） |
+| `proxyd tun on\|off\|status` | 热开关 TUN 或查看权限；权限不足时输出平台修复指引（macOS 为 `sudo proxyd serve` 或启用开机自启） |
 | `proxyd dns-preset [off\|fake-ip\|redir-host]` | 查看/切换 DNS 预设；配置文件存在手写 `dns` 段时会提示预设不生效 |
 | `proxyd update-check [on\|off]` | 查看/开关启动版本检查；无参显示当前/最新版本与检查状态 |
 | `proxyd conn list` / `proxyd conn close <id\|all>` | 查看活动连接（出站、规则、目标、上下行、存活时长与内存占用）/ 关闭单条或全部连接 |
 | `proxyd traffic` | 实时上/下行速率（每秒刷新，Ctrl-C 退出） |
-| `proxyd ls [-c 配置]` | 交互式 TUI 控制台：10 个视图页（概览/节点/订阅/入口/规则/连接/网关/远程/桌面/日志），快照轮询只读、显式按键触发写操作（危险操作需 y/n 确认），`?` 查看按键帮助 |
+| `proxyd ls [-c 配置]` | 交互式 TUI 控制台：9 个视图页（概览/节点/订阅/入口/规则/连接/远程/桌面/日志），快照轮询只读、显式按键触发写操作（危险操作需 y/n 确认），`?` 查看按键帮助 |
 | `proxyd config path` | 打印当前使用的配置文件绝对路径 |
 | `proxyd config export [--full] [-o 文件]` | 导出配置；默认打码（隐藏凭据），`--full` 完整备份；默认打印到标准输出 |
 | `proxyd config import [--yes] <文件>` | 导入配置：先预检并展示数量/字段差异，确认后原子写入；需 `proxyd restart` 生效 |
@@ -186,7 +185,7 @@ curl -x http://127.0.0.1:41999 https://api.ipify.org   # 走主端口（规则�
 
 `proxyd autostart on` 注册当前二进制（`os.Executable` 绝对路径）+ 当前配置文件为开机自启项，并立即启动一次：
 
-- **macOS**：经管理员授权安装 `/Library/LaunchDaemons/com.proxyd.plist`，注册到 `system` 域；LaunchDaemon 始终通过 `UserName` 以注册用户降权运行 `serve -c <配置绝对路径>`（TUN 不再要求主进程 root，改由统一特权助手代劳，见「TUN 模式」；旧版 root 模式 plist 会在新进程启动时自动迁移为降权运行），StandardOut/Err 指向 `state-dir/proxyd.log`。它不依赖用户登录，冷启动、断电恢复或系统重启后均会启动；KeepAlive 为「仅崩溃拉起」（`SuccessfulExit=false`）：崩溃后自动重启，`proxyd stop` 的干净退出则保持停止。启用或关闭时也会清理旧版 `~/Library/LaunchAgents/com.proxyd.plist`。授权通道「终端优先」：CLI 场景（stdin 为终端）经 sudo 在终端输入密码；Web 控制台触发时经 macOS 管理员授权弹窗
+- **macOS**：经管理员授权安装 `/Library/LaunchDaemons/com.proxyd.plist`，注册到 `system` 域；LaunchDaemon 默认以 `root` 运行 `serve -c <配置绝对路径>` 以便原生支持 TUN（无需额外提权助手），同时在环境变量中保留注册用户的 `HOME` 与 `PROXYD_SHELL_USER`（远程 SSH / Web 终端自动降权到该普通用户），StandardOut/Err 指向 `state-dir/proxyd.log`。它不依赖用户登录，冷启动、断电恢复或系统重启后均会启动；KeepAlive 为「仅崩溃拉起」（`SuccessfulExit=false`）：崩溃后自动重启，`proxyd stop` 的干净退出则保持停止。启用或关闭时也会清理旧版 `~/Library/LaunchAgents/com.proxyd.plist`。授权通道「终端优先」：CLI 场景（stdin 为终端）经 sudo 在终端输入密码；Web 控制台触发时经 macOS 管理员授权弹窗
 - **Linux**：`~/.config/systemd/user/proxyd.service`（Restart=on-failure）+ `systemctl --user enable --now`；日志走 `journalctl --user -u proxyd`
 - **Windows**：注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写 `proxyd start -c <配置>`（登录时派生后台进程后退出，不弹控制台窗口）
 
@@ -278,7 +277,7 @@ Web 通用设置页提供两种导出：默认的“导出（打码）”会隐�
 | `POST /api/auto-port` `{"port":41998}` | 开启自动选优端口；`{"port":0}` 关闭（持久化 + 热更新） |
 | `POST /api/main-port` `{"port":42999}` | 修改主端口（校验 1-65535 且不与 api 端口/节点区间/分组/auto-port 冲突；持久化 + 热更新；系统代理开启时自动重绑） |
 | `POST /api/system-proxy` `{"enabled":true}` | 开关系统代理（指向主端口，持久化） |
-| `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限、修复指引，以及 macOS 的统一特权助手安装/可达状态（`helper` 字段） |
+| `GET /api/tun` | 返回 TUN 开关、平台、当前进程是否具备权限以及修复指引 |
 | `POST /api/tun` `{"enabled":true}` | 权限检查后热开关 TUN；失败恢复旧配置，成功后持久化 |
 | `POST /api/dns-preset` `{"preset":"fake-ip"}` | 切换 `off/fake-ip/redir-host` 预设并热更新；手写 `dns:` 存在时仍优先生效 |
 | `POST /api/update-check` `{"enabled":false}` | 开关启动版本检查并持久化；重新开启时立即异步检查一次 |
@@ -341,7 +340,7 @@ tun:
 
 使用 Web「代理 → 代理设置」或 `proxyd tun [-c 配置] on|off|status` 热切换。开启流程先检查权限，再让 mihomo 热更新，并读取实际 listener 状态二次确认；生成、应用或实际启用失败会恢复旧 TUN 配置。配置文件启动时已经是 `enable: true` 但权限不足，proxyd 会在启动 API 和修改路由之前退出并打印修复指引。
 
-- **macOS**：由统一特权助手（`com.proxyd.helper`，LaunchDaemon 常驻的 root 助手，TUN 与 LAN 网关共用，ADR 0004）代劳 utun 创建、地址配置与路由写入，**proxyd 主进程保持普通用户运行**。首次使用执行一次 `proxyd helper install`（终端输入登录密码；经 `proxyd tun on` 开启且 helper 缺失时会就地提示安装）。之后开关 TUN 不再需要 sudo：主进程经 unix socket（0600 + 对端 UID 校验）向 helper 申请设备，helper 仅接受 `ping`/`tun.create` 白名单指令，设备 fd 经 SCM_RIGHTS 回传注入 mihomo 的 `tun.file-descriptor`；fd 不落盘，主进程退出时内核自动销毁设备与路由。管理命令：`proxyd helper status|uninstall`（旧的 `proxyd tun helper ...` 与 `proxyd gateway helper ...` 写法仍兼容，操作同一个助手）；日志 `/var/log/com.proxyd.helper.log`；握手版本不兼容时重新 install 升级。旧版独立的 `com.proxyd.tun-helper`/`com.proxyd.gateway-helper` 在安装或卸载统一助手时自动迁移清理。仍保留旧路径：`sudo proxyd serve` 以 root 运行时由 mihomo 自行创建设备（此时内嵌 SSH/Web 终端需配置 `remote.shell-user`，见「十、远程连接」）。
+- **macOS**：创建 utun 设备与配置路由需要 root 权限。可使用 `sudo proxyd serve` 直接启动，或通过开机自启（`proxyd autostart on`，系统级 LaunchDaemon 默认以 root 运行）启动，由 mihomo 直接创建设备。root 运行时通过 `sudo` 或 LaunchDaemon 注入的 `PROXYD_SHELL_USER` 会自动把内嵌 SSH / Web 终端降权到原普通用户（见「十、远程连接」）。
 - **Linux**：可直接以 root 运行，或对当前二进制执行 `sudo setcap cap_net_admin=+ep /path/to/proxyd` 后重启。替换/升级二进制会丢失 capability，需要重新执行 `setcap`。
 - **Windows**：必须从“以管理员身份运行”的 PowerShell/终端启动 proxyd；普通登录启动项不会自动提升权限。
 
@@ -383,14 +382,14 @@ tun:
 **查看当前生效规则**：规则来源分散在配置文件、规则源、订阅与广告拦截开关里，只看 `custom-rules` 无法判断某个域名最终走了哪条规则。因此生成配置时会同步记录每条规则的来源，并提供只读视图：Web 控制台「规则管理」页的**当前生效规则**面板、API `GET /api/rules/effective`、CLI `proxyd rules effective`。三者展示的都是**最近一次成功热更新到 mihomo 的配置**（含 GEO 数据不可用时的降级剔除结果），规则顺序就是真实匹配顺序，来源取值与拼接顺序一致：
 
 ```
-gateway（网关设备分流）→ custom（自定义规则）→ rule-url（远程规则源）
+custom（自定义规则）→ rule-url（远程规则源）
 → subscription（订阅自带规则）→ adblock（广告拦截）→ builtin（内置规则）
 → subscription-fallback（订阅兜底规则，恒在最末）
 ```
 
 订阅自带规则动辄上万条，因此视图按页读取（默认 200 条/页，单次上限 1000），并支持按来源与关键字筛选。若面板显示「当前没有已生效的配置」，说明代理被停用或尚未生成过配置——启动代理或同步一次订阅即可。注意这是只读视图：修改规则仍然只能在 `custom-rules` 或订阅开关上操作，订阅原文的规则始终由订阅刷新覆盖。
 
-**广告拦截**（`adblock`，默认关闭）：Web 控制台「规则管理」页顶部的开关，或配置文件 `adblock.enable: true`；API 为 `GET/PUT /api/adblock`（PUT 体 `{"enable": true, "rule_url": "可选，空=保持原值"}`）。开启后生成配置注入一个名为 `adblock` 的 mihomo rule-provider（`type: http`，下载/缓存/每 24 小时刷新全部由 mihomo 负责）和一条 `RULE-SET,adblock,REJECT` 规则，排在 custom-rules 与规则 URL 导入之后、内置规则之前——因此想放行某个被误拦的域名，在自定义规则里加一条 `DOMAIN-SUFFIX,example.com,DIRECT` 即可。默认规则集是 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 reject 域名集（约 19 万条广告/跟踪域名，走 jsDelivr CDN，国内直连可用）；`adblock.rule-url` 可换成其它地址，但必须是 **domain 行为的 YAML payload 格式**（`payload: - '+.example.com'`）。`rule-providers` 里 `adblock` 是保留键名，手写占用会导致开启报错。主端口恒为规则模式，开启后对主端口、TUN 与网关流量一致生效（GET /api/adblock 的 `effective` 字段反映这一点）。
+**广告拦截**（`adblock`，默认关闭）：Web 控制台「规则管理」页顶部的开关，或配置文件 `adblock.enable: true`；API 为 `GET/PUT /api/adblock`（PUT 体 `{"enable": true, "rule_url": "可选，空=保持原值"}`）。开启后生成配置注入一个名为 `adblock` 的 mihomo rule-provider（`type: http`，下载/缓存/每 24 小时刷新全部由 mihomo 负责）和一条 `RULE-SET,adblock,REJECT` 规则，排在 custom-rules 与规则 URL 导入之后、内置规则之前——因此想放行某个被误拦的域名，在自定义规则里加一条 `DOMAIN-SUFFIX,example.com,DIRECT` 即可。默认规则集是 [Loyalsoldier/clash-rules](https://github.com/Loyalsoldier/clash-rules) 的 reject 域名集（约 19 万条广告/跟踪域名，走 jsDelivr CDN，国内直连可用）；`adblock.rule-url` 可换成其它地址，但必须是 **domain 行为的 YAML payload 格式**（`payload: - '+.example.com'`）。`rule-providers` 里 `adblock` 是保留键名，手写占用会导致开启报错。主端口恒为规则模式，开启后对主端口与 TUN 流量一致生效（GET /api/adblock 的 `effective` 字段反映这一点）。
 
 **节点分组端口**（`groups`）：把若干节点聚合成一个 mihomo proxy-group 并绑定到指定端口，该端口固定走该组；`type` 可选 `url-test`（自动测速择优）、`fallback`（按顺序故障转移）、`load-balance`（负载均衡）、`select`（手动选择出口）。旧配置没有 `type` 时默认迁移为 `url-test`，新 UI 默认推荐 `fallback`：
 
@@ -699,7 +698,7 @@ proxyd remote token
 
 **内嵌 SSH**默认跟随 remote 总开关：CLI 的 `proxyd remote on|off` 与 Web 的「启用远程连接服务」会在同一事务中同步开启/关闭 builtin-ssh。仍可用 `proxyd remote builtin-ssh on|off` 或 Web 独立开关单独调整。开启后隧道 22 端口改由 proxyd 进程内 SSH 服务器直接处理，**无需系统 sshd（如 macOS 远程登录）**。新版内嵌 SSH 同时提供标准 `sftp` 子系统，Web 文件面板和原生 SFTP 客户端均可使用。默认保持隧道免密模式，通过隧道认证即可获得本机 shell/SFTP（以远程会话用户身份，见下段）；也可按下文额外启用 SSH 公钥认证，并配合 `remote allow` 白名单收窄来源。
 
-**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SFTP/SCP、诊断命令和 Web Terminal 的运行身份：配置后 shell 子进程和 SFTP helper 都切换到该账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析；客户端 `user@` 始终不能选择本机账号。proxyd 以 root 运行时**必须**显式配置普通账户（`proxyd remote shell-user <账户名>` 或 Web 控制台设置），否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell 或 root 文件访问；非 root 运行时无需配置，会话保持进程用户（TUN 自特权助手落地后不再要求 root 运行，见「TUN 模式」）。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
+**远程会话用户**（`remote.shell-user`）决定内嵌 SSH、SFTP/SCP、诊断命令和 Web Terminal 的运行身份：显式配置后 shell 子进程和 SFTP helper 严格锁定到该普通账户的 UID、GID 与附加组，HOME、登录 shell、工作目录均从系统账户数据库解析（忽略客户端 `user@`）。未配置且通过 `sudo` 或 macOS 开机自启（LaunchDaemon 注入 `PROXYD_SHELL_USER`）以 root 运行时，默认自动降权到原普通用户，并允许 `proxyd ssh alice@home` / `proxyd ssh -l alice home` 切换到服务端存在的其他非 root 账户（请求 `root` 或不存在账户时回退到默认普通用户）；纯 root 运行（既无 `SUDO_USER` 也无 `PROXYD_SHELL_USER`）仍**必须**显式配置 `remote.shell-user`，否则内嵌 SSH 与 Web 终端拒绝开启，绝不默认提供 root shell 或 root 文件访问；非 root 运行时无需配置，会话保持进程用户。控制台与 `proxyd remote status` 会显示「远程会话用户」，以实际生效身份为准。
 
 **Web Terminal**（`remote.web-terminal`）把进程内 SSH/PTY 会话接到浏览器全屏终端，适合没带 SSH 客户端时应急维护。它默认关闭，由独立的进程内 shell 服务承载，**不要求远程连接服务端运行、也不依赖 builtin-ssh**——只使用客户端功能（远程设备/本地转发）时同样可用。Web 服务状态卡开启后即显示「打开终端」。终端使用 `TERM=xterm-256color`，窗口变化会实时同步 PTY 行列，关闭弹层或网络断开后立即结束子 shell。关闭开关后 `GET /api/remote/terminal` 返回 404。
 
@@ -795,7 +794,7 @@ proxyd 解析设备名称，复用持久客户端 nodekey，经 token 指定的 
 
 SSH 主机指纹提示被禁用（`StrictHostKeyChecking no` + 独立 known_hosts）：隧道本身已完成 WireGuard 双向认证，对端身份由 token 唯一决定。
 
-内嵌 SSH 在 Linux/macOS 上按**远程会话用户**启动登录 shell 并加载该用户的启动文件：显式配置 `remote.shell-user` 时严格锁定到该普通账户；未配置且通过 `sudo` 运行时，默认自动降权为原始普通用户（`SUDO_USER`），也支持通过 `proxyd ssh alice@home` 或 `proxyd ssh -l alice home` 切换到服务端存在的其他普通账户（请求 `root` 或跨机不存在的用户名时自动回退到 `SUDO_USER`，绝不提供 root shell）；非 root 进程运行时保持进程自身用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
+内嵌 SSH 在 Linux/macOS 上按**远程会话用户**启动登录 shell 并加载该用户的启动文件：显式配置 `remote.shell-user` 时严格锁定到该普通账户；未配置且通过 `sudo` 或 macOS 开机自启（LaunchDaemon 注入 `PROXYD_SHELL_USER`）运行时，默认自动降权为原普通用户，也支持通过 `proxyd ssh alice@home` 或 `proxyd ssh -l alice home` 切换到服务端存在的其他普通账户（请求 `root` 或跨机不存在的用户名时自动回退到默认普通用户，绝不提供 root shell）；非 root 进程运行时保持进程自身用户。PTY 会话提供真实 `SSH_TTY`，并允许 `proxyd ssh home -o SetEnv=TERM=xterm-256color` 覆盖客户端终端类型，便于远端缺少对应 terminfo 时使用兼容终端。若遇到登录卡住或个人命令缺失，可在登录后检查 `whoami`、`echo "$SHELL"`、`echo "$TERM"`、`echo "$SSH_TTY"`；此类服务端会话修复需要更新并重启服务端 proxyd 才生效。
 
 ### SSH 私钥文件登录与服务端公钥管理
 
@@ -889,51 +888,7 @@ Web 控制台「远程连接」页的服务状态卡中也可设置、导出和�
 - 公共 DERP 中继限速，大流量场景（如长时间文件传输）建议自建 derper。
 - 文件传输支持 CLI `proxyd scp`，以及 Web 管理端经标准 SSH/SFTP 进行的目录浏览、上传和下载；不含 tailcat cp/recv、SOCKS 与 exit-node。
 
-## 十一、LAN 网关（旁路由）
-
-把运行 proxyd 的主机变成局域网设备的网关：设备把「网关/路由器」（和 DNS）改指本机后，其流量经本机 mihomo 分流，与控制台规则/分组共用同一出口体系。定位是**旁路由**：不接管 DHCP，设备指向错误只影响该设备本身，不会拖垮全家网络。
-
-### 平台矩阵与特权模型
-
-| 平台 | 执行层 | 特权要求 |
-|---|---|---|
-| macOS | pf anchor：下游 TCP `rdr` 到 mihomo `redir-port` | root 特权 helper（launchd 常驻，unix socket 白名单指令，主进程永远普通用户） |
-| Linux | nftables redirect（TCP）/ tproxy（UDP） | setcap 能力位：`cap_net_admin,cap_net_raw,cap_net_bind_service` |
-| Windows | 不支持 | — |
-
-数据面**不依赖 TUN**（ADR 0003 勘误）：redir/tproxy 入口与设备规则都写进 mihomo 配置，设备级分流用 `SRC-IP-CIDR` 规则前置于 custom-rules。启用网关要求代理模块已启用；禁用代理会先自动停用网关（联动持久化）。
-
-Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文使用 proxyd 专用 `fwmark 0x7078/0xffff`，规则优先级为 `12026`，本地路由表为 `20260`。重复应用会精确替换同一条规则，停用/退出时只清理这些专用对象，不会刷新用户的其他策略路由。宿主机需同时提供 `nft` 与 iproute2 的 `ip` 命令；proxyd 会把自身的 `CAP_NET_ADMIN` 以 ambient capability 传给这两个子进程，因此仍只需对 proxyd 二进制执行上面的 `setcap`。
-
-### 启用步骤
-
-1. 启用前检查：`proxyd gateway precheck`（或 Web「网关」页预检卡）。
-   - macOS 未就绪时安装 helper：`sudo proxyd helper install`（launchd 系统域常驻，与 TUN 共用的统一特权助手；`proxyd helper status|uninstall` 查看/卸载）。helper 只接受 pf 应用/清除与转发开关的白名单指令，不读业务配置、不连网。
-   - Linux 未就绪时按指引执行：`sudo setcap 'cap_net_admin,cap_net_raw,cap_net_bind_service=+ep' <proxyd 二进制路径>` 后重启 proxyd（每次替换二进制需重设，与 TUN 同一条指引）。
-2. 启用模块：Web「网关」页开关，或 `proxyd modules gateway on`。
-3. 登记设备：Web 页「登记设备」，或 `proxyd gateway devices add <名> <ip> [direct|proxy|group:<分组名>]`（策略缺省为 proxy）。设备表为空时网关不生效（零值配置不触碰系统）。
-4. 在下游设备上把网关改指本机局域网 IP；开启 `dns-redirect` 时 DNS 也改指本机。
-
-### DNS 劫持
-
-`gateway.dns-redirect: true`（默认开）时，pf/nftables 把下游 53 端口 redirect 到 mihomo dns 的非特权监听 `0.0.0.0:1053`（helper 白名单不含绑端口操作，53 属特权端口，故监听落在 1053）。用户手写 `dns:` 段已有 `listen` 时不覆盖并打日志，请自行确认其与 redirect 目标一致。
-
-### 已知限制
-
-- **macOS UDP**：阶段一仅支持 DNS 劫持 + 直连（macOS 无 tproxy），QUIC/DoH 行为可能与直连不同；需要完整 UDP 分流请使用 Linux（tproxy）。
-- **Linux 内核能力**：UDP 透明代理要求内核启用 nftables TPROXY 与 policy routing（主流 Linux 4.18+ 通常具备）；缺少 `NFT_TPROXY`、`nft` 或 `ip` 时，启用会失败并在网关状态/诊断中显示具体阶段。开启 DNS 劫持时 UDP/53 走专用 DNS redirect，其余 UDP 才进入通用 TPROXY。
-- **看门狗**：主进程失联超过 90 秒（心跳间隔 30 秒），helper 自动清除 pf 规则并恢复 IPv4 转发原值，下游设备回退直连，避免主进程崩溃后下游断网。
-- **pf 主规则集**：macOS 载入方式是在 /etc/pf.conf 基础上追加本模块 anchor 引用后 `pfctl -f` 整体载入（子 anchor 的 rdr 必须被主规则集引用才生效，与 ClashX 增强模式同）；其他软件写在 pf 主层的规则会被替换，`com.apple/*` anchors 不受影响。卸载（`proxyd gateway helper uninstall`）会清 anchor、恢复转发并删除全部文件。
-
-### 故障排查
-
-- Web「网关」页状态卡/预检卡，或 `proxyd gateway status` / `proxyd gateway precheck`。
-- 诊断中心（`proxyd diagnose`）含 gateway 步骤：平台支持性、helper 握手与协议版本、转发开关实际值、规则应用、redir 入口监听。
-- macOS helper 日志：`/var/log/com.proxyd.helper.log`；握手报版本不兼容时重新 `sudo proxyd helper install`。
-- Linux 报权限不足：确认 setcap 能力位是否在最近一次替换二进制后重设。
-- Linux UDP 不通：在网关状态中确认 `policy_routing=present`；诊断项 `gateway_policy_route` 会同时检查 fwmark 规则与 lo 本地路由，避免只装好其中一半时误报可用。
-
-## 十二、常见问题
+## 十一、常见问题
 
 - **启动后没有映射端口**：首次添加订阅后需手动点击“刷新订阅”或执行 `proxyd refresh`；已有快照仍为空时再检查同步错误与 `health-url` 是否可达。
 - **geo 下载慢/失败**：已内置镜像，仍失败可在配置 `geox-url` 换源；失败不影响代理本体（自动降级）。
@@ -949,7 +904,7 @@ Linux 启用网关时会自动安装 UDP TPROXY 所需的策略路由：报文�
 
 ## 管理菜单与功能归属
 
-控制台顶部横向排列「概况、代理、网关、远程访问、系统」，侧栏只显示当前大类的子菜单，命令菜单（⌘K/Ctrl+K）可以按页面名、SSH、公钥等关键词直接跳转。远程访问拆为设备与连接、文件传输、本机服务、访问授权、端口转发、连接审计和远程桌面；不再将全部功能放进服务端/客户端两个长页签。网关大类随 gateway 模块启用出现，集中承载状态、预检、设备登记表与使用指引。
+控制台顶部横向排列「概况、代理、远程访问、系统」，侧栏只显示当前大类的子菜单，命令菜单（⌘K/Ctrl+K）可以按页面名、SSH、公钥等关键词直接跳转。远程访问拆为设备与连接、文件传输、本机服务、访问授权、端口转发、连接审计和远程桌面；不再将全部功能放进服务端/客户端两个长页签。
 
 页面地址如 `#/remote/access` 可直接打开，支持刷新定位及浏览器前进/后退；旧 `#/remote` 入口兼容到设备与连接。后续功能落位规则见 [管理导航规划](management-navigation.md)。
 
@@ -964,10 +919,7 @@ proxyd modules proxy off
 proxyd modules proxy on
 proxyd modules remote off
 proxyd modules remote on
-proxyd modules gateway on
 ```
-
-`gateway` 模块对应 LAN 网关（见「十一、LAN 网关」）：禁用会清除转发规则并停止调和，设备表保留；启用要求代理模块已启用，禁用代理会先自动停用网关。
 
 配置中的 `proxy-disabled: true` 会停止代理入口、TUN、DNS、活动代理连接与周期健康检测，撤销已配置的系统代理，保留 `system-proxy` 的恢复偏好。恢复时只检测缓存/手动节点，不会下载订阅。纯远程服务可以使用该设置且不配置代理订阅。
 

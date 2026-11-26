@@ -12,7 +12,6 @@ export function useDashboardFeed(active, modules) {
   const [revision, setRevision] = useState(0);
   const proxyEnabled = modules.some((module) => module.id === "proxy" && module.enabled);
   const remoteEnabled = modules.some((module) => module.id === "remote" && module.enabled);
-  const gatewayEnabled = modules.some((module) => module.id === "gateway" && module.enabled);
   /** reload 触发新一轮查询；参数无，返回无；取消旧轮次由 effect 清理负责，无同步错误。 */
   const reload = useCallback(() => setRevision((current) => current + 1), []);
   useEffect(() => {
@@ -29,7 +28,6 @@ export function useDashboardFeed(active, modules) {
       sources.devices = "/api/remote/remotes";
       sources.desktop = "/api/desktop";
     }
-    if (gatewayEnabled) sources.gateway = "/api/gateway";
     /** poll 并发读取独立来源；参数无，返回 Promise<void>；所有拒绝均转为局部错误，无未处理异常。 */
     async function poll() {
       controller = new AbortController();
@@ -51,6 +49,6 @@ export function useDashboardFeed(active, modules) {
     }
     poll();
     return () => { stopped = true; window.clearTimeout(timer); controller?.abort(); };
-  }, [active, proxyEnabled, remoteEnabled, gatewayEnabled, revision]);
+  }, [active, proxyEnabled, remoteEnabled, revision]);
   return { ...snapshot, reload };
 }

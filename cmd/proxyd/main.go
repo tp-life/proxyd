@@ -78,18 +78,6 @@ func main() {
 			err = cmdDiagnose(os.Args[2:])
 		case "modules":
 			err = cmdModules(os.Args[2:])
-		case "gateway":
-			err = cmdGateway(os.Args[2:])
-		case "gateway-helper":
-			// 内部子命令：macOS 特权 helper 服务端，由 launchd 以 root 托管。
-			err = cmdGatewayHelperServe(os.Args[2:])
-		case "tun-helper":
-			// 内部子命令：macOS TUN 特权助手服务端，由 launchd 以 root 托管。
-			err = cmdTunHelperServe(os.Args[2:])
-		case "helper":
-			// 统一特权助手：install|uninstall|status 为用户入口；
-			// 无参（root）为 launchd 托管的服务端入口（plist 见 internal/privhelper）。
-			err = cmdHelper(os.Args[2:])
 		case "sysproxy":
 			err = cmdSysproxy(os.Args[2:])
 		case "tun":
@@ -190,12 +178,9 @@ usage:
   proxyd check [flags] [订阅地址...]    一次性拉取订阅、测速并打印端口映射表
   proxyd diagnose [-c 配置] [设备] [--json]  分阶段诊断与脱敏报告
   proxyd config history list|export <ID>|preview <ID>|restore <ID> [--yes]
-  proxyd modules [-c 配置] list | proxy|remote|gateway on|off|retry  模块管理
-  proxyd gateway [-c 配置] status|precheck   LAN 网关状态 / 启用前检查（helper/能力位指引）
-  proxyd gateway devices list|add <名> <ip> [策略]|set <名> [--ip 地址] [--mac 地址] [--policy 策略]|del <名>   网关设备表
-  proxyd helper install|uninstall|status   （macOS）统一特权助手本地安装管理（TUN 与 LAN 网关共用，需管理员授权）
+  proxyd modules [-c 配置] list | proxy|remote on|off|retry  模块管理
   proxyd sysproxy [-c 配置] on|off|status    开关/查看系统代理（指向主端口）
-  proxyd tun [-c 配置] on|off|status|helper …  开关/查看 TUN 模式；helper 为旧写法，已并入 proxyd helper
+  proxyd tun [-c 配置] on|off|status         开关/查看 TUN 模式
   proxyd autostart [-c 配置] on|off|status   开关/查看开机自启（macOS 为系统 LaunchDaemon）
   proxyd <订阅地址>                     serve 的快捷形式
   proxyd version                        打印版本
@@ -227,7 +212,7 @@ usage:
   proxyd update-check [on|off]          查看/开关启动版本检查
   proxyd conn list|close <id|all>       查看/关闭活动连接
   proxyd traffic                        实时上/下行速率（Ctrl-C 退出）
-  proxyd ls [-c 配置]                   启动交互式 TUI（10 个视图页；轮询只读，写操作仅显式按键，? 帮助）
+  proxyd ls [-c 配置]                   启动交互式 TUI（9 个视图页；轮询只读，写操作仅显式按键，? 帮助）
   proxyd config path|export [--full] [-o 文件]|import [--yes] <文件>   配置路径/导出/导入
 
 远程连接（tailcat 隧道，与代理功能独立）:

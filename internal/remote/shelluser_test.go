@@ -20,6 +20,7 @@ import (
 // 错误情况：任一分支放行 root 空配置或误拒非 root 时测试失败。
 func TestCheckSessionUserAllowed(t *testing.T) {
 	t.Setenv("SUDO_USER", "")
+	t.Setenv(defaultShellUserEnv, "")
 	cases := []struct {
 		name      string
 		euid      int
@@ -88,6 +89,15 @@ func TestSudoInvokerUserFrom(t *testing.T) {
 	}
 	if got := sudoInvokerUserFrom(0, envOf("missing"), lookup); got != "" {
 		t.Fatalf("不存在账户不应被识别，got %q", got)
+	}
+	daemonEnv := func(k string) string {
+		if k == defaultShellUserEnv {
+			return "alice"
+		}
+		return ""
+	}
+	if got := sudoInvokerUserFrom(0, daemonEnv, lookup); got != "alice" {
+		t.Fatalf("LaunchDaemon PROXYD_SHELL_USER = %q, want alice", got)
 	}
 }
 

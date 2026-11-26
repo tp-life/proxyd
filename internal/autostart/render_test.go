@@ -57,6 +57,7 @@ func TestRenderPlistRootDaemon(t *testing.T) {
 	for _, want := range []string{
 		"<string>com.proxyd</string>",
 		"<key>HOME</key>\n\t\t<string>/Users/x</string>",
+		"<key>PROXYD_SHELL_USER</key>\n\t\t<string>x</string>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
 	} {
 		if !strings.Contains(p, want) {

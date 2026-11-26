@@ -19,7 +19,6 @@ import (
 	"proxyd/internal/config"
 	"proxyd/internal/configversion"
 	"proxyd/internal/desktop"
-	"proxyd/internal/gateway"
 	"proxyd/internal/infrastructure/confighistory"
 	"proxyd/internal/lifecycle"
 	"proxyd/internal/proxy/core"
@@ -87,7 +86,6 @@ type App struct {
 	configPendingRestart bool        // 导入或恢复后阻止旧运行配置覆盖待重启的新文件。
 	proxyLifecycle       lifecycle.Tracker
 	remoteLifecycle      lifecycle.Tracker
-	gatewayLifecycle     lifecycle.Tracker
 	// cfg 是运行配置。可变字段的写必须持 a.mu 且在 refreshing/域事务锁内串行；
 	// StateDir、HealthURL、HealthTimeout 自 New 之后不再修改，允许只读路径免锁读取
 	// （如 snapshotPath、autostartOptions），新增配置项不得加入该不可变清单除非
@@ -125,11 +123,6 @@ type App struct {
 	// 由它导出；逐节点的「测速中」显示以节点自己的展示行为准（见 node.Display）。
 	testRounds atomic.Int32
 
-	// tunFD 是 tun-helper 创建并注入 mihomo 的 utun 文件描述符（纯运行时状态，
-	// 不落盘），0 表示未持有；仅在 refreshing 锁内访问。fd 随配置成功应用后归
-	// mihomo 所有（关闭 TUN/停用时由 mihomo 关闭），见 proxy_tunhelper.go。
-	tunFD int
-
 	// appliedConfig 是最近一次成功热更新到 mihomo 的配置字节（自检与 GEO 降级后的
 	// 最终字节）。后台健康检查每轮都会重新生成配置，但节点可用性没有变化时生成结果
 	// 与之逐字节一致；据此跳过热更新可以避免周期性重建整棵 tunnel 与重复加载 geo /
@@ -161,15 +154,6 @@ type App struct {
 	desktop           *desktop.Manager
 	desktopMutationMu sync.Mutex
 
-	// gateway 是「LAN 网关」旁路由模块（docs/adr/0003）；由 initGateway 创建，
-	// Run 启动时按配置调和执行层，Shutdown 时尽力清除转发规则。
-	gateway *gateway.Manager
-	// gatewayMutationMu 串行化完整的 gateway 配置事务（克隆 → Regenerate →
-	// 调和执行层 → 落盘 → 失败回滚）。锁序：desktopMutationMu → remoteMutationMu →
-	// gatewayMutationMu → refreshing（gateway 事务内需调 Regenerate 取 refreshing 锁，
-	// 禁止在持有 refreshing 时反向获取 gatewayMutationMu）。
-	gatewayMutationMu sync.Mutex
-
 	// systemProxyMu 串行化系统代理开关与主端口重绑的完整事务。
 	// 单独的 a.mu 只能保护内存字段，无法覆盖 OS 代理变更、mihomo
 	// 热更新与磁盘持久化三个阶段，因此需要独立的用例级互斥锁。
@@ -199,7 +183,6 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 	// 这里补一次幂等默认值，保证后续持久化和状态 API 都看到完整 TUN/桌面配置。
 	cfg.TUN.ApplyDefaults()
 	cfg.Desktop.ApplyDefaults()
-	cfg.Gateway.ApplyDefaults()
 	if err := cfg.Desktop.Validate(); err != nil {
 		return nil, fmt.Errorf("远程桌面配置无效: %w", err)
 	}
@@ -238,8 +221,6 @@ func New(cfg *config.Config, cfgPath string) (*App, error) {
 	a.configHistory = confighistory.New(filepath.Join(cfg.StateDir, "config-history"))
 	a.initRemote()
 	a.initDesktop()
-	a.initGateway()
-	a.migrateRootAutostartDaemon()
 	// 兼容迁移（如旧默认 health-url）此前只在内存生效，这里一次性写回配置文件，
 	// 避免每次启动重复迁移并打印告警。写失败不阻断启动，仅降级为下次再试。
 	if cfgPath != "" && cfg.MigrationApplied() {
@@ -457,7 +438,7 @@ func (a *App) Config() *config.Config {
 }
 
 // SetAutostart 注册/移除开机自启项（OS 级状态，不写入配置文件）。macOS 使用
-// system LaunchDaemon，并以当前用户身份运行实际服务，因此无需登录即可启动。
+// system LaunchDaemon（以 root 运行以原生支持 TUN，并保留普通用户 HOME 与默认 SSH 降权用户）。
 //
 // 参数说明：
 //   - enabled: bool，true 注册并立即启动，false 移除平台自启项。
@@ -521,8 +502,7 @@ func (a *App) autostartOptions() (autostart.Options, error) {
 	if err != nil {
 		return autostart.Options{}, err
 	}
-	// TUN 已由统一特权助手代劳 root 操作（docs/adr/0004 方案 B 追述），
-	// 守护进程不再需要 root：自启项始终按注册账户降权运行。
+	// macOS LaunchDaemon 默认以 root 运行（原生支持 TUN，同时保留注册账户的 HOME 与默认 SSH 降权用户）。
 	return autostart.Options{Exe: exe, ConfigPath: cfgPath, StateDir: a.cfg.StateDir}, nil
 }
 
@@ -564,7 +544,6 @@ func (a *App) Run(ctx context.Context) error {
 	a.pruneOrphanImportSidecars()
 	startupErr := a.restoreSnapshot()
 	a.startRemote()
-	a.startGateway()
 	// 远程维护与代理健康调度隔离，节点测速不能拖延开机网络恢复后的重试或授权清扫。
 	remoteDone := make(chan struct{})
 	go func() { defer close(remoteDone); a.maintainRemote(runCtx) }()
@@ -574,12 +553,11 @@ func (a *App) Run(ctx context.Context) error {
 		// TUN 配置要求全局接管系统路由；如果首次应用后 listener 仍未生效，继续以
 		// “看似开启、实际关闭”的状态运行会造成流量泄漏，因此把启动失败上抛给 CLI。
 		if a.cfg.TUN.Enable && !a.cfg.ProxyDisabled && !a.runner.TUNEnabled() {
-			// remote/gateway 已在启动配置应用前启动，desktop 管理器也可能已被 API 创建会话。致命
+			// remote 已在启动配置应用前启动，desktop 管理器也可能已被 API 创建会话。致命
 			// 启动路径不会进入下方 ctx.Done 分支，因此必须在返回前按依赖顺序显式释放，
-			// 否则会残留 tailcat listener、网关转发规则、临时桌面端口和后台协程。
+			// 否则会残留 tailcat listener、临时桌面端口和后台协程。
 			a.stopDesktop()
 			a.stopRemote()
-			a.stopGateway()
 			a.clearAppliedConfig()
 			a.runner.Shutdown()
 			return fmt.Errorf("TUN 未能启动，服务已停止以避免流量绕过代理: %w", startupErr)
@@ -607,15 +585,13 @@ func (a *App) Run(ctx context.Context) error {
 	}
 }
 
-// Shutdown 关闭远程桌面会话、远程连接模块、网关模块与内嵌的 mihomo 核心。
+// Shutdown 关闭远程桌面会话、远程连接模块与内嵌的 mihomo 核心。
 func (a *App) Shutdown() {
 	a.stopDesktop()
 	a.stopRemote()
-	a.stopGateway()
 	// 核心关闭后运行态不再对应任何配置；清空记录避免重复 Shutdown/再次启动时误判配置未变。
 	a.clearAppliedConfig()
 	a.runner.Shutdown()
-	a.releaseTUNFDLocked(false)
 }
 
 func (a *App) snapshotPath() string {

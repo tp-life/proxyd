@@ -43,12 +43,11 @@ const (
 	tuiPageRules
 	tuiPageConnections
 	tuiPageRemote
-	tuiPageGateway
 	tuiPageDesktop
 	tuiPageLogs
 )
 
-// tuiTabs 是视图标识与可见名称的唯一映射，数字快捷键按切片顺序生成（第 10 页用 0）。
+// tuiTabs 是视图标识与可见名称的唯一映射，数字快捷键按切片顺序生成（1-9）。
 var tuiTabs = []struct {
 	Name  string
 	Short string
@@ -60,7 +59,6 @@ var tuiTabs = []struct {
 	{Name: "访问规则", Short: "规则"},
 	{Name: "活动连接", Short: "连接"},
 	{Name: "远程连接", Short: "远程"},
-	{Name: "LAN 网关", Short: "网关"},
 	{Name: "远程桌面", Short: "桌面"},
 	{Name: "运行日志", Short: "日志"},
 }
@@ -160,7 +158,6 @@ type tuiSnapshotMsg struct {
 	EffectiveRules *app.EffectiveRulesStatus
 	System         *app.SystemStatus
 	Modules        *[]app.ModuleState
-	Gateway        *app.GatewayOverview
 	Desktop        *app.DesktopStatus
 	Audit          *tuiRemoteAuditResponse
 	Warnings       []string
@@ -201,7 +198,6 @@ type tuiModel struct {
 	effectiveRules *app.EffectiveRulesStatus
 	system         *app.SystemStatus
 	modules        []app.ModuleState
-	gateway        *app.GatewayOverview
 	desktop        *app.DesktopStatus
 	audit          []tuiAuditEntry
 	traffic        tuiTraffic
@@ -524,9 +520,6 @@ func (m *tuiModel) applySnapshot(message tuiSnapshotMsg) {
 	if message.Modules != nil {
 		m.modules = append([]app.ModuleState(nil), (*message.Modules)...)
 	}
-	if message.Gateway != nil {
-		m.gateway = message.Gateway
-	}
 	if message.Desktop != nil {
 		m.desktop = message.Desktop
 	}
@@ -617,13 +610,6 @@ func fetchTUISnapshotCmd(client *apiClient) tea.Cmd {
 			result.Warnings = append(result.Warnings, "模块状态暂不可用: "+err.Error())
 		} else {
 			result.Modules = &modules
-		}
-
-		var gateway app.GatewayOverview
-		if err := client.doTimeout(http.MethodGet, "/api/gateway", nil, &gateway, tuiRequestTimeout); err != nil {
-			result.Warnings = append(result.Warnings, "网关状态暂不可用: "+err.Error())
-		} else {
-			result.Gateway = &gateway
 		}
 
 		var desktop app.DesktopStatus

@@ -28,8 +28,8 @@ function formatUptime(seconds) {
 export function OverviewPage({ modules, overview, traffic, feed, snapshotError, theme, onNavigate, onRefresh, onPalette, onToggleTheme }) {
   const { data, errors, loading } = feed;
   const { cards, items } = buildDashboard(modules, { overview, data });
-  const sourceLabels = { system: "系统状态", connections: "代理连接", remote: "远程服务", devices: "设备档案", desktop: "桌面会话", gateway: "LAN 网关" };
-  const sourceCardId = (key) => (key === "connections" ? "proxy" : key === "gateway" ? "gateway" : "remote");
+  const sourceLabels = { system: "系统状态", connections: "代理连接", remote: "远程服务", devices: "设备档案", desktop: "桌面会话" };
+  const sourceCardId = (key) => (key === "connections" ? "proxy" : "remote");
   const failures = Object.entries(errors).filter(([key]) => key === "system" || cards.some((card) => card.id === sourceCardId(key)));
   const incomplete = Boolean(snapshotError || failures.length || !data.system || !modules.length);
   const attention = items.length > 0;

@@ -5,11 +5,9 @@ package app
 import (
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 
 	"proxyd/internal/config"
-	"proxyd/internal/proxy/tunhelper"
 	"proxyd/internal/proxy/tunperm"
 )
 
@@ -23,8 +21,6 @@ type TUNStatus struct {
 	Allowed    bool   `json:"allowed"`
 	Platform   string `json:"platform"`
 	Permission string `json:"permission,omitempty"`
-	// Helper 是 tun-helper 的安装/可达状态（仅 darwin 有值；其余平台为 nil）。
-	Helper *tunhelper.HelperStatus `json:"helper,omitempty"`
 }
 
 // TUNStatus 返回 TUN 配置状态以及当前进程的权限检测结果。
@@ -32,8 +28,7 @@ type TUNStatus struct {
 // 参数：无。
 //
 // 返回值：
-//   - TUNStatus：Enabled 来自当前配置；Allowed/Platform/Permission 来自操作系统适配器；
-//     darwin 上附带 tun-helper 的安装与可达状态。
+//   - TUNStatus：Enabled 来自当前配置；Allowed/Platform/Permission 来自操作系统适配器。
 //
 // 错误情况：无；底层无法读取权限状态时按不允许处理，并通过 Permission 返回修复指引。
 func (a *App) TUNStatus() TUNStatus {
@@ -41,18 +36,13 @@ func (a *App) TUNStatus() TUNStatus {
 	enabled := a.cfg.TUN.Enable
 	a.mu.RUnlock()
 	permission := tunperm.Current()
-	status := TUNStatus{
+	return TUNStatus{
 		Enabled:    enabled,
 		Active:     a.runner.TUNEnabled(),
 		Allowed:    permission.Allowed,
 		Platform:   permission.Platform,
 		Permission: permission.Hint,
 	}
-	if runtime.GOOS == "darwin" {
-		helper := tunHelperInstalledStatus()
-		status.Helper = &helper
-	}
-	return status
 }
 
 // SetTUN 开关 TUN 模式，并按“权限检查 → 热更新 → 持久化”的顺序应用变更。

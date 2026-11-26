@@ -96,7 +96,7 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
                 )}
               </form>
               <p className="mt-1 text-xs text-muted-foreground">
-                内嵌 SSH/SCP/Web 终端以该账户降权运行（当前：{status?.session_user || "未知"}）；proxyd 以 root 运行时必须设置为普通账户，否则内嵌 SSH 与 Web 终端拒绝开启（TUN 已改由统一特权助手代劳，通常不再需要 root 运行 proxyd）。
+                内嵌 SSH/SCP/Web 终端以该账户降权运行（当前：{status?.session_user || "未知"}）；未设置时通过 sudo 或 macOS 开机自启（LaunchDaemon）运行的 root 进程会自动降权到原普通用户（且支持 proxyd ssh user@远端 切换其他普通账户），纯 root 进程仍须显式设置普通账户。
               </p>
               {status?.web_terminal && status?.api_loopback === false && (
                 <p className="permission-note warn">

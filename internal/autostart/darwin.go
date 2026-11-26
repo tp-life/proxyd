@@ -17,10 +17,10 @@ import (
 )
 
 // macOS 使用系统级 LaunchDaemon：plist 固定安装到 /Library/LaunchDaemons，
-// 因而无需用户登录即可在冷启动、断电恢复或系统重启后拉起 proxyd。始终通过
-// UserName 降权为注册时的普通用户（TUN 由 tun-helper 代劳，不再需要 root 实例），
-// 避免改变配置文件和状态目录的所有权。KeepAlive 仅崩溃拉起（SuccessfulExit=false），
-// 干净退出（proxyd stop）保持停止。
+// 因而无需用户登录即可在冷启动、断电恢复或系统重启后拉起 proxyd。服务以 root 运行
+// 以便原生启用 TUN（无需额外提权助手），同时保留注册时的普通用户 HOME 与
+// PROXYD_SHELL_USER，确保默认配置/状态路径不变且远程 SSH 自动降权到普通用户。
+// KeepAlive 仅崩溃拉起（SuccessfulExit=false），干净退出（proxyd stop）保持停止。
 
 const daemonPlistPath = "/Library/LaunchDaemons/" + plistLabel + ".plist"
 
@@ -39,40 +39,30 @@ type privilegedCommand struct {
 	IgnoreError bool
 }
 
-// currentServiceAccount 解析应由 LaunchDaemon 使用的账户。
+// currentServiceAccount 解析应由 LaunchDaemon 关联的普通本机账户。
 //
 // 参数说明：无。
 //
-// 返回值说明：serviceAccount 和 error；优先使用 sudo 调用者，否则使用当前进程账户。
+// 返回值说明：serviceAccount 和 error；root 运行时优先使用 SUDO_USER，其次 PROXYD_SHELL_USER，否则使用当前进程账户。
 //
 // 错误情况：系统用户数据库不可用、账户没有用户名/主目录/UID 时返回错误，避免生成
 // 会以错误身份运行或无法读取用户配置的系统服务。
 func currentServiceAccount() (serviceAccount, error) {
 	var current *user.User
 	var err error
-	if sudoUser := strings.TrimSpace(os.Getenv("SUDO_USER")); os.Geteuid() == 0 && sudoUser != "" && sudoUser != "root" {
-		current, err = user.Lookup(sudoUser)
-	} else {
+	if os.Geteuid() == 0 {
+		for _, envKey := range []string{"SUDO_USER", DefaultShellUserEnv} {
+			if candidate := strings.TrimSpace(os.Getenv(envKey)); candidate != "" && !strings.EqualFold(candidate, "root") {
+				current, err = user.Lookup(candidate)
+				break
+			}
+		}
+	}
+	if current == nil && err == nil {
 		current, err = user.Current()
 	}
 	if err != nil {
 		return serviceAccount{}, fmt.Errorf("解析 LaunchDaemon 运行账户失败: %w", err)
-	}
-	return validateServiceAccount(current)
-}
-
-// namedServiceAccount 解析显式指定的 LaunchDaemon 降权账户（旧 root 自启项迁移用）。
-//
-// 参数说明：
-//   - name: string，本机账户名。
-//
-// 返回值说明：serviceAccount 和 error；语义同 currentServiceAccount。
-//
-// 错误情况：账户不存在或信息不完整时返回错误。
-func namedServiceAccount(name string) (serviceAccount, error) {
-	current, err := user.Lookup(name)
-	if err != nil {
-		return serviceAccount{}, fmt.Errorf("解析 LaunchDaemon 运行账户 %q 失败: %w", name, err)
 	}
 	return validateServiceAccount(current)
 }
@@ -83,19 +73,6 @@ func validateServiceAccount(current *user.User) (serviceAccount, error) {
 		return serviceAccount{}, fmt.Errorf("LaunchDaemon 运行账户信息不完整")
 	}
 	return serviceAccount{UserName: current.Username, HomeDir: current.HomeDir, UID: current.Uid, GID: current.Gid}, nil
-}
-
-// RootDaemonPlistInstalled 报告系统自启项是否仍是旧的 root 模式（plist 无 UserName，
-// tun-helper 落地前 TUN 需要 root 时的产物），供启动期迁移为降权运行。
-//
-// 参数说明：无。
-//
-// 返回值说明：bool，plist 存在且不含 UserName 键时为 true。
-//
-// 错误情况：无；读取失败按非 root 模式处理，不做迁移。
-func RootDaemonPlistInstalled() bool {
-	data, err := os.ReadFile(daemonPlistPath)
-	return err == nil && !strings.Contains(string(data), "<key>UserName</key>")
 }
 
 // legacyPlistPath 返回旧版登录级 LaunchAgent 的路径。
@@ -148,15 +125,11 @@ var runDeferred = func(name string, args ...string) {
 // daemonRegisterCommands：健康服务只刷新文件，崩溃循环服务强制重注册。
 func on(opt Options) error {
 	account, err := currentServiceAccount()
-	if opt.RunAsUser != "" {
-		account, err = namedServiceAccount(opt.RunAsUser)
-	}
 	if err != nil {
 		return err
 	}
-	// StateDir 由注册进程解析（默认取其 $HOME），而服务以 account 降权运行、
-	// plist 注入的 HOME 是 account.HomeDir；sudo 注册、RunAsUser 迁移等场景中
-	// 两者可能不属于同一用户（如 /var/root），日志路径必须锚定到服务账户主目录。
+	// StateDir 由注册进程解析（默认取其 $HOME），而 plist 注入的 HOME 是 account.HomeDir；
+	// sudo 注册等场景中两者可能不属于同一用户（如 /var/root），日志路径必须锚定到服务账户主目录。
 	processHome, _ := os.UserHomeDir()
 	logPath := serviceLogPath(opt.StateDir, processHome, account.HomeDir)
 	if err := ensureLogDir(filepath.Dir(logPath), account); err != nil {
@@ -168,7 +141,7 @@ func on(opt Options) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	content := RenderPlist(opt.Exe, opt.ConfigPath, logPath, account.UserName, account.HomeDir, opt.RootDaemon)
+	content := RenderPlist(opt.Exe, opt.ConfigPath, logPath, account.UserName, account.HomeDir, true)
 	if _, err := temporary.WriteString(content); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("写入 LaunchDaemon 临时文件失败: %w", err)

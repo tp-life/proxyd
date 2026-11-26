@@ -10,8 +10,6 @@ import "strings"
 type RuleSource string
 
 const (
-	// RuleSourceGateway 是网关模块按设备生成的 SRC-IP-CIDR 分流规则。
-	RuleSourceGateway RuleSource = "gateway"
 	// RuleSourceCustom 是用户维护的 custom-rules。
 	RuleSourceCustom RuleSource = "custom"
 	// RuleSourceRuleURL 是远程规则源（rule-urls）导入的规则。
@@ -33,7 +31,6 @@ const (
 // 错误情况：无。展示层据此给出稳定的来源清单（含零条来源），避免界面依赖出现顺序。
 func RuleSources() []RuleSource {
 	return []RuleSource{
-		RuleSourceGateway,
 		RuleSourceCustom,
 		RuleSourceRuleURL,
 		RuleSourceSubscription,
@@ -50,8 +47,6 @@ func RuleSources() []RuleSource {
 // 错误情况：无。
 func (s RuleSource) Label() string {
 	switch s {
-	case RuleSourceGateway:
-		return "网关设备分流"
 	case RuleSourceCustom:
 		return "自定义规则"
 	case RuleSourceRuleURL:
