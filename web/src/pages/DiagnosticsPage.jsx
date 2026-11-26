@@ -28,7 +28,7 @@ export function DiagnosticsPage() {
   return <div className="space-y-5">
     <PageHeader title="诊断中心" detail="逐项检查模块、DNS、中继、隧道、SSH 认证和登录环境。完整检查最多约 50 秒。" />
     <section className="panel p-5 space-y-4">
-      <label className="block space-y-2"><span>诊断对象</span><select className="w-full rounded-md border bg-background p-2" value={peer} disabled={busy} onChange={(e) => setPeer(e.target.value)}><option value="">本机服务与网络</option>{peers.map((item) => <option value={item.name} key={item.name}>{item.name}</option>)}</select></label>
+      <label className="block space-y-2"><span>诊断对象</span><select className="w-full border-2 border-ink bg-card p-2" value={peer} disabled={busy} onChange={(e) => setPeer(e.target.value)}><option value="">本机服务与网络</option>{peers.map((item) => <option value={item.name} key={item.name}>{item.name}</option>)}</select></label>
       <p className="text-sm text-muted-foreground">检查从守护进程所在机器发起。远端需要 SSH 私钥时，可在客户端运行 proxyd ssh &lt;设备&gt; --diagnose -i &lt;密钥文件&gt;。</p>
       <div className="flex flex-wrap gap-2"><Button onClick={run} disabled={busy}>{busy ? "正在逐项检查…" : "开始诊断"}</Button>{busy && <Button variant="outline" onClick={() => active.current?.abort()}>取消诊断</Button>}{report && <Button variant="outline" onClick={download}>导出脱敏报告</Button>}</div>
     </section>

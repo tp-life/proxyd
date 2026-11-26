@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { CircleAlert, Copy, Gauge, Plus, Search, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -77,7 +77,7 @@ const EMPTY_VPN_FORM = {
 };
 
 /** VPN_TEXTAREA_CLASS 复用远程模块的等宽多行输入样式，承载证书材料与 JSON。 */
-const VPN_TEXTAREA_CLASS = "mono-input min-h-24 w-full rounded-md border bg-background p-2 text-xs";
+const VPN_TEXTAREA_CLASS = "mono-input min-h-24 w-full border-2 border-ink bg-card p-2 text-xs";
 
 /**
  * NodesPage 渲染跨来源聚合的节点工作台。
@@ -720,13 +720,14 @@ export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete,
                 onValueChange={setAddMode}
                 options={[{ value: "url", label: "链接" }, { value: "vpn", label: "高级隧道" }]}
               />}
+              {/* 以录入方式作 key：切换时整组字段重新挂载，从而重放 .node-dialog-form 子项的进场动画。 */}
               {addMode === "url" ? (
-                <>
+                <Fragment key="url">
                   <Field label="节点地址" hint="支持 socks5://、ss:// 等完整链接"><Input autoFocus value={forms.manualURL} placeholder="socks5://user:pass@host:1080" onChange={(event) => onForm("manualURL", event.target.value)} /></Field>
                   <Field label="显示名称" hint="可选"><Input value={forms.manualName} placeholder="例如：东京备用" onChange={(event) => onForm("manualName", event.target.value)} /></Field>
-                </>
+                </Fragment>
               ) : (
-                <>
+                <Fragment key="vpn">
                   {!dedicatedTunnel && <Field label="隧道类型">
                     <Select
                       ariaLabel="VPN 节点隧道类型"
@@ -919,7 +920,7 @@ export function NodesPage({ busy, forms = {}, initialSource, overview, onDelete,
                     </Field>
                   )}
                   {addError && <p className="dialog-error" role="alert">{addError}</p>}
-                </>
+                </Fragment>
               )}
             </div>
             <DialogFooter>

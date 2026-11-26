@@ -422,10 +422,10 @@ export function DesktopPage({
                     const serviceBusy = busy === `service:${service.protocol}`;
                     const portChanged = servicePorts[service.protocol] !== String(service.port);
                     return (
-                      <article className="grid gap-4 rounded-lg border bg-card p-4" key={service.protocol}>
+                      <article className="grid gap-4 brut-sm bg-card p-4" key={service.protocol}>
                         <header className="flex flex-wrap items-start justify-between gap-3">
                           <div className="flex min-w-0 items-start gap-3">
-                            <span className="grid size-10 shrink-0 place-items-center rounded-lg border bg-muted text-primary">
+                            <span className="grid size-10 shrink-0 place-items-center border-2 border-ink bg-mint text-ink">
                               {service.protocol === "rdp" ? <Monitor size={20} aria-hidden="true" /> : <Server size={20} aria-hidden="true" />}
                             </span>
                             <div className="min-w-0">
@@ -549,10 +549,10 @@ export function DesktopPage({
                       const startBusy = busy === `start:${connection.name}`;
                       const stopBusy = session && busy === `stop:${session.id}`;
                       return (
-                        <article className="grid gap-3 rounded-lg border bg-card p-4" key={connection.name}>
+                        <article className="grid gap-3 brut-sm bg-card p-4" key={connection.name}>
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div className="flex min-w-0 items-start gap-3">
-                              <span className="grid size-10 shrink-0 place-items-center rounded-lg border bg-muted text-primary">
+                              <span className="grid size-10 shrink-0 place-items-center border-2 border-ink bg-mint text-ink">
                                 <Laptop size={20} aria-hidden="true" />
                               </span>
                               <div className="min-w-0">
@@ -628,7 +628,7 @@ export function DesktopPage({
                     {orphanSessions.map((session) => {
                       const stopBusy = busy === `stop:${session.id}`;
                       return (
-                        <article className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-4" key={session.id}>
+                        <article className="flex flex-wrap items-center justify-between gap-3 brut-sm bg-card p-4" key={session.id}>
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <h3 className="m-0 text-sm font-semibold">{session.connection_name}</h3>

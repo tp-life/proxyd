@@ -42,12 +42,13 @@ export const Input = forwardRef(function Input({ className, type = "text", ...pr
       type={type}
       className={cn(
         [
-          "flex h-10 w-full min-w-0 rounded-md border border-input bg-card px-3 py-2 text-sm text-foreground",
-          "transition-[border-color,box-shadow] duration-200",
+          "flex h-10 w-full min-w-0 border-2 border-ink bg-card px-3 py-2 text-sm text-foreground",
+          "transition-[box-shadow] duration-150",
           "placeholder:text-muted-foreground/75",
-          "focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/15",
+          // 聚焦时投出 3px 墨色硬阴影，与全局 input:focus 一致
+          "focus-visible:outline-none focus-visible:shadow-[3px_3px_0_var(--ink)]",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          "aria-invalid:border-destructive aria-invalid:ring-destructive/20",
+          "aria-invalid:border-destructive aria-invalid:shadow-[3px_3px_0_var(--red)]",
         ].join(" "),
         className,
       )}

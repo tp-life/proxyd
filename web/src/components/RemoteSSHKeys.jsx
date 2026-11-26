@@ -119,7 +119,7 @@ export function RemoteSSHKeys({ status, manageSSHKeys, copyText }) {
       {required && keys.length === 0 && <p role="status" className="m-0 text-xs text-destructive">尚无授权公钥，当前拒绝所有内嵌 SSH 登录。添加公钥或关闭附加认证后可恢复连接。</p>}
       <form className="grid gap-2" onSubmit={submit}>
         <input aria-label="SSH 公钥名称" value={name} maxLength={128} disabled={busy} onChange={(event) => setName(event.target.value)} placeholder="名称（可选，如工作电脑）" />
-        <textarea aria-label="SSH 公钥内容" className="mono-input min-h-24 w-full rounded-md border bg-background p-2 text-xs" value={text} disabled={busy} onChange={(event) => setText(event.target.value)} placeholder="ssh-ed25519 AAAA…；也可导入多行 authorized_keys" />
+        <textarea aria-label="SSH 公钥内容" className="mono-input min-h-24 w-full border-2 border-ink bg-card p-2 text-xs" value={text} disabled={busy} onChange={(event) => setText(event.target.value)} placeholder="ssh-ed25519 AAAA…；也可导入多行 authorized_keys" />
         <div className="flex flex-wrap items-center gap-2">
           <label className="beui-link-button config-upload">
             <Upload size={14} aria-hidden="true" />读取公钥文件
@@ -131,7 +131,7 @@ export function RemoteSSHKeys({ status, manageSSHKeys, copyText }) {
       </form>
       {keys.length > 0 && <ul className="m-0 grid list-none gap-2 p-0">
         {keys.map((entry) => (
-          <li key={entry.fingerprint} className="grid gap-1 rounded-md border bg-background p-2">
+          <li key={entry.fingerprint} className="grid gap-1 border-2 border-ink bg-card p-2">
             <div className="flex flex-wrap items-center gap-2">
               <span className="min-w-0 flex-1 break-all text-sm">{entry.name || "未命名公钥"}</span>
               <Badge variant="secondary">{entry.type}</Badge>

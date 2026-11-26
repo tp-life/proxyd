@@ -262,7 +262,7 @@ export function ConnectionsPage({
       </PageHeader>
 
       {error && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-2 border-ink bg-warning-soft px-4 py-3 text-sm text-ink">
           <div className="flex min-w-0 items-start gap-2">
             <CircleAlert size={16} aria-hidden="true" />
             <span className="min-w-0 break-words">{error}</span>
@@ -320,7 +320,6 @@ export function ConnectionsPage({
               <Field label="搜索">
                 <Input
                   aria-label="搜索活动连接"
-                  className="h-11"
                   placeholder="搜索域名 / IP / 进程 / 节点链"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
@@ -350,12 +349,12 @@ export function ConnectionsPage({
           ) : (
             <>
               <Table
-                className="data-table hidden rounded-xl shadow-sm md:block"
+                className="data-table hidden md:block"
                 columns={connectionColumns}
                 data={visibleRows}
                 emptyState="暂无活动连接"
                 getRowId={(row) => row.id}
-                height={tableViewportHeight(visibleRows.length, 960)}
+                height={tableViewportHeight(visibleRows.length, 1600, 72, 120)}
                 minColumnWidth={88}
                 resizable
               />
@@ -365,7 +364,7 @@ export function ConnectionsPage({
                   const isPending = pendingIds.has(row.closeId);
                   return (
                     <article
-                      className="grid gap-4 rounded-md border bg-card p-4 shadow-sm"
+                      className="grid gap-4 brut-sm bg-card p-4"
                       key={row.id}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -474,7 +473,7 @@ function ConnectionsSkeleton() {
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         {Array.from({ length: 4 }).map((_, index) => (
           <div
-            className="grid min-h-[112px] gap-3 rounded-md border bg-card p-4"
+            className="grid min-h-[112px] gap-3 brut-sm bg-card p-4"
             key={index}
           >
             <div className="h-3 w-20 animate-pulse rounded-full bg-muted" />
@@ -495,7 +494,7 @@ function ConnectionsSkeleton() {
           </div>
         </div>
       </section>
-      <div className="hidden gap-0 overflow-hidden rounded-md border bg-card md:block">
+      <div className="hidden gap-0 overflow-hidden brut bg-card md:block">
         <div className="grid gap-0">
           {Array.from({ length: 5 }).map((_, index) => (
             <div
@@ -515,7 +514,7 @@ function ConnectionsSkeleton() {
       <div className="grid gap-3 md:hidden">
         {Array.from({ length: 3 }).map((_, index) => (
           <article
-            className="grid gap-3 rounded-md border bg-card p-4"
+            className="grid gap-3 brut-sm bg-card p-4"
             key={index}
           >
             <div className="flex items-start justify-between gap-3">

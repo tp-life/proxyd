@@ -63,7 +63,7 @@ export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput,
                     onChange={(event) => setAllowPortsInput(event.target.value)}
                     placeholder="端口：22,8080"
                   />
-                  <Button size="sm" variant="outline" type="submit"><Plus size={14} aria-hidden="true" /><span>添加</span></Button>
+                  <Button variant="outline" type="submit"><Plus size={14} aria-hidden="true" /><span>添加</span></Button>
                 </form>
                 {allow.length > 0 && (
                   <ul className="m-0 grid list-none gap-1.5 p-0">
@@ -177,9 +177,9 @@ export function RemoteAccessPanel({ activity, allow, allowInput, allowNameInput,
                     onChange={(event) => setKeyFileInput(event.target.value)}
                     placeholder="可选：tailcat 密钥文件路径（~/ 开头亦可）"
                   />
-                  <Button size="sm" variant="outline" type="submit"><span>保存路径</span></Button>
+                  <Button variant="outline" type="submit"><span>保存路径</span></Button>
                   {status?.custom_key_file && (
-                    <Button size="sm" variant="outline" type="button" onClick={() => saveKeyFile("")}>
+                    <Button variant="outline" type="button" onClick={() => saveKeyFile("")}>
                       <span>恢复内置托管</span>
                     </Button>
                   )}

@@ -28,14 +28,12 @@ import {
   ListFilter,
   Menu,
   Monitor,
-  Moon,
   Network,
   RefreshCw,
   Rss,
   Search,
   Settings,
   Shield,
-  Sun,
   Terminal,
   X,
 } from "lucide-react";
@@ -72,6 +70,16 @@ import { MODE_LABELS } from "@/lib/constants";
 import { classNames, proxyEnvCommands, proxyURL } from "@/lib/format";
 import { NAV_GROUPS, NAV_ITEMS, isRemoteView, visibleNavigation } from "@/lib/navigation";
 import { useNavigation } from "@/hooks/useNavigation";
+// 字体随产物本地打包（仅 latin 子集）：控制台常在无法访问 Google Fonts 的网络里使用，中文回退系统字体。
+import "@fontsource/archivo/latin-600.css";
+import "@fontsource/archivo/latin-700.css";
+import "@fontsource/archivo/latin-800.css";
+import "@fontsource/hanken-grotesk/latin-400.css";
+import "@fontsource/hanken-grotesk/latin-500.css";
+import "@fontsource/hanken-grotesk/latin-600.css";
+import "@fontsource/hanken-grotesk/latin-700.css";
+import "@fontsource/space-mono/latin-400.css";
+import "@fontsource/space-mono/latin-700.css";
 import "./styles.css";
 
 /**
@@ -175,23 +183,6 @@ function App() {
   const [selectedNodes, setSelectedNodes] = useState(new Set());
   const [ruleContent, setRuleContent] = useState({});
   const [confirmation, setConfirmation] = useState(null);
-  // 主题手动切换：默认深色，明亮模式选择持久化在 localStorage；
-  // index.html 的内联脚本会在首屏前恢复，React 这里负责后续切换与写回。
-  const [theme, setTheme] = useState(() => {
-    try {
-      return localStorage.getItem("proxyd-theme") === "light" ? "light" : "dark";
-    } catch {
-      return "dark";
-    }
-  });
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem("proxyd-theme", theme);
-    } catch {
-      // 隐私模式等场景下放弃持久化，不影响本次切换
-    }
-  }, [theme]);
   const [forms, setForms] = useState({
     subscriptionURL: "",
     manualURL: "",
@@ -910,7 +901,7 @@ function App() {
         <b className="domain-brand">proxyd</b>
         {navigation.groups.map((group) => <button key={group.id} type="button" aria-current={NAV_ITEMS.find((item) => item.id === activeView)?.group === group.id ? "true" : undefined} onClick={() => { setActiveView(navigation.items.find((item) => item.group === group.id).id); setMobileOpen(false); }}>{group.label}</button>)}
       </nav>
-      {activeView !== "overview" && <Sidebar navItems={navigation.items} modules={modules} moduleBusy={moduleBusy} onToggleModule={toggleModule} activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} theme={theme} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => (current === "light" ? "dark" : "light"))} />}
+      {activeView !== "overview" && <Sidebar navItems={navigation.items} modules={modules} moduleBusy={moduleBusy} onToggleModule={toggleModule} activeView={activeView} connected={Boolean(overview)} mobileOpen={mobileOpen} onNavigate={setActiveView} onClose={() => setMobileOpen(false)} onPalette={() => setPaletteOpen(true)} />}
       <main className={classNames("workspace", activeView === "proxy/overview" && "overview-workspace")}>
         {activeView !== "overview" && activeView !== "proxy/overview" && <div className="mobile-only mb-3 items-center gap-2" aria-label="页面导航工具">
           <Button size="sm" variant="outline" type="button" aria-label="打开导航" aria-expanded={mobileOpen} aria-controls="app-sidebar" onClick={() => setMobileOpen(true)}><Menu size={16} aria-hidden="true" />菜单</Button>
@@ -920,7 +911,7 @@ function App() {
           <EmptyState title="正在连接 proxyd" detail="等待 /api/overview 返回运行状态。" />
         ) : (
           <div className="view-stage view-enter" key={isRemoteView(activeView) ? "remote" : activeView}>
-            {activeView === "overview" && <OverviewPage modules={modules} overview={overview} traffic={traffic} feed={dashboard} snapshotError={snapshotError} theme={theme} onNavigate={setActiveView} onRefresh={() => { load(); dashboard.reload(); }} onPalette={() => setPaletteOpen(true)} onToggleTheme={() => setTheme((current) => current === "light" ? "dark" : "light")} />}
+            {activeView === "overview" && <OverviewPage modules={modules} overview={overview} traffic={traffic} feed={dashboard} snapshotError={snapshotError} onNavigate={setActiveView} onRefresh={() => { load(); dashboard.reload(); }} onPalette={() => setPaletteOpen(true)} />}
             {activeView === "proxy/overview" && (
               <ProxyOverviewPage
                 aliveCount={aliveCount}
@@ -1170,11 +1161,9 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
  * - activeView: string，当前页面 id。
  * - connected: boolean，是否已取得后端运行状态。
  * - mobileOpen: boolean，移动端抽屉是否展开。
- * - theme: string，当前主题（dark/light）。
  * - onNavigate: Function，切换页面回调。
  * - onClose: Function，关闭移动端抽屉回调。
  * - onPalette: Function，打开全局命令菜单。
- * - onToggleTheme: Function，切换深色/明亮主题。
  *
  * 返回值说明：
  * 返回导航 React 元素。
@@ -1182,7 +1171,7 @@ function buildCommands(overview, setActiveView, runCommandAction, triggerOperati
  * 可能的异常/错误情况：
  * 无。
  */
-function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, connected, mobileOpen, theme, onNavigate, onClose, onPalette, onToggleTheme }) {
+function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, connected, mobileOpen, onNavigate, onClose, onPalette }) {
   const currentGroup = NAV_ITEMS.find((item) => item.id === activeView)?.group;
   const module = modules.find((item) => item.id === currentGroup);
   const currentItems = navItems.filter((item) => item.group === currentGroup);
@@ -1210,14 +1199,6 @@ function Sidebar({ navItems, modules, moduleBusy, onToggleModule, activeView, co
               </Button>
             </TooltipTrigger>
             <TooltipContent>命令菜单 · ⌘K</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button size="icon" variant="ghost" type="button" onClick={onToggleTheme} aria-label={theme === "light" ? "切换到深色模式" : "切换到明亮模式"}>
-                {theme === "light" ? <Moon size={16} aria-hidden="true" /> : <Sun size={16} aria-hidden="true" />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{theme === "light" ? "切换到深色模式" : "切换到明亮模式"}</TooltipContent>
           </Tooltip>
           <Button className="mobile-only nav-close" size="icon" variant="ghost" type="button" onClick={onClose} aria-label="关闭导航">
             <X size={18} aria-hidden="true" />

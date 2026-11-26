@@ -2,7 +2,7 @@
  * Badge 组件模块。
  *
  * 功能说明：
- * 提供常规 shadcn/new-york 风格徽标，适合状态、标签、计数等轻量展示场景。
+ * 提供新粗野主义标签（墨色描边、全大写），适合状态、标签、计数等轻量展示场景。
  *
  * 参数说明：
  * 无模块级入参；对外导出 `badgeVariants` 与 `Badge`。
@@ -21,22 +21,22 @@ import { cn } from "../../lib/utils";
  * `badgeVariants` 定义徽标视觉变体。
  *
  * 功能说明：
- * 维持与全局赛博朋克深色主题一致的描边霓虹基调，让徽标可以嵌入控制台型页面而不显得突兀。
+ * 对应参考设计的 .tag：实色底 + 2px 墨色描边，状态只用绿/红/薄荷三种底色区分。
  */
 export const badgeVariants = cva(
   [
-    "inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap",
-    "transition-colors duration-200",
-    "focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/25",
+    // 参考设计的 .tag：2px 墨色描边、11px 半粗、全大写、0.06em 字距，零圆角。
+    "inline-flex items-center gap-1.5 border-2 border-ink px-2.5 py-1 text-[11px] font-semibold uppercase leading-4 tracking-[0.06em] whitespace-nowrap",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink",
   ].join(" "),
   {
     variants: {
       variant: {
-        default: "border-primary/40 bg-primary/10 text-primary",
-        secondary: "border-border bg-secondary text-secondary-foreground",
-        success: "border-success/40 bg-success/10 text-success",
-        destructive: "border-destructive/50 bg-destructive/15 text-destructive",
-        outline: "border-border bg-card text-foreground",
+        default: "bg-mint text-ink",
+        secondary: "bg-secondary text-ink",
+        success: "bg-success text-white",
+        destructive: "bg-destructive text-white",
+        outline: "bg-card text-ink",
       },
     },
     defaultVariants: {
@@ -45,25 +45,6 @@ export const badgeVariants = cva(
   },
 );
 
-/**
- * `Badge` 渲染轻量徽标。
- *
- * 功能说明：
- * 采用 `span` 实现，满足绝大多数只读标签场景；如果将来需要更复杂语义，
- * 可以在不破坏样式协议的前提下继续扩展为 `asChild`。
- *
- * 参数说明：
- * - className: string | undefined，额外样式类。
- * - variant: Badge 视觉变体名称。
- * - children: ReactNode，徽标内容。
- * - props: React.HTMLAttributes<HTMLSpanElement>，其余原生属性。
- *
- * 返回值说明：
- * - ReactElement，徽标节点。
- *
- * 可能的异常/错误情况：
- * - 不主动抛错；非法原生属性由 React 自行提示。
- */
 export const Badge = forwardRef(function Badge({ className, variant, ...props }, ref) {
   return <span ref={ref} className={cn(badgeVariants({ variant }), className)} {...props} />;
 });

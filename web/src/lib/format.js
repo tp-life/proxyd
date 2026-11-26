@@ -152,6 +152,10 @@ export function sortByDelay(list, mode) {
  * 参数说明：
  * - rowCount: number，当前数据行数。
  * - maximum: number，可视区域最大高度，单位像素。
+ * - rowHeight: number，预估单行高度（默认 48px）；多行单元格的表格应传入实际行高，
+ *   否则按 48px 估算会让表格过矮、只露出少量行。
+ * - reserve: number，视口中留给页头/工具栏的高度（默认 260px）；表格位于页面下方、
+ *   需要滚动到达时可以减小，让表格接近占满一屏。
  *
  * 返回值说明：
  * 返回包含表头在内的 viewport 像素高度。
@@ -159,15 +163,15 @@ export function sortByDelay(list, mode) {
  * 可能的异常/错误情况：
  * 非法或负行数按 0 处理；maximum 非法时使用 720px；视口高度不可用时退回 maximum。
  */
-export function tableViewportHeight(rowCount, maximum = 720) {
+export function tableViewportHeight(rowCount, maximum = 720, rowHeight = 48, reserve = 260) {
   const safeCount = Number.isFinite(rowCount) && rowCount > 0 ? Math.floor(rowCount) : 0;
   const safeMaximum = Number.isFinite(maximum) && maximum >= 288 ? maximum : 720;
   const viewportCap =
     typeof window !== "undefined" && window.innerHeight
-      ? Math.max(320, window.innerHeight - 260)
+      ? Math.max(320, window.innerHeight - reserve)
       : safeMaximum;
   const cap = Math.min(safeMaximum, viewportCap);
-  return Math.min(cap, Math.max(288, (safeCount + 1) * 48));
+  return Math.min(cap, Math.max(288, (safeCount + 1) * rowHeight));
 }
 
 /**

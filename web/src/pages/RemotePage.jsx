@@ -586,7 +586,7 @@ export function RemotePage({
       </PageHeader>
 
       {error && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-2 border-ink bg-warning-soft px-4 py-3 text-sm text-ink">
           <div className="flex min-w-0 items-start gap-2">
             <CircleAlert size={16} aria-hidden="true" />
             <span className="min-w-0 break-words">{error}</span>
@@ -599,7 +599,7 @@ export function RemotePage({
       )}
 
       {relayedPeers.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning">
+        <div className="flex flex-wrap items-center gap-2 border-2 border-ink bg-warning-soft px-4 py-3 text-sm text-ink">
           <CircleAlert size={16} aria-hidden="true" />
           <span className="min-w-0 break-words">
             检测到 {relayedPeers.length} 个在线客户端正在走 DERP 中继（TCP）。远程桌面、SSH 交互和大文件传输通常明显慢于直连；

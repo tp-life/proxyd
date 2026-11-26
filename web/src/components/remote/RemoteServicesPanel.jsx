@@ -228,7 +228,7 @@ export function RemoteServicesPanel({ clearShellUser, copyText, copyToken, onOpe
               )}
               <div className="mt-4 grid gap-2 border-t pt-3">
                 <span className="text-xs font-medium text-muted-foreground">自定义目标映射（异端口 / 局域网主机 / Unix Socket）</span>
-                <form className="form-grid" onSubmit={submitServeTarget}>
+                <form className="form-grid serve-target-form" onSubmit={submitServeTarget}>
                   <Field label="隧道端口">
                     <input
                       aria-label="自定义映射隧道端口"

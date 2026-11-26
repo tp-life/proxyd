@@ -167,7 +167,6 @@ export function RulesPage({
             <div className="input-with-icon">
               <Search size={15} aria-hidden="true" />
               <Input
-                className="h-9"
                 value={query}
                 placeholder="类型、域名或策略"
                 onChange={(event) => setQuery(event.target.value)}
@@ -270,7 +269,6 @@ export function RulesPage({
                 <div className="input-with-icon">
                   <Search size={15} aria-hidden="true" />
                   <Input
-                    className="h-9"
                     placeholder="类型、域名或策略"
                     value={effective.query}
                     onChange={(event) => effective.setQuery(event.target.value)}
